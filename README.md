@@ -2,7 +2,9 @@
   <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
 </p>
 
-# DuckPD
+# DuckPD 🦆❤️🐼
+
+DuckPD is DuckDB dressed as a Pandas DataFrame. 
 
 DuckPD is an experimental lazy DataFrame library with a pandas-shaped frontend
 and DuckDB as its execution engine.
