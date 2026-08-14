@@ -39,6 +39,7 @@ from duckpd._logical import (
     TableSource,
     UnaryExpression,
     UnaryOperator,
+    UnionPlan,
 )
 from duckpd._quoting import quote_identifier
 from duckpd.errors import UnsupportedOperationError
@@ -101,6 +102,9 @@ class DuckDBCompiler:
 
         if isinstance(plan, JoinPlan):
             return self._compile_join(plan)
+
+        if isinstance(plan, UnionPlan):
+            return self._compile_union(plan)
 
         compiled_input = self.compile(plan.input)
         if isinstance(plan, FilterPlan):
@@ -594,3 +598,46 @@ class DuckDBCompiler:
             result_rel = result_rel.sort(*sort_keys)
 
         return CompiledFrame(result_rel, final_bindings)
+
+    def _compile_union(self, plan: UnionPlan) -> CompiledFrame:
+        if not plan.inputs:
+            raise ValueError("UnionPlan requires at least one input plan")
+
+        compiled_inputs = [self.compile(inp) for inp in plan.inputs]
+        target_columns = plan.metadata.columns
+
+        projected_relations: list[duckdb.DuckDBPyRelation] = []
+        for inp_plan, compiled in zip(plan.inputs, compiled_inputs, strict=True):
+            input_col_map = {col.label: col for col in inp_plan.columns}
+            projections: list[duckdb.Expression] = []
+
+            for target_col in target_columns:
+                target_temp_name = f"c_{target_col.id.value.hex[:8]}"
+                if target_col.label in input_col_map:
+                    matching_input_col = input_col_map[target_col.label]
+                    source_label = quote_identifier(
+                        compiled.bindings[matching_input_col.id]
+                    )
+                    cast_sql = f"CAST({source_label} AS {target_col.duckdb_type})"
+                    expr = duckdb.SQLExpression(cast_sql).alias(target_temp_name)
+                else:
+                    cast_null_sql = f"CAST(NULL AS {target_col.duckdb_type})"
+                    expr = duckdb.SQLExpression(cast_null_sql).alias(target_temp_name)
+                projections.append(expr)
+
+            projected_rel = compiled.relation.project(*projections)
+            projected_relations.append(projected_rel)
+
+        result_rel = projected_relations[0]
+        for next_rel in projected_relations[1:]:
+            result_rel = result_rel.union(next_rel)
+
+        # Output projection to rename temp column names back to original target labels
+        final_proj = [
+            duckdb.SQLExpression(quote_identifier(f"c_{col.id.value.hex[:8]}")).alias(
+                col.label
+            )
+            for col in target_columns
+        ]
+        final_bindings = {col.id: col.label for col in target_columns}
+        return CompiledFrame(result_rel.project(*final_proj), final_bindings)

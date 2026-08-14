@@ -388,8 +388,9 @@ Goal: support the most valuable analytical workflow with pandas semantics.
 - [x] Support `as_index=True/False`, `sort=True/False`, and `dropna=True/False`
       in `GroupBy.agg`.
 - [x] Support core aggregate functions: `sum`, `mean`, `min`, `max`, `count`, `size`.
-- [ ] Support dict and positional list aggregation forms incrementally.
-- [ ] Implement `Series.groupby()`.
+- [x] Support dict and function-name string aggregation forms in `GroupBy.agg`.
+- [x] Support `DataFrameGroupBy` convenience methods (`sum`, `mean`, `min`, `max`, `count`, `size`) and column selection `g['col']` / `g[['col1', 'col2']]`.
+- [x] Implement `Series.groupby()` returning `SeriesGroupBy` with `agg`, `sum`, `mean`, `min`, `max`, `count`, `size`, `std`, `var`, `median`.
 - [ ] Handle categorical grouping only after `observed` behavior is tested.
 - [ ] Before expanding the compiler manually, run the bounded Ibis substrate
       spike defined in the competitive landscape guide and record an ADR with
@@ -413,7 +414,7 @@ alignment.
       joins so null matches null as in pandas).
 - [x] Implement `join()` on top of the same semantic merge operation.
 - [ ] Implement `validate=` cardinality checks as explicit validation queries.
-- [ ] Implement `concat(axis=0)` with schema reconciliation and stable source
+- [x] Implement `concat(axis=0)` with schema reconciliation and stable source
       order.
 - [ ] Implement `concat(axis=1)` as index alignment, not `UNION`.
 - [ ] Implement arithmetic between frames as index alignment joins only when

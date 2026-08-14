@@ -199,6 +199,18 @@ def after_join(
     return result
 
 
+def after_union(
+    columns: tuple[Column, ...],
+    *,
+    index_ids: tuple[ColumnId, ...] = (),
+) -> FrameMetadata:
+    """Create metadata for a union (concat) plan."""
+    index = IndexSpec(index_ids, drop=True) if index_ids else IndexSpec()
+    result = FrameMetadata(columns, index, OrderSpec())
+    validate_metadata(result)
+    return result
+
+
 def validate_metadata(metadata: FrameMetadata) -> None:
     """Reject metadata that references columns absent from the schema."""
     available = {column.id for column in metadata.columns}

@@ -443,6 +443,14 @@ class JoinPlan(LogicalPlanBase):
     sort: bool = False
 
 
+@dataclass(frozen=True)
+class UnionPlan(LogicalPlanBase):
+    """Concatenate multiple logical plans row-wise."""
+
+    inputs: tuple[LogicalPlan, ...]
+    metadata: FrameMetadata
+
+
 LogicalPlan: TypeAlias = (
     ScanPlan
     | FilterPlan
@@ -451,4 +459,5 @@ LogicalPlan: TypeAlias = (
     | LimitPlan
     | AggregatePlan
     | JoinPlan
+    | UnionPlan
 )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, overload
 
 from duckpd._logical import (
     AggregateExpression,
@@ -18,10 +18,11 @@ from duckpd._logical import (
 )
 from duckpd._metadata import after_aggregate, find_column
 from duckpd._reductions import is_numeric_type
-from duckpd.errors import UnsupportedOperationError
+from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
+    from duckpd.series import Series
     from duckpd.session import Session
 
 
@@ -57,6 +58,36 @@ class DataFrameGroupBy:
         if observed:
             pass
 
+    @overload
+    def __getitem__(self, key: str) -> SeriesGroupBy: ...
+
+    @overload
+    def __getitem__(self, key: list[str] | tuple[str, ...]) -> DataFrameGroupBy: ...
+
+    def __getitem__(self, key: str | Sequence[str]) -> SeriesGroupBy | DataFrameGroupBy:
+        if isinstance(key, str):
+            series = self._frame[key]
+            return SeriesGroupBy(
+                series,
+                by=self._by,
+                as_index=self._as_index,
+                sort=self._sort,
+                dropna=self._dropna,
+            )
+        labels = tuple(key)
+        # Project frame down to group keys + selected columns
+        all_labels = list(self._by) + [
+            label for label in labels if label not in self._by
+        ]
+        projected_frame = self._frame[all_labels]
+        return DataFrameGroupBy(
+            projected_frame,
+            by=self._by,
+            as_index=self._as_index,
+            sort=self._sort,
+            dropna=self._dropna,
+        )
+
     def agg(
         self,
         func: object = None,
@@ -64,16 +95,165 @@ class DataFrameGroupBy:
         **kwargs: object,
     ) -> DataFrame:
         """Aggregate using one or more operations."""
-        if func is not None:
-            raise UnsupportedOperationError(
-                "Positional aggregation func is not yet supported; "
-                "use named aggregation kwargs"
-            )
+        if func is not None and kwargs:
+            raise ValueError("Cannot pass both func and named aggregation kwargs")
 
-        if not kwargs:
+        if kwargs:
+            return self._named_agg(**kwargs)
+
+        if func is None:
             raise ValueError("Must provide at least one aggregation function")
 
-        return self._named_agg(**kwargs)
+        if isinstance(func, str):
+            func_name = func.lower()
+            visible = self._frame._plan.metadata.visible_columns
+            key_labels = set(self._by)
+            data_cols = [col for col in visible if col.label not in key_labels]
+            named_kwargs: dict[str, tuple[str, str]] = {}
+            for col in data_cols:
+                if func_name in {
+                    "sum",
+                    "mean",
+                    "min",
+                    "max",
+                    "std",
+                    "var",
+                    "median",
+                } and not is_numeric_type(col.duckdb_type):
+                    continue
+                named_kwargs[col.label] = (col.label, func_name)
+            if not named_kwargs and func_name != "size":
+                raise UnsupportedOperationError(
+                    f"No valid columns for aggregation {func!r}"
+                )
+            return self._named_agg(**named_kwargs)
+
+        if isinstance(func, dict):
+            dict_map = cast("dict[object, object]", func)
+            named_kwargs = {}
+            for col_name_obj, agg_spec in dict_map.items():
+                if not isinstance(col_name_obj, str):
+                    raise TypeError(
+                        "Dictionary aggregation keys must be column name strings"
+                    )
+                if isinstance(agg_spec, str):
+                    named_kwargs[col_name_obj] = (col_name_obj, agg_spec)
+                else:
+                    raise UnsupportedOperationError(
+                        "Currently only single string function per column "
+                        "is supported in dict agg"
+                    )
+            return self._named_agg(**named_kwargs)
+
+        raise UnsupportedOperationError(
+            f"Unsupported agg argument type: {type(func).__name__}"
+        )
+
+    def sum(self, numeric_only: bool = False) -> DataFrame:
+        """Compute sum of column values for each group."""
+        return self._convenience_agg("sum", numeric_only=numeric_only)
+
+    def mean(self, numeric_only: bool = False) -> DataFrame:
+        """Compute mean of column values for each group."""
+        return self._convenience_agg("mean", numeric_only=numeric_only)
+
+    def min(self, numeric_only: bool = False) -> DataFrame:
+        """Compute minimum of column values for each group."""
+        return self._convenience_agg("min", numeric_only=numeric_only)
+
+    def max(self, numeric_only: bool = False) -> DataFrame:
+        """Compute maximum of column values for each group."""
+        return self._convenience_agg("max", numeric_only=numeric_only)
+
+    def count(self) -> DataFrame:
+        """Compute count of non-null values for each group."""
+        return self._convenience_agg("count", numeric_only=False)
+
+    def size(self) -> DataFrame:
+        """Compute group sizes."""
+        from duckpd.frame import DataFrame
+
+        aggregates: list[AggregateExpression] = []
+        output_columns: list[Column] = []
+
+        key_ids = tuple(col.id for col in self._key_columns)
+        for col in self._key_columns:
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                col.duckdb_type,
+                hidden=self._as_index,
+            )
+            output_columns.append(out_col)
+            aggregates.append(
+                AggregateExpression(
+                    out_col,
+                    operator=None,
+                    expression=ColumnRef(col.id),
+                    input_duckdb_type=col.duckdb_type,
+                )
+            )
+
+        size_col = Column(ColumnId.create(), "size", "BIGINT", hidden=False)
+        output_columns.append(size_col)
+        aggregates.append(
+            AggregateExpression(
+                size_col,
+                operator=AggregateOperator.SIZE,
+                expression=None,
+                input_duckdb_type=None,
+            )
+        )
+
+        index_ids = tuple(col.id for col in output_columns if col.hidden)
+        ordering_keys = (
+            tuple(
+                OrderColumn(col.id, SortDirection.ASCENDING, NullPlacement.LAST)
+                for col in output_columns[: len(self._key_columns)]
+            )
+            if self._sort
+            else ()
+        )
+
+        metadata = after_aggregate(
+            tuple(output_columns),
+            index_ids=index_ids,
+            ordering_keys=ordering_keys,
+        )
+
+        plan = AggregatePlan(
+            self._frame._plan,
+            tuple(aggregates),
+            metadata,
+            keys=key_ids,
+            dropna=self._dropna,
+            sort=self._sort,
+        )
+        return DataFrame(self._session, plan)
+
+    def _convenience_agg(self, func_name: str, *, numeric_only: bool) -> DataFrame:
+        visible = self._frame._plan.metadata.visible_columns
+        key_labels = set(self._by)
+        data_cols = [col for col in visible if col.label not in key_labels]
+        named_kwargs: dict[str, tuple[str, str]] = {}
+        for col in data_cols:
+            if numeric_only and not is_numeric_type(col.duckdb_type):
+                continue
+            if func_name in {"sum", "mean", "min", "max"} and not is_numeric_type(
+                col.duckdb_type
+            ):
+                if numeric_only:
+                    continue
+                if func_name in {"min", "max"}:
+                    pass
+                else:
+                    continue
+            named_kwargs[col.label] = (col.label, func_name)
+        if not named_kwargs:
+            raise UnsupportedOperationError(
+                f"No numeric columns available for {func_name}"
+            )
+        return self._named_agg(**named_kwargs)
 
     def _named_agg(
         self,
@@ -145,13 +325,25 @@ class DataFrameGroupBy:
                     target_expr = ColumnRef(target_col.id)
                     input_type = target_col.duckdb_type
                     out_type = "BIGINT"
-                elif func_lower in {"sum", "mean", "min", "max"}:
-                    op = {
+                elif func_lower in {
+                    "sum",
+                    "mean",
+                    "min",
+                    "max",
+                    "std",
+                    "var",
+                    "median",
+                }:
+                    op_map = {
                         "sum": AggregateOperator.SUM,
                         "mean": AggregateOperator.MEAN,
                         "min": AggregateOperator.MIN,
                         "max": AggregateOperator.MAX,
-                    }[func_lower]
+                        "std": AggregateOperator.STD,
+                        "var": AggregateOperator.VAR,
+                        "median": AggregateOperator.MEDIAN,
+                    }
+                    op = op_map[func_lower]
                     if not is_numeric_type(target_col.duckdb_type):
                         raise UnsupportedOperationError(
                             f"{func_lower} requires numeric or boolean column; "
@@ -160,7 +352,9 @@ class DataFrameGroupBy:
                     target_expr = ColumnRef(target_col.id)
                     input_type = target_col.duckdb_type
                     out_type = (
-                        "DOUBLE" if func_lower == "mean" else target_col.duckdb_type
+                        "DOUBLE"
+                        if func_lower in {"mean", "std", "var", "median"}
+                        else target_col.duckdb_type
                     )
                 else:
                     raise UnsupportedOperationError(
@@ -204,3 +398,151 @@ class DataFrameGroupBy:
             sort=self._sort,
         )
         return DataFrame(self._session, plan)
+
+
+class SeriesGroupBy:
+    """A lazy GroupBy wrapper over a single Series."""
+
+    def __init__(
+        self,
+        series: Series,
+        by: object,
+        *,
+        as_index: bool = True,
+        sort: bool = True,
+        dropna: bool = True,
+        observed: bool = False,
+    ) -> None:
+        from duckpd.frame import DataFrame
+        from duckpd.series import Series
+
+        self._series = series
+        self._session: Session = series._session
+        self._as_index = as_index
+        self._sort = sort
+        self._dropna = dropna
+        if observed:
+            pass
+
+        # If by is string or sequence of strings, series must have that column
+        # in its underlying plan
+        if isinstance(by, str):
+            by_labels = (by,)
+            self._frame = DataFrame(series._session, series._plan)
+            self._df_groupby = DataFrameGroupBy(
+                self._frame,
+                by=by_labels,
+                as_index=as_index,
+                sort=sort,
+                dropna=dropna,
+            )
+        elif isinstance(by, Series):
+            if by._session is not series._session or by._plan is not series._plan:
+                raise AlignmentError(
+                    "Grouping Series from a different frame "
+                    "requires explicit index alignment"
+                )
+            by_name = by.name if by.name is not None else "__duckpd_grp__"
+            self._frame = DataFrame(series._session, series._plan)
+            if by.name is None:
+                self._frame = self._frame.assign(__duckpd_grp__=by)
+            self._df_groupby = DataFrameGroupBy(
+                self._frame,
+                by=(by_name,),
+                as_index=as_index,
+                sort=sort,
+                dropna=dropna,
+            )
+        elif isinstance(by, Sequence):
+            by_seq = tuple(cast("Sequence[object]", by))
+            if not by_seq:
+                raise ValueError("No group keys were provided")
+            if all(isinstance(item, str) for item in by_seq):
+                str_labels = cast("tuple[str, ...]", by_seq)
+                self._frame = DataFrame(series._session, series._plan)
+                self._df_groupby = DataFrameGroupBy(
+                    self._frame,
+                    by=str_labels,
+                    as_index=as_index,
+                    sort=sort,
+                    dropna=dropna,
+                )
+            elif all(isinstance(item, Series) for item in by_seq):
+                ser_seq = cast("tuple[Series, ...]", by_seq)
+                for s in ser_seq:
+                    if s._session is not series._session or s._plan is not series._plan:
+                        raise AlignmentError(
+                            "Grouping Series from a different frame "
+                            "requires explicit index alignment"
+                        )
+                ser_names: list[str] = []
+                self._frame = DataFrame(series._session, series._plan)
+                for i, s in enumerate(ser_seq):
+                    name = s.name if s.name is not None else f"__duckpd_grp_{i}__"
+                    if s.name is None:
+                        self._frame = self._frame.assign(**{name: s})
+                    ser_names.append(name)
+                self._df_groupby = DataFrameGroupBy(
+                    self._frame,
+                    by=ser_names,
+                    as_index=as_index,
+                    sort=sort,
+                    dropna=dropna,
+                )
+            else:
+                raise TypeError("Group keys must be all strings or all Series")
+        else:
+            raise TypeError(
+                "by must be a string, Series, or sequence of strings/Series"
+            )
+
+    def agg(self, func: object) -> DataFrame:
+        """Aggregate the grouped Series using the specified function."""
+        if not isinstance(func, str):
+            raise UnsupportedOperationError(
+                "SeriesGroupBy.agg currently supports a function name string"
+            )
+        target_name = (
+            self._series.name if self._series.name is not None else "__duckpd_val__"
+        )
+        if self._series.name is None:
+            self._df_groupby._frame = self._df_groupby._frame.assign(
+                __duckpd_val__=self._series
+            )
+        return self._df_groupby._named_agg(**{target_name: (target_name, func)})
+
+    def sum(self) -> DataFrame:
+        """Compute sum of values for each group."""
+        return self.agg("sum")
+
+    def mean(self) -> DataFrame:
+        """Compute mean of values for each group."""
+        return self.agg("mean")
+
+    def min(self) -> DataFrame:
+        """Compute minimum of values for each group."""
+        return self.agg("min")
+
+    def max(self) -> DataFrame:
+        """Compute maximum of values for each group."""
+        return self.agg("max")
+
+    def count(self) -> DataFrame:
+        """Compute count of non-null values for each group."""
+        return self.agg("count")
+
+    def size(self) -> DataFrame:
+        """Compute group sizes."""
+        return self._df_groupby.size()
+
+    def std(self) -> DataFrame:
+        """Compute sample standard deviation for each group."""
+        return self.agg("std")
+
+    def var(self) -> DataFrame:
+        """Compute sample variance for each group."""
+        return self.agg("var")
+
+    def median(self) -> DataFrame:
+        """Compute median for each group."""
+        return self.agg("median")

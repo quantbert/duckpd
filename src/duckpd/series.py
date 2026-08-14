@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
@@ -44,6 +45,7 @@ from duckpd.errors import AlignmentError, UnsupportedOperationError
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
     from duckpd.accessors import DatetimeProperties, StringMethods
+    from duckpd.groupby import SeriesGroupBy
     from duckpd.session import Session
 
 
@@ -572,6 +574,27 @@ class Series:
             result._plan,
             ColumnRef(self._find_column_id(col_label)),
             self.name,
+        )
+
+    def groupby(
+        self,
+        by: str | Sequence[str] | Series | Sequence[Series],
+        *,
+        as_index: bool = True,
+        sort: bool = True,
+        dropna: bool = True,
+        observed: bool = False,
+    ) -> SeriesGroupBy:
+        """Group Series using a mapper or by a Series/column of groups."""
+        from duckpd.groupby import SeriesGroupBy
+
+        return SeriesGroupBy(
+            self,
+            by=by,
+            as_index=as_index,
+            sort=sort,
+            dropna=dropna,
+            observed=observed,
         )
 
     def _binary(self, other: object, operator: BinaryOperator) -> Series:

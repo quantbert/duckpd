@@ -6,6 +6,15 @@ All notable changes to DuckPD will be documented in this file.
 
 ### Added
 
+- Extended `DataFrameGroupBy` supporting dictionary aggregations (`agg({"a": "sum", "b": "mean"})`),
+  string function aggregations (`agg("sum")`), convenience methods (`sum`, `mean`, `min`, `max`,
+  `count`, `size`), and column selection indexing (`g["col"]`, `g[["col1", "col2"]]`).
+- `Series.groupby` returning lazy `SeriesGroupBy` supporting `by` as column name string,
+  Series, or sequences, with `agg`, `sum`, `mean`, `min`, `max`, `count`, `size`,
+  `std`, `var`, and `median` aggregations.
+- `duckpd.concat` for lazy row-wise concatenation (`axis=0`) of multiple
+  `DataFrame` and `Series` objects with schema reconciliation, type promotion,
+  null padding for disjoint columns, and explicit index preservation.
 - `DataFrame.std`, `DataFrame.var`, `DataFrame.median`, `DataFrame.quantile`,
   `DataFrame.any`, `DataFrame.all`, and their `Series` counterparts for eager
   reductions matching pandas 3.0 semantics with `ddof`, `skipna`, `bool_only`,
