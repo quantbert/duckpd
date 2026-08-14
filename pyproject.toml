@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "duckpd"
+version = "0.0.1.dev0"
+description = "A lazy pandas-shaped DataFrame powered by DuckDB"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "QuantBert" },
+]
+dependencies = [
+    "duckdb>=1.5,<1.6",
+    "pandas>=3.0,<3.1",
+    "pyarrow>=18",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "pandas-stubs>=3.0",
+    "pre-commit>=4.0",
+    "pyarrow-stubs>=20.0.0.20260625",
+    "pyright>=1.1.400",
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
+    "ruff>=0.12",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/duckpd"]
+
+[tool.pyright]
+include = ["demo", "src", "tests"]
+pythonVersion = "3.11"
+reportPrivateUsage = false
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--cov=duckpd",
+    "--cov-report=term-missing",
+]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["duckpd"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
