@@ -6,6 +6,10 @@ All notable changes to DuckPD will be documented in this file.
 
 ### Added
 
+- `DataFrame.std`, `DataFrame.var`, `DataFrame.median`, `DataFrame.quantile`,
+  `DataFrame.any`, `DataFrame.all`, and their `Series` counterparts for eager
+  reductions matching pandas 3.0 semantics with `ddof`, `skipna`, `bool_only`,
+  and `numeric_only` support.
 - `DataFrame.nunique` and `Series.nunique` return the count of distinct non-null
   values per column using DuckDB `COUNT(DISTINCT ...)`.
 - `Series.unique` returns distinct non-null values as a pandas Series via a

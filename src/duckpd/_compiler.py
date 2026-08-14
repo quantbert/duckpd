@@ -329,6 +329,104 @@ class DuckDBCompiler:
         if aggregate.operator is AggregateOperator.ANY_VALUE:
             return duckdb.FunctionExpression("any_value", operand)
 
+        if aggregate.operator in {AggregateOperator.ANY, AggregateOperator.ALL}:
+            bool_op = (
+                operand
+                if aggregate.input_duckdb_type == "BOOLEAN"
+                else operand.cast("BOOLEAN")
+            )
+            func_name = (
+                "bool_or" if aggregate.operator is AggregateOperator.ANY else "bool_and"
+            )
+            raw_val = duckdb.FunctionExpression(func_name, bool_op)
+            default_val = aggregate.operator is AggregateOperator.ALL
+            # When skipna is True, all-null gives False for any, True for all.
+            # When skipna is False, any gives False if all null, all gives False
+            # if null present.
+            if aggregate.operator is AggregateOperator.ALL and not aggregate.skipna:
+                row_count = duckdb.SQLExpression("count(*)")
+                value = duckdb.CaseExpression(
+                    non_null_count < row_count,
+                    duckdb.ConstantExpression(False),
+                ).otherwise(
+                    duckdb.CaseExpression(
+                        raw_val.isnull(),
+                        duckdb.ConstantExpression(default_val),
+                    ).otherwise(raw_val)
+                )
+            else:
+                value = duckdb.CaseExpression(
+                    raw_val.isnull(),
+                    duckdb.ConstantExpression(default_val),
+                ).otherwise(raw_val)
+            return value
+
+        if aggregate.operator in {AggregateOperator.STD, AggregateOperator.VAR}:
+            if aggregate.ddof not in {0, 1}:
+                raise UnsupportedOperationError(
+                    f"ddof={aggregate.ddof} is not supported; must be 0 or 1"
+                )
+            if aggregate.ddof == 0:
+                func_name = (
+                    "stddev_pop"
+                    if aggregate.operator is AggregateOperator.STD
+                    else "var_pop"
+                )
+            else:
+                func_name = (
+                    "stddev_samp"
+                    if aggregate.operator is AggregateOperator.STD
+                    else "var_samp"
+                )
+            agg_operand = operand
+            if aggregate.input_duckdb_type == "BOOLEAN":
+                agg_operand = operand.cast("DOUBLE")
+            value = duckdb.FunctionExpression(func_name, agg_operand).cast("DOUBLE")
+            # If ddof == 1 and non_null_count <= 1, result is NaN (DuckDB returns NULL)
+            # If ddof == 0 and non_null_count == 0, result is NaN
+            invalid = (
+                non_null_count <= duckdb.ConstantExpression(1)
+                if aggregate.ddof == 1
+                else non_null_count == duckdb.ConstantExpression(0)
+            )
+            if not aggregate.skipna:
+                row_count = duckdb.SQLExpression("count(*)")
+                invalid = invalid | (non_null_count < row_count)
+            return duckdb.CaseExpression(
+                invalid,
+                duckdb.ConstantExpression(None),
+            ).otherwise(value)
+
+        if aggregate.operator is AggregateOperator.MEDIAN:
+            agg_operand = operand
+            if aggregate.input_duckdb_type == "BOOLEAN":
+                agg_operand = operand.cast("DOUBLE")
+            value = duckdb.FunctionExpression("median", agg_operand).cast("DOUBLE")
+            invalid = non_null_count == duckdb.ConstantExpression(0)
+            if not aggregate.skipna:
+                row_count = duckdb.SQLExpression("count(*)")
+                invalid = invalid | (non_null_count < row_count)
+            return duckdb.CaseExpression(
+                invalid,
+                duckdb.ConstantExpression(None),
+            ).otherwise(value)
+
+        if aggregate.operator is AggregateOperator.QUANTILE:
+            agg_operand = operand
+            if aggregate.input_duckdb_type == "BOOLEAN":
+                agg_operand = operand.cast("DOUBLE")
+            value = duckdb.FunctionExpression(
+                "quantile_cont", agg_operand, duckdb.ConstantExpression(aggregate.q)
+            ).cast("DOUBLE")
+            invalid = non_null_count == duckdb.ConstantExpression(0)
+            if not aggregate.skipna:
+                row_count = duckdb.SQLExpression("count(*)")
+                invalid = invalid | (non_null_count < row_count)
+            return duckdb.CaseExpression(
+                invalid,
+                duckdb.ConstantExpression(None),
+            ).otherwise(value)
+
         function = {
             AggregateOperator.SUM: "sum",
             AggregateOperator.MEAN: "avg",

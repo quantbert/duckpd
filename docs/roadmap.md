@@ -352,16 +352,16 @@ Goal: cover common analytical transformations that do not require alignment.
 - [x] `dropna` for Series (axis=0) and DataFrame with `how='any'/'all'`, `subset`, and `thresh`.
 - [x] `where` and `mask` for Series and DataFrame with `cond` and `other` expressions.
 - [ ] Scalar and Series arithmetic, comparisons, boolean operations, and casts.
-- [ ] Reductions: `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
+- [x] Reductions: `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
       `median`, `quantile`, `any`, and `all`.
-- [x] Implement the initial eager `count`, `size`, `sum`, `mean`, `min`, and
-      `max` subset for Series and column-wise DataFrame reductions over numeric
-      and boolean data, using one global aggregate query per call.
-- [x] Match pandas 3.0 for the initial subset's `skipna`, `min_count`, empty,
+- [x] Implement eager `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
+      `median`, `quantile`, `any`, and `all` reductions for Series and
+      column-wise DataFrame over numeric and boolean data.
+- [x] Match pandas 3.0 for `skipna`, `min_count`, `ddof`, `bool_only`, empty,
       all-null, boolean, numeric, and hidden-index cases.
 - [x] Propagate basic numeric expression types through `assign()` so assigned
       arithmetic columns can be reduced without collecting.
-- [ ] Implement pandas-specific reduction semantics, including `skipna`,
+- [x] Implement pandas-specific reduction semantics, including `skipna`,
       `min_count`, `ddof`, empty inputs, and all-null inputs.
 - [ ] `drop_duplicates` with `keep="first"`, `keep="last"`, and `keep=False`
       using explicit ordering and window rewrites.

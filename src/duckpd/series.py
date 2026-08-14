@@ -31,9 +31,12 @@ from duckpd._metadata import after_aggregate, after_sort
 from duckpd._reductions import (
     aggregate_plan,
     expression_type,
+    is_numeric_type,
     materialized_int,
     validate_axis,
+    validate_ddof,
     validate_min_count,
+    validate_quantile,
 )
 from duckpd._typing import is_scalar_value, normalize_dtype
 from duckpd.errors import AlignmentError, UnsupportedOperationError
@@ -325,6 +328,92 @@ class Series:
         self._validate_numeric_only(numeric_only)
         return self._reduce(AggregateOperator.MAX, skipna=skipna)
 
+    def std(
+        self,
+        *,
+        axis: int | str | None = None,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+    ) -> object:
+        """Return the sample standard deviation."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        validate_ddof(ddof)
+        return self._reduce(AggregateOperator.STD, skipna=skipna, ddof=ddof)
+
+    def var(
+        self,
+        *,
+        axis: int | str | None = None,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+    ) -> object:
+        """Return the sample variance."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        validate_ddof(ddof)
+        return self._reduce(AggregateOperator.VAR, skipna=skipna, ddof=ddof)
+
+    def median(
+        self,
+        *,
+        axis: int | str | None = None,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> object:
+        """Return the median value."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        return self._reduce(AggregateOperator.MEDIAN, skipna=skipna)
+
+    def quantile(
+        self,
+        q: float = 0.5,
+        *,
+        interpolation: str = "linear",
+    ) -> object:
+        """Return the quantile value."""
+        if interpolation != "linear":
+            raise UnsupportedOperationError(
+                "DuckPD quantile currently supports only interpolation='linear'"
+            )
+        q_val = validate_quantile(q)
+        return self._reduce(AggregateOperator.QUANTILE, q=q_val)
+
+    def any(
+        self,
+        *,
+        axis: int | str | None = 0,
+        bool_only: bool = False,
+        skipna: bool = True,
+    ) -> bool:
+        """Return True if any element is True."""
+        validate_axis(axis, series=True)
+        if bool_only and not is_numeric_type(
+            expression_type(self._plan, self._expression)
+        ):
+            return False
+        res = self._reduce(AggregateOperator.ANY, skipna=skipna)
+        return bool(res)
+
+    def all(
+        self,
+        *,
+        axis: int | str | None = 0,
+        bool_only: bool = False,
+        skipna: bool = True,
+    ) -> bool:
+        """Return True if all elements are True."""
+        validate_axis(axis, series=True)
+        if bool_only and not is_numeric_type(
+            expression_type(self._plan, self._expression)
+        ):
+            return True
+        res = self._reduce(AggregateOperator.ALL, skipna=skipna)
+        return bool(res)
+
     def nunique(self) -> int:
         """Return the number of unique non-null values."""
         return materialized_int(self._reduce(AggregateOperator.NUNIQUE))
@@ -553,6 +642,8 @@ class Series:
         *,
         skipna: bool = True,
         min_count: int = 0,
+        ddof: int = 1,
+        q: float = 0.5,
     ) -> object:
         input_type = expression_type(self._plan, self._expression)
         plan = aggregate_plan(
@@ -561,6 +652,8 @@ class Series:
             operator,
             skipna=skipna,
             min_count=min_count,
+            ddof=ddof,
+            q=q,
         )
         return self._session._executor.reduce_scalar(plan)
 

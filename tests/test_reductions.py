@@ -32,7 +32,9 @@ def numeric_source() -> pd.DataFrame:
     )
 
 
-@pytest.mark.parametrize("operation", ["count", "sum", "mean", "min", "max"])
+@pytest.mark.parametrize(
+    "operation", ["count", "sum", "mean", "min", "max", "std", "var", "median"]
+)
 @pytest.mark.parametrize("skipna", [True, False])
 def test_dataframe_reductions_match_pandas(
     numeric_source: pd.DataFrame,
@@ -54,7 +56,9 @@ def test_dataframe_reductions_match_pandas(
 
 
 @pytest.mark.parametrize("dtype", ["int64", "float64", "bool"])
-@pytest.mark.parametrize("operation", ["count", "sum", "mean", "min", "max"])
+@pytest.mark.parametrize(
+    "operation", ["count", "sum", "mean", "min", "max", "std", "var", "median"]
+)
 def test_empty_dataframe_reductions_match_pandas(
     dtype: str,
     operation: str,
@@ -84,7 +88,9 @@ def test_dataframe_sum_min_count_matches_pandas() -> None:
         )
 
 
-@pytest.mark.parametrize("operation", ["sum", "mean", "min", "max"])
+@pytest.mark.parametrize(
+    "operation", ["sum", "mean", "min", "max", "std", "var", "median"]
+)
 @pytest.mark.parametrize("skipna", [True, False])
 def test_series_reductions_match_pandas(
     numeric_source: pd.DataFrame,
@@ -197,6 +203,83 @@ INVALID_REDUCTIONS: list[tuple[InvalidReduction, type[Exception], str]] = [
     (mean_string_series, UnsupportedOperationError, "numeric and boolean"),
     (sum_series_numeric_only, UnsupportedOperationError, "numeric_only=True"),
 ]
+
+
+def test_reductions_std_var_ddof() -> None:
+    source = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
+    session = duckpd.connect()
+    frame = session.from_pandas(source)
+
+    assert frame["a"].std(ddof=0) == source["a"].std(ddof=0)
+    assert frame["a"].var(ddof=0) == source["a"].var(ddof=0)
+    assert_series_equal(frame.std(ddof=0), source.std(ddof=0))
+    assert_series_equal(frame.var(ddof=0), source.var(ddof=0))
+
+
+def test_reductions_quantile() -> None:
+    source = pd.DataFrame(
+        {"a": [10.0, 20.0, 30.0, 40.0, 50.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    )
+    session = duckpd.connect()
+    frame = session.from_pandas(source)
+
+    for q in (0.0, 0.25, 0.5, 0.75, 1.0):
+        res_s = frame["a"].quantile(q)
+        exp_s = source["a"].quantile(q)
+        assert res_s == exp_s
+
+        res_df = frame.quantile(q)
+        exp_df = source.quantile(q)
+        assert_series_equal(res_df, exp_df)
+
+
+def test_reductions_any_all() -> None:
+    source = pd.DataFrame(
+        {
+            "all_true": [True, True, True],
+            "mixed": [True, False, True],
+            "all_false": [False, False, False],
+            "with_null": [True, None, False],
+        }
+    )
+    session = duckpd.connect()
+    frame = session.from_pandas(source)
+
+    for col in source.columns:
+        assert frame[col].any() == source[col].any()
+        assert frame[col].all() == source[col].all()
+
+    assert_series_equal(frame.any(), source.any())
+    assert_series_equal(frame.all(), source.all())
+
+
+def test_reductions_bool_only_and_invalid_args() -> None:
+    source = pd.DataFrame(
+        {
+            "b": [True, False, True],
+            "n": [1, 2, 3],
+            "s": ["a", "b", "c"],
+        }
+    )
+    frame = duckpd.from_pandas(source)
+
+    assert_series_equal(frame.any(bool_only=True), source.any(bool_only=True))
+    assert_series_equal(frame.all(bool_only=True), source.all(bool_only=True))
+    assert frame["b"].any(bool_only=True) == source["b"].any(bool_only=True)
+    assert frame["b"].all(bool_only=True) == source["b"].all(bool_only=True)
+    assert not frame["s"].any(bool_only=True)
+    assert frame["s"].all(bool_only=True)
+
+    with pytest.raises(UnsupportedOperationError, match="ddof"):
+        frame["n"].std(ddof=2)
+    with pytest.raises(TypeError, match="ddof"):
+        frame["n"].std(ddof="bad")  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedOperationError, match="interpolation"):
+        frame["n"].quantile(0.5, interpolation="nearest")
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        frame["n"].quantile(1.5)
+    with pytest.raises(UnsupportedOperationError, match="scalar"):
+        frame["n"].quantile([0.25, 0.75])  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

@@ -108,6 +108,12 @@ class AggregateOperator(Enum):
     MAX = "max"
     NUNIQUE = "nunique"
     ANY_VALUE = "any_value"
+    STD = "std"
+    VAR = "var"
+    MEDIAN = "median"
+    QUANTILE = "quantile"
+    ANY = "any"
+    ALL = "all"
 
 
 @dataclass(frozen=True)
@@ -195,6 +201,8 @@ class AggregateExpression:
     input_duckdb_type: str | None = None
     skipna: bool = True
     min_count: int = 0
+    ddof: int = 1
+    q: float = 0.5
 
 
 class SortDirection(Enum):

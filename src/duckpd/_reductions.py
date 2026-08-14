@@ -115,6 +115,27 @@ def materialized_int(value: object) -> int:
     return int(value)
 
 
+def validate_ddof(ddof: object) -> int:
+    """Validate degrees of freedom for variance and standard deviation."""
+    if not isinstance(ddof, int):
+        raise TypeError("ddof must be an integer")
+    if ddof not in {0, 1}:
+        raise UnsupportedOperationError("DuckPD currently supports ddof=0 or ddof=1")
+    return ddof
+
+
+def validate_quantile(q: object) -> float:
+    """Validate quantile parameter q."""
+    if isinstance(q, (int, float)):
+        val = float(q)
+        if 0.0 <= val <= 1.0:
+            return val
+        raise ValueError("quantile must be between 0 and 1")
+    raise UnsupportedOperationError(
+        "DuckPD currently supports only scalar float/int quantiles"
+    )
+
+
 def aggregate_plan(
     input_plan: LogicalPlan,
     requests: tuple[tuple[str, Expression | None, str | None], ...],
@@ -122,6 +143,8 @@ def aggregate_plan(
     *,
     skipna: bool = True,
     min_count: int = 0,
+    ddof: int = 1,
+    q: float = 0.5,
 ) -> AggregatePlan:
     """Build one global aggregate plan with outputs in request order."""
     aggregates: list[AggregateExpression] = []
@@ -130,21 +153,32 @@ def aggregate_plan(
             AggregateOperator.COUNT,
             AggregateOperator.SIZE,
             AggregateOperator.NUNIQUE,
+            AggregateOperator.ANY,
+            AggregateOperator.ALL,
         } and (input_type is None or not is_numeric_type(input_type)):
             raise UnsupportedOperationError(
                 f"{operator.value} currently supports only numeric and boolean data; "
                 f"column {label!r} has DuckDB type {input_type}"
             )
-        output_type = (
-            "BIGINT"
-            if operator
-            in {
-                AggregateOperator.COUNT,
-                AggregateOperator.SIZE,
-                AggregateOperator.NUNIQUE,
-            }
-            else "UNKNOWN"
-        )
+        if operator in {
+            AggregateOperator.COUNT,
+            AggregateOperator.SIZE,
+            AggregateOperator.NUNIQUE,
+        }:
+            output_type = "BIGINT"
+        elif operator in {AggregateOperator.ANY, AggregateOperator.ALL}:
+            output_type = "BOOLEAN"
+        elif operator in {
+            AggregateOperator.STD,
+            AggregateOperator.VAR,
+            AggregateOperator.MEDIAN,
+            AggregateOperator.QUANTILE,
+            AggregateOperator.MEAN,
+        }:
+            output_type = "DOUBLE"
+        else:
+            output_type = "UNKNOWN"
+
         output = Column(ColumnId.create(), label, output_type)
         aggregates.append(
             AggregateExpression(
@@ -154,6 +188,8 @@ def aggregate_plan(
                 input_type,
                 skipna,
                 min_count,
+                ddof=ddof,
+                q=q,
             )
         )
     columns = tuple(aggregate.column for aggregate in aggregates)

@@ -48,7 +48,9 @@ from duckpd._reductions import (
     is_numeric_type,
     materialized_int,
     validate_axis,
+    validate_ddof,
     validate_min_count,
+    validate_quantile,
 )
 from duckpd._typing import ParquetCompression, is_scalar_value, normalize_dtype
 from duckpd.errors import AlignmentError, UnsupportedOperationError
@@ -237,6 +239,140 @@ class DataFrame:
         )
         return self._reduce_columns(
             AggregateOperator.MAX,
+            columns,
+            skipna=skipna,
+        )
+
+    def std(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return column-wise sample standard deviation."""
+        validate_axis(axis, series=False)
+        validate_ddof(ddof)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.STD,
+            columns,
+            skipna=skipna,
+            ddof=ddof,
+        )
+
+    def var(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return column-wise sample variance."""
+        validate_axis(axis, series=False)
+        validate_ddof(ddof)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.VAR,
+            columns,
+            skipna=skipna,
+            ddof=ddof,
+        )
+
+    def median(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return column-wise median values."""
+        validate_axis(axis, series=False)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.MEDIAN,
+            columns,
+            skipna=skipna,
+        )
+
+    def quantile(
+        self,
+        q: float = 0.5,
+        *,
+        axis: int | str | None = 0,
+        numeric_only: bool = False,
+        interpolation: str = "linear",
+    ) -> pd.Series:
+        """Return column-wise quantiles."""
+        validate_axis(axis, series=False)
+        if interpolation != "linear":
+            raise UnsupportedOperationError(
+                "DuckPD quantile currently supports only interpolation='linear'"
+            )
+        q_val = validate_quantile(q)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        res = self._reduce_columns(
+            AggregateOperator.QUANTILE,
+            columns,
+            q=q_val,
+        )
+        res.name = q
+        return res
+
+    def any(
+        self,
+        *,
+        axis: int | str | None = 0,
+        bool_only: bool = False,
+        skipna: bool = True,
+    ) -> pd.Series:
+        """Return True if any element in each column is True."""
+        validate_axis(axis, series=False)
+        visible = self._plan.metadata.visible_columns
+        if bool_only:
+            columns = tuple(col for col in visible if col.duckdb_type == "BOOLEAN")
+            if not columns:
+                raise UnsupportedOperationError("No boolean columns found")
+        else:
+            columns = visible
+        return self._reduce_columns(
+            AggregateOperator.ANY,
+            columns,
+            skipna=skipna,
+        )
+
+    def all(
+        self,
+        *,
+        axis: int | str | None = 0,
+        bool_only: bool = False,
+        skipna: bool = True,
+    ) -> pd.Series:
+        """Return True if all elements in each column are True."""
+        validate_axis(axis, series=False)
+        visible = self._plan.metadata.visible_columns
+        if bool_only:
+            columns = tuple(col for col in visible if col.duckdb_type == "BOOLEAN")
+            if not columns:
+                raise UnsupportedOperationError("No boolean columns found")
+        else:
+            columns = visible
+        return self._reduce_columns(
+            AggregateOperator.ALL,
             columns,
             skipna=skipna,
         )
@@ -1241,6 +1377,8 @@ class DataFrame:
         *,
         skipna: bool = True,
         min_count: int = 0,
+        ddof: int = 1,
+        q: float = 0.5,
     ) -> pd.Series:
         requests = tuple(
             (column.label, ColumnRef(column.id), column.duckdb_type)
@@ -1252,5 +1390,7 @@ class DataFrame:
             operator,
             skipna=skipna,
             min_count=min_count,
+            ddof=ddof,
+            q=q,
         )
         return self._session._executor.reduce_columns(plan)
