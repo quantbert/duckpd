@@ -197,7 +197,7 @@ wheels = [
 
 [[package]]
 name = "duckpd"
-version = "0.0.1.dev0"
+version = "0.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
