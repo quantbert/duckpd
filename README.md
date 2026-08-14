@@ -1,8 +1,8 @@
-# duckpd
-
 <p align="center">
   <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
 </p>
+
+# DuckPD
 
 DuckPD is an experimental lazy DataFrame library with a pandas-shaped frontend
 and DuckDB as its execution engine.
@@ -39,8 +39,21 @@ silently falling back to materializing a complete pandas DataFrame. See the
 	`index=`/`order_by=` declarations.
 - Explicit pandas collection, bounded `head`, Arrow tables and record batches,
   physical plan inspection (`explain`), and direct zero-copy Parquet writes.
-- Session-level memory, spill-directory, temporary-size, and thread settings.
-- Rejection of ambiguous cross-frame alignment and mutating SQL.
+## Supported pandas API Coverage
+
+DuckPD maps pandas semantics directly to DuckDB's vectorized analytical engine:
+
+| API Category | Supported Methods & Operations | Execution Model |
+| :--- | :--- | :--- |
+| **I/O & Data Loading** | `read_parquet()`, `read_sql()`, `from_pandas()`, `from_arrow()`, `sql()`, `connect()` | **Lazy** (scans metadata / registers source) |
+| **Transformations & Projections** | `df[cols]`, `df[bool_filter]`, `assign()`, `sort_values()`, `limit()`, `drop_duplicates()`, `set_index()`, `reset_index()` | **Lazy** (appends to logical query graph) |
+| **Joins & Merges** | `merge()` (`inner`, `left`, `right`, `outer`, `cross`, custom suffixes) | **Lazy** (relational hash join) |
+| **Concatenation** | `duckpd.concat()` (multi-frame row union, schema alignment, null padding) | **Lazy** (union with projection padding) |
+| **String Accessor (`.str`)** | `upper()`, `lower()`, `strip()`, `len()`, `startswith()`, `endswith()`, `contains()`, `replace()` | **Lazy** (DuckDB SQL functions) |
+| **Datetime Accessor (`.dt`)** | `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime()`, `to_period()` | **Lazy** (DuckDB timestamp extractors) |
+| **GroupBy Aggregations** | `groupby().agg()`, `.sum()`, `.mean()`, `.min()`, `.max()`, `.std()`, `.var()`, `.count()` (`as_index=True/False`) | **Lazy** for `.agg()`, **Eager** for reductions |
+| **Statistical Reductions** | `sum()`, `mean()`, `min()`, `max()`, `count()`, `size`, `std()`, `var()`, `median()`, `quantile()`, `any()`, `all()` | **Eager** (single aggregate SQL pushdown) |
+| **Collection & Output** | `collect()`, `head(n)`, `explain()`, `write_parquet()`, `to_arrow_table()`, `to_arrow_batches()` | **Explicit Execution Boundary** |
 
 ## Example
 
