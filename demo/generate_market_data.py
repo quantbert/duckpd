@@ -174,9 +174,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Arguments:
     parser.add_argument(
         "sizes",
         nargs="*",
-        choices=tuple(TARGET_SIZES),
         default=None,
-        help="Size presets to generate; defaults to a 5 MB smoke file",
+        metavar="SIZE",
+        help=(
+            "Size presets to generate "
+            f"({', '.join(TARGET_SIZES)}); defaults to a 5 MB smoke file"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -202,6 +205,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Arguments:
     )
     namespace = parser.parse_args(argv)
     parsed_sizes = cast("list[str] | None", namespace.sizes)
+    invalid = [size for size in parsed_sizes or () if size not in TARGET_SIZES]
+    if invalid:
+        valid = ", ".join(TARGET_SIZES)
+        parser.error(
+            f"argument sizes: invalid choice: {invalid[0]!r} (choose from {valid})"
+        )
     sizes = tuple(parsed_sizes) if parsed_sizes else ("smoke",)
     calibration_rows = cast("int", namespace.calibration_rows)
     if calibration_rows <= 0:
