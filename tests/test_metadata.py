@@ -60,10 +60,7 @@ def test_index_and_order_survive_projection_filter_and_limit() -> None:
     assert result.columns == ("value",)
     assert result.index_names == ("row_id",)
     assert result.ordering == ("sequence",)
-    expected = (
-        source.sort_values("sequence")
-        .set_index("row_id")
-    )
+    expected = source.sort_values("sequence").set_index("row_id")
     expected = expected.loc[expected["value"] >= 7, ["value"]].head(2)
     assert_frame_equal(result.collect(), expected)
     assert list(result.to_arrow().column_names) == ["value"]
@@ -132,8 +129,7 @@ def test_every_plan_has_valid_metadata() -> None:
         duckpd.from_pandas(source, order_by="sequence")
         .set_index("row_id")
         .assign(calculated=lambda item: item["value"] + 1)
-        .sort_values("calculated")
-        [["calculated"]]
+        .sort_values("calculated")[["calculated"]]
         .limit(1)
     )
 
@@ -190,9 +186,7 @@ def test_parquet_source_accepts_index_and_order(tmp_path: Path) -> None:
     path = tmp_path / "source.parquet"
     source.to_parquet(path, index=False)
 
-    result = duckpd.read_parquet(
-        path, index="row_id", order_by="sequence"
-    ).collect()
+    result = duckpd.read_parquet(path, index="row_id", order_by="sequence").collect()
 
     expected = source.sort_values("sequence").set_index("row_id")
     assert_frame_equal(result, expected)

@@ -21,8 +21,7 @@ def main() -> None:
     paid_orders = (
         lazy_orders[lazy_orders["status"] == "paid"]
         .assign(net=lambda frame: frame["gross"] - frame["refund"])
-        .sort_values("net", ascending=False)
-        [["net"]]
+        .sort_values("net", ascending=False)[["net"]]
     )
 
     print("Lazy frame (no rows have been collected):")

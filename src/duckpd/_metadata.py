@@ -123,9 +123,7 @@ def set_index(
     """Replace the explicit index without requiring uniqueness."""
     index_ids = tuple(column.id for column in columns)
     updated = tuple(
-        replace(column, hidden=True)
-        if drop and column.id in index_ids
-        else column
+        replace(column, hidden=True) if drop and column.id in index_ids else column
         for column in metadata.columns
     )
     result = FrameMetadata(
@@ -185,6 +183,20 @@ def sort_keys_for_labels(
         )
         for label in labels
     )
+
+
+def after_join(
+    columns: tuple[Column, ...],
+    *,
+    index_ids: tuple[ColumnId, ...] = (),
+    ordering_keys: tuple[OrderColumn, ...] = (),
+) -> FrameMetadata:
+    """Create metadata for a join plan."""
+    index = IndexSpec(index_ids, drop=True) if index_ids else IndexSpec()
+    ordering = OrderSpec(ordering_keys) if ordering_keys else OrderSpec()
+    result = FrameMetadata(columns, index, ordering)
+    validate_metadata(result)
+    return result
 
 
 def validate_metadata(metadata: FrameMetadata) -> None:

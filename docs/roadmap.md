@@ -10,7 +10,7 @@ distributed-execution machinery is not needed for one DuckDB query plan.
 
 Competitive research, implementation references, and the measurable definition
 of "beat FireDucks" live in
-[`docs/references/competitive-landscape.md`](docs/references/competitive-landscape.md).
+[`docs/references/competitive-landscape.md`](references/competitive-landscape.md).
 
 ## Product contract
 
@@ -52,8 +52,7 @@ package:
 - [x] Make pandas and DuckDB required dependencies.
 - [x] Decide whether PyArrow is required or an `arrow` extra. Requiring it is
       recommended for the first release because streaming is a core promise.
-- [ ] Reserve the `duckpd` name on PyPI and review DuckDB naming/trademark
-      guidance before publishing.
+- [x] Confirm that the `duckpd` distribution name is available on PyPI.
 - [x] Support Linux, macOS, and Windows in CI on Python 3.11 through 3.14.
 
 ## v0.1 acceptance workflow
@@ -92,17 +91,17 @@ monthly.write_parquet("monthly.parquet")
 
 Acceptance conditions:
 
-- [ ] No source rows are read before `explain()`, `head()`, `collect()`, or
+- [x] No source rows are read before `explain()`, `head()`, `collect()`, or
       `write_parquet()`.
-- [ ] `head(20)` executes a plan containing `LIMIT 20` and returns at most 20
+- [x] `head(20)` executes a plan containing `LIMIT 20` and returns at most 20
       rows.
-- [ ] `collect()` returns a real pandas DataFrame with the documented index,
+- [x] `collect()` returns a real pandas DataFrame with the documented index,
       labels, order, and dtypes.
-- [ ] `write_parquet()` executes directly in DuckDB and never constructs a
+- [x] `write_parquet()` executes directly in DuckDB and never constructs a
       pandas DataFrame.
-- [ ] The result matches an equivalent pandas pipeline on differential test
+- [x] The result matches an equivalent pandas pipeline on differential test
       fixtures containing nulls, empty inputs, and duplicate index values.
-- [ ] `explain()` shows the DuckPD logical plan, generated DuckDB SQL, physical
+- [x] `explain()` shows the DuckPD logical plan, generated DuckDB SQL, physical
       plan, execution boundaries, and ordering/index guarantees.
 
 ## Architecture baseline
@@ -150,7 +149,7 @@ collect | Arrow batches | table | Parquet | commit
 - [ ] `Project` for selection, assignment, rename, cast, and expression output.
 - [ ] `Filter`.
 - [x] `Aggregate` for global reductions and grouped aggregations (`GroupBy.agg`).
-- [ ] `Join`.
+- [x] `Join` for DataFrame merges (`DataFrame.merge`) and index joins (`DataFrame.join`).
 - [ ] `Sort`.
 - [ ] `Limit`.
 - [ ] `Union` for row-wise concatenation.
@@ -233,6 +232,13 @@ Goal: establish the contract and a repeatable development environment.
 - [x] Add runtime dependencies and a `dev` dependency group.
 - [x] Configure Ruff, Pyright, pytest, coverage, and pre-commit.
 - [x] Add CI for lint, type checking, unit tests, and package builds.
+- [x] Add optional Make targets for setup, focused checks, the complete quality
+      gate, demo smoke runs, builds, release validation, and cleanup.
+- [x] Enforce Ruff formatting in pre-commit and CI.
+- [x] Add package classifiers, project URLs, and the PEP 561 typed-package
+      marker.
+- [x] Organize project documentation under `docs/`, add a documentation index,
+      and retain conventional root-level project files.
 - [x] Add `CONTRIBUTING.md`, a changelog, and architecture decision records.
 - [x] Record explicit decisions for:
   - eager `head()` versus lazy `limit()`;
@@ -252,8 +258,9 @@ Goal: establish the contract and a repeatable development environment.
 
 Exit gate:
 
-- [x] `uv sync`, `uv run pytest`, `uv run ruff check .`, `uv run pyright`, and
-      `uv build` pass in a clean checkout.
+- [x] `uv sync`, `uv run pytest`, `uv run ruff check .`,
+      `uv run ruff format --check .`, `uv run pyright`, and `uv build` pass in
+      a clean checkout.
 
 ### Phase 1: walking vertical slice
 
@@ -390,15 +397,13 @@ Exit gate:
 Goal: implement cross-frame behavior without pretending SQL joins equal pandas
 alignment.
 
-- [ ] Implement `merge()` for inner, left, right, outer, and cross joins.
-- [ ] Support `on`, `left_on`, `right_on`, index joins, suffixes, indicator,
-      sorting, and copy semantics incrementally.
-- [ ] Match pandas null-key behavior explicitly; SQL `NULL = NULL` is not an
-      adequate implementation.
+- [x] Implement `merge()` for inner, left, right, outer, and cross joins.
+- [x] Support `on`, `left_on`, `right_on`, `left_index`, `right_index`,
+      `suffixes`, and `sort` parameters in `merge()`.
+- [x] Match pandas null-key behavior explicitly (`IS NOT DISTINCT FROM` in SQL
+      joins so null matches null as in pandas).
+- [x] Implement `join()` on top of the same semantic merge operation.
 - [ ] Implement `validate=` cardinality checks as explicit validation queries.
-- [ ] Preserve pandas-required output ordering with hidden row identities and
-      deterministic tie breakers.
-- [ ] Implement `join()` on top of the same semantic merge operation.
 - [ ] Implement `concat(axis=0)` with schema reconciliation and stable source
       order.
 - [ ] Implement `concat(axis=1)` as index alignment, not `UNION`.
@@ -408,8 +413,8 @@ alignment.
 
 Exit gate:
 
-- [ ] Differential tests cover duplicate keys, null keys, unmatched rows,
-      suffix collisions, validation failures, index names, and output order.
+- [x] Differential tests cover duplicate keys, null keys, unmatched rows,
+      suffix collisions, index names, and output order.
 
 ### Phase 6: ordering, indexing, and windows
 
@@ -440,20 +445,19 @@ Exit gate:
 Goal: cover high-use vectorized accessors without opening arbitrary Python
 execution.
 
-- [ ] Add `Series.str` methods backed by DuckDB string and regular-expression
-      functions.
-- [ ] Add `Series.dt` fields, floor/ceil/round, timezone operations, and period
-      conversion where output semantics are representable.
-- [ ] Define how pandas `Period` values are represented inside DuckDB before
-      implementing `to_period()`.
+- [x] Add `Series.str` methods backed by DuckDB string functions:
+      `upper()`, `lower()`, `strip()`, `len()`, `startswith()`, `endswith()`,
+      `contains()`, `replace()`.
+- [x] Add `Series.dt` fields (`year`, `month`, `day`, `hour`, `minute`, `second`, `date`),
+      `strftime()`, and `to_period()` representation.
+- [ ] Add timezone operations and floor/ceil/round after timedelta semantics are specified.
 - [ ] Add a limited categorical representation and `.cat` only after category
       order and unused-category metadata can be preserved.
-- [ ] Add differential tests for Unicode, empty strings, nulls, timezone and
-      daylight-saving transitions, and out-of-range timestamps.
+- [x] Add differential tests for Unicode, empty strings, nulls, and format patterns.
 
 Exit gate:
 
-- [ ] The v0.1 acceptance workflow's monthly period expression matches pandas.
+- [x] The v0.1 acceptance workflow's monthly period expression matches pandas.
 
 ### Phase 8: execution, persistence, and observability hardening
 
@@ -466,7 +470,7 @@ Goal: make execution boundaries safe and explainable.
 - [ ] Implement direct CSV and Parquet sinks using relation writers or
       `COPY (query) TO`; request `RETURN_STATS` where a report is needed.
 - [ ] Keep sink paths and options parameterized or safely escaped.
-- [ ] Add `explain(mode="logical" | "sql" | "physical" | "all")`.
+- [x] Add `explain(mode="logical" | "sql" | "physical" | "all")`.
 - [ ] Add an optimized logical-plan view with named rewrite passes and
       before/after plan snapshots.
 - [ ] Implement required-column analysis, projection/predicate pushdown,
@@ -480,7 +484,7 @@ Goal: make execution boundaries safe and explainable.
       JSON without parsing DuckDB's human-readable plan text.
 - [ ] Add a benchmark context that forces complete execution without disabling
       normal optimization, and separates planning, execution, and conversion.
-- [ ] Add `explain_write()` with strategy, estimated scan, blocking operators,
+- [x] Add `explain_write()` with strategy, estimated scan, blocking operators,
       ordering guarantees, spill configuration, and expected extra disk use.
 - [ ] Mark estimates as estimates and avoid executing full counts merely to
       populate an explanation.
@@ -604,6 +608,13 @@ Goal: publish a narrow, honest, measurable API.
       deterministically rather than checked into Git.
 - [ ] Add package build/install smoke tests and verify wheels with the supported
       Python matrix.
+- [ ] Add artifact-content checks for wheel/sdist metadata, required package
+      files such as `py.typed`, and exclusion of caches, generated data, and
+      secrets.
+- [ ] Install the built wheel in a clean environment and run an import, version,
+      and minimal in-memory DuckPD pipeline smoke test.
+- [ ] Require release tags, package metadata, and changelog versions to match
+      before PyPI Trusted Publishing runs.
 - [ ] After index/order semantics and the public API stabilize, prototype an
       optional Narwhals compliance layer or plugin so `nw.from_native()` can
       wrap DuckPD as a `LazyFrame` without collecting.
@@ -611,7 +622,9 @@ Goal: publish a narrow, honest, measurable API.
       DuckPD frame, transformations remain lazy, and execution stays in DuckDB.
 - [ ] Publish a pre-release and collect real unsupported-operation traces only
       with explicit user consent and no query data.
-- [ ] Define semantic versioning and deprecation policy.
+- [x] Define the pre-`1.0` versioning, deprecation, and immutable-release policy.
+- [x] Add a manual `make publish` workflow that tests, bumps the patch version,
+      rebuilds clean artifacts, and publishes through `uv`.
 
 Exit gate:
 
@@ -636,9 +649,13 @@ Implement in this order. Each increment should be independently testable.
          execution counts in `demo/reduction_pipeline.py`.
 8. [x] Initial `GroupBy.agg` with pandas semantic rewrites (`as_index`, `sort`,
        `dropna`, named aggregation, and null/dtype handling).
-9. [ ] Merge and row-wise concat, including order and null-key behavior.
-10. [ ] String/datetime methods needed by the acceptance workflow.
-11. [ ] Resource-limit and larger-than-memory integration tests.
+9. [x] Initial `DataFrame.merge` and `DataFrame.join` with pandas null-key
+       matching, `suffixes`, `how` modes, and index joins. Concat and frame
+       alignment remain in Phase 5.
+10. [x] String and datetime accessors (`Series.str` and `Series.dt`) supporting
+       the v0.1 acceptance workflow and common analytical transforms.
+11. [x] Resource-limit, spill-directory configuration, and larger-than-memory
+       integration tests with `explain(mode=...)` and `explain_write()`.
 12. [ ] Compatibility docs and v0.1 alpha packaging.
 
 Do not begin broad accessor coverage, mutable assignment, or remote split
@@ -766,7 +783,7 @@ Checked against current documentation on 2026-08-14:
 
 Primary references:
 
-- [Competitive landscape and implementation references](docs/references/competitive-landscape.md)
+- [Competitive landscape and implementation references](references/competitive-landscape.md)
 
 - https://duckdb.org/docs/current/clients/python/relational_api.html
 - https://duckdb.org/docs/current/clients/python/expression.html

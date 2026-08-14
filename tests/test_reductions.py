@@ -209,9 +209,7 @@ def test_unsupported_reductions_fail_before_execution(
     message: str,
 ) -> None:
     session = duckpd.connect()
-    frame = session.from_pandas(
-        pd.DataFrame({"value": [1, 2], "label": ["a", "b"]})
-    )
+    frame = session.from_pandas(pd.DataFrame({"value": [1, 2], "label": ["a", "b"]}))
 
     with pytest.raises(exception, match=message):
         operation(frame)

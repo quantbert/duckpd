@@ -27,14 +27,11 @@ def main() -> None:
 
         with pd.connect(memory_limit="64MB", threads=1) as session:
             lazy_events = session.read_parquet(source_path)
-            large_purchases = (
-                lazy_events[
-                    (lazy_events["category"] == "purchase")
-                    & (lazy_events["amount"] >= 50)
-                ]
-                .assign(amount_with_fee=lambda frame: frame["amount"] * 1.03)
-                [["event_id", "amount_with_fee"]]
-            )
+            large_purchases = lazy_events[
+                (lazy_events["category"] == "purchase") & (lazy_events["amount"] >= 50)
+            ].assign(amount_with_fee=lambda frame: frame["amount"] * 1.03)[
+                ["event_id", "amount_with_fee"]
+            ]
 
             print(f"Executions before explain/write: {session.execution_count}")
             print("\nPlan:")

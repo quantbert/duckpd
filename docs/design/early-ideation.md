@@ -1,3 +1,10 @@
+# Early DuckPD design exploration
+
+This document preserves the initial feasibility analysis and design exploration.
+Current implementation commitments and progress are tracked in the
+[roadmap](../roadmap.md) and accepted architecture decisions in
+[`docs/decisions/`](../decisions/).
+
 ## Verdict
 
 **DuckPD is highly viable as a lazy, pandas-shaped analytical DataFrame.** It is much less viable as a completely transparent replacement for every pandas workflow.
@@ -57,8 +64,7 @@ orders = con.table(
 paid = orders[orders["status"] == "paid"]
 
 monthly = (
-    paid
-    .assign(
+    paid.assign(
         month=lambda df: df["created_at"].dt.to_period("M"),
         net_amount=lambda df: df["amount"] - df["refund_amount"],
     )
@@ -73,10 +79,10 @@ monthly = (
     )
 )
 
-monthly.explain()                       # Show generated plan and SQL
-monthly.head(20)                        # Execute with LIMIT 20
-monthly.write_parquet("monthly.parquet") # Never enters pandas memory
-result = monthly.collect()              # Return a real pandas DataFrame
+monthly.explain()  # Show generated plan and SQL
+monthly.head(20)  # Execute with LIMIT 20
+monthly.write_parquet("monthly.parquet")  # Never enters pandas memory
+result = monthly.collect()  # Return a real pandas DataFrame
 ```
 
 The important addition is that **materialization is explicit**:
@@ -375,21 +381,21 @@ The weak version is:
 
 A strong proof of concept needs only eight or nine logical plan nodes, a typed expression tree, index/order metadata, and roughly two dozen high-value pandas operations. That would be enough to prove the central experience on datasets far larger than RAM while exposing exactly where the deeper compatibility work lies.
 
-[1]: https://duckdb.org/docs/current/clients/python/relational_api?utm_source=chatgpt.com "Relational API – DuckDB"
-[2]: https://colab.research.google.com/github/ponder-org/ponder-notebooks/blob/main/duckdb/example/Ponder_Quickstart.ipynb?utm_source=chatgpt.com "Ponder_Quickstart.ipynb - Colab"
-[3]: https://pandas.pydata.org/docs/dev/reference/api/pandas.DataFrame.html?utm_source=chatgpt.com "pandas.DataFrame — pandas 3.1.0.dev0+1386.gcb2086a1a4 documentation"
-[4]: https://duckdb.org/docs/lts/clients/python/relational_api?utm_source=chatgpt.com "Relational API – DuckDB"
-[5]: https://duckdb.org/docs/current/clients/python/function?utm_source=chatgpt.com "Python Function API – DuckDB"
-[6]: https://modin.readthedocs.io/en/latest/supported_apis/defaulting_to_pandas.html?utm_source=chatgpt.com "Defaulting to pandas — Modin 0.37.0+3.g7ca200b documentation"
-[7]: https://duckdb.org/docs/current/core_extensions/overview?utm_source=chatgpt.com "Core Extensions – DuckDB"
-[8]: https://duckdb.org/docs/current/core_extensions/postgres/overview?utm_source=chatgpt.com "PostgreSQL Extension – DuckDB"
-[9]: https://duckdb.org/docs/current/core_extensions/odbc/overview?utm_source=chatgpt.com "ODBC Extension – DuckDB"
-[10]: https://duckdb.org/docs/current/guides/python/sql_on_arrow?utm_source=chatgpt.com "SQL on Apache Arrow – DuckDB"
-[11]: https://modin.readthedocs.io/en/latest/development/architecture.html?utm_source=chatgpt.com "System Architecture — Modin 0.37.0+3.g7ca200b documentation"
-[12]: https://github.com/modin-project/modin/issues/2589?utm_source=chatgpt.com "Steps for new SQL Engine: DuckDB · Issue #2589 · modin-project/modin"
-[13]: https://github.com/duckdb/duckdb-web/blob/main/docs/current/guides/python/relational_api_pandas.md?utm_source=chatgpt.com "duckdb-web/docs/current/guides/python/relational_api_pandas.md at main · duckdb/duckdb-web · GitHub"
-[14]: https://ibis-project.org/tutorials/basics.html?utm_source=chatgpt.com "10 minutes to Ibis – Ibis"
-[15]: https://github.com/mariotaddeucci/lazy-pandas?utm_source=chatgpt.com "GitHub - mariotaddeucci/lazy-pandas: The power of duckdb with the ease of pandas · GitHub"
+[1]: https://duckdb.org/docs/current/clients/python/relational_api "Relational API – DuckDB"
+[2]: https://colab.research.google.com/github/ponder-org/ponder-notebooks/blob/main/duckdb/example/Ponder_Quickstart.ipynb "Ponder_Quickstart.ipynb - Colab"
+[3]: https://pandas.pydata.org/docs/dev/reference/api/pandas.DataFrame.html "pandas.DataFrame — pandas 3.1.0.dev0+1386.gcb2086a1a4 documentation"
+[4]: https://duckdb.org/docs/lts/clients/python/relational_api "Relational API – DuckDB"
+[5]: https://duckdb.org/docs/current/clients/python/function "Python Function API – DuckDB"
+[6]: https://modin.readthedocs.io/en/latest/supported_apis/defaulting_to_pandas.html "Defaulting to pandas — Modin 0.37.0+3.g7ca200b documentation"
+[7]: https://duckdb.org/docs/current/core_extensions/overview "Core Extensions – DuckDB"
+[8]: https://duckdb.org/docs/current/core_extensions/postgres/overview "PostgreSQL Extension – DuckDB"
+[9]: https://duckdb.org/docs/current/core_extensions/odbc/overview "ODBC Extension – DuckDB"
+[10]: https://duckdb.org/docs/current/guides/python/sql_on_arrow "SQL on Apache Arrow – DuckDB"
+[11]: https://modin.readthedocs.io/en/latest/development/architecture.html "System Architecture — Modin 0.37.0+3.g7ca200b documentation"
+[12]: https://github.com/modin-project/modin/issues/2589 "Steps for new SQL Engine: DuckDB · Issue #2589 · modin-project/modin"
+[13]: https://github.com/duckdb/duckdb-web/blob/main/docs/current/guides/python/relational_api_pandas.md "duckdb-web/docs/current/guides/python/relational_api_pandas.md at main · duckdb/duckdb-web · GitHub"
+[14]: https://ibis-project.org/tutorials/basics.html "10 minutes to Ibis – Ibis"
+[15]: https://github.com/mariotaddeucci/lazy-pandas "GitHub - mariotaddeucci/lazy-pandas: The power of duckdb with the ease of pandas · GitHub"
 
 ----
 
@@ -584,10 +590,7 @@ orders/
 Then:
 
 ```python
-df.loc[
-    df["order_date"] == "2026-08-02",
-    "status"
-] = "archived"
+df.loc[df["order_date"] == "2026-08-02", "status"] = "archived"
 
 df.commit()
 ```
@@ -625,9 +628,7 @@ editable.commit()
 Or:
 
 ```python
-editable = duckpd.open_table(
-    "iceberg://catalog/analytics/orders"
-)
+editable = duckpd.open_table("iceberg://catalog/analytics/orders")
 ```
 
 Current DuckDB Iceberg support includes `UPDATE`, `DELETE`, and `MERGE INTO`; updates can use merge-on-read semantics with positional delete files rather than rewriting the complete table immediately. ([DuckDB][6])
@@ -695,8 +696,8 @@ For the initial DuckPD version, I would implement:
 I would not initially build a proprietary base-file-plus-delta-log format. That becomes a miniature lakehouse implementation involving manifests, snapshots, delete records, compaction and concurrency control. DuckPD should delegate that responsibility to DuckDB tables or an existing open table format.
 
 [1]: https://duckdb.org/docs/current/sql/statements/copy "COPY Statement – DuckDB"
-[2]: https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads?utm_source=chatgpt.com "Tuning Workloads – DuckDB"
-[3]: https://duckdb.org/docs/current/operations_manual/limits?utm_source=chatgpt.com "Limits – DuckDB"
-[4]: https://duckdb.org/docs/current/sql/statements/copy?utm_source=chatgpt.com "COPY Statement – DuckDB"
-[5]: https://duckdb.org/docs/current/data/partitioning/partitioned_writes?utm_source=chatgpt.com "Partitioned Writes – DuckDB"
-[6]: https://duckdb.org/docs/current/core_extensions/iceberg/writing?utm_source=chatgpt.com "Writing to Iceberg – DuckDB"
+[2]: https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads "Tuning Workloads – DuckDB"
+[3]: https://duckdb.org/docs/current/operations_manual/limits "Limits – DuckDB"
+[4]: https://duckdb.org/docs/current/sql/statements/copy "COPY Statement – DuckDB"
+[5]: https://duckdb.org/docs/current/data/partitioning/partitioned_writes "Partitioned Writes – DuckDB"
+[6]: https://duckdb.org/docs/current/core_extensions/iceberg/writing "Writing to Iceberg – DuckDB"

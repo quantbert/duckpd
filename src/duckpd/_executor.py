@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,14 @@ class Executor:
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         result = compiled.relation.to_df()
+        # Normalize DuckDB nullable integer columns to float64 if they contain nulls
+        for col in result.columns:
+            dtype_str = str(result[col].dtype)
+            if (dtype_str.startswith("Int") or dtype_str.startswith("UInt")) and result[
+                col
+            ].isna().any():
+                result[col] = result[col].astype("float64")
+
         index_ids = plan.metadata.index.columns
         if index_ids:
             index_labels = [compiled.bindings[column_id] for column_id in index_ids]
@@ -71,13 +79,49 @@ class Executor:
             overwrite=overwrite,
         )
 
-    def explain(self, plan: LogicalPlan) -> str:
-        relation = self._compiler.compile(plan).relation
+    def explain(
+        self,
+        plan: LogicalPlan,
+        *,
+        mode: Literal["all", "logical", "sql", "physical"] = "all",
+    ) -> str:
+        compiled = self._compiler.compile(plan)
+        relation = compiled.relation
+        self._session._begin_execution()
+        if mode == "logical":
+            return f"DuckPD logical plan:\n{plan!r}"
+        if mode == "sql":
+            return f"DuckDB SQL:\n{relation.sql_query()}"
+        if mode == "physical":
+            return f"DuckDB physical plan:\n{relation.explain()}"
+        if mode == "all":
+            return (
+                f"DuckPD logical plan:\n{plan!r}\n\n"
+                f"DuckDB SQL:\n{relation.sql_query()}\n\n"
+                f"DuckDB physical plan:\n{relation.explain()}"
+            )
+        msg = (
+            f"Unknown explain mode: {mode!r}; "
+            "expected 'all', 'logical', 'sql', or 'physical'"
+        )
+        raise ValueError(msg)
+
+    def explain_write(
+        self,
+        plan: LogicalPlan,
+        path: str,
+        *,
+        compression: ParquetCompression = "snappy",
+    ) -> str:
+        """Inspect write strategy and execution plan without writing rows."""
+        compiled = self._compiler.compile(plan)
+        visible_rel = self._compiler.project_visible(compiled, plan).relation
         self._session._begin_execution()
         return (
-            f"DuckPD logical plan:\n{plan!r}\n\n"
-            f"DuckDB SQL:\n{relation.sql_query()}\n\n"
-            f"DuckDB physical plan:\n{relation.explain()}"
+            f"Write target: {path}\n"
+            f"Compression: {compression}\n"
+            f"Output columns: {list(plan.metadata.visible_columns)}\n"
+            f"DuckDB physical plan:\n{visible_rel.explain()}"
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:

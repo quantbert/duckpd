@@ -5,7 +5,7 @@ DuckPD uses Python 3.11+, `uv`, pytest, Ruff, and Pyright.
 ## Setup
 
 ```bash
-uv sync --group dev
+uv sync --frozen --group dev
 uv run pre-commit install
 ```
 
@@ -15,8 +15,16 @@ Run focused tests while developing, then run the complete gate before opening a
 pull request:
 
 ```bash
+make check
+make build
+```
+
+The equivalent commands, useful on systems without GNU Make, are:
+
+```bash
 uv run pytest
 uv run ruff check .
+uv run ruff format --check .
 uv run pyright
 uv build
 ```

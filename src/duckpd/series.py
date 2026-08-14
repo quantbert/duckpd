@@ -24,6 +24,7 @@ from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
+    from duckpd.accessors import DatetimeProperties, StringMethods
     from duckpd.session import Session
 
 
@@ -201,6 +202,31 @@ class Series:
             UnaryExpression(operator, self._expression),
             self.name,
         )
+
+    def _call_function(self, name: str, *args: Expression) -> Series:
+        """Construct a new Series by calling a function on this expression."""
+        from duckpd._logical import FunctionCall
+
+        return Series(
+            self._session,
+            self._plan,
+            FunctionCall(name, (self._expression, *args)),
+            self.name,
+        )
+
+    @property
+    def str(self) -> StringMethods:
+        """Vectorized string functions for Series."""
+        from duckpd.accessors import StringMethods
+
+        return StringMethods(self)
+
+    @property
+    def dt(self) -> DatetimeProperties:
+        """Access datetime properties of Series values."""
+        from duckpd.accessors import DatetimeProperties
+
+        return DatetimeProperties(self)
 
     def _coerce_other(self, other: object) -> Expression:
         if isinstance(other, Series):

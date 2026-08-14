@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -12,11 +12,31 @@ license = { file = "LICENSE" }
 authors = [
     { name = "QuantBert" },
 ]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
+]
 dependencies = [
     "duckdb>=1.5,<1.6",
     "pandas>=3.0,<3.1",
     "pyarrow>=18",
 ]
+
+[project.urls]
+Homepage = "https://github.com/quantbert/duckpd"
+Repository = "https://github.com/quantbert/duckpd"
+Issues = "https://github.com/quantbert/duckpd/issues"
+Changelog = "https://github.com/quantbert/duckpd/blob/main/docs/CHANGELOG.md"
 
 [dependency-groups]
 dev = [

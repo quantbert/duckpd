@@ -139,7 +139,17 @@ class UnaryExpression:
     operand: Expression
 
 
-Expression: TypeAlias = ColumnRef | LiteralValue | BinaryExpression | UnaryExpression
+@dataclass(frozen=True)
+class FunctionCall:
+    """Call a named scalar function with expressions."""
+
+    name: str
+    arguments: tuple[Expression, ...]
+
+
+Expression: TypeAlias = (
+    ColumnRef | LiteralValue | BinaryExpression | UnaryExpression | FunctionCall
+)
 
 
 @dataclass(frozen=True)
@@ -251,6 +261,16 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
         return ExpressionMetadata(True, True, True, True)
     if isinstance(expression, UnaryExpression):
         return expression_metadata(expression.operand)
+    if isinstance(expression, FunctionCall):
+        arg_metas = [expression_metadata(arg) for arg in expression.arguments]
+        return ExpressionMetadata(
+            is_elementwise=all(m.is_elementwise for m in arg_metas),
+            preserves_length=all(m.preserves_length for m in arg_metas),
+            is_scalar_like=all(m.is_scalar_like for m in arg_metas),
+            is_literal=all(m.is_literal for m in arg_metas),
+            has_window=any(m.has_window for m in arg_metas),
+            order_dependency_count=sum(m.order_dependency_count for m in arg_metas),
+        )
 
     left = expression_metadata(expression.left)
     right = expression_metadata(expression.right)
@@ -333,6 +353,35 @@ class AggregatePlan(LogicalPlanBase):
     sort: bool = True
 
 
+class JoinType(Enum):
+    """Supported join types."""
+
+    INNER = "inner"
+    LEFT = "left"
+    RIGHT = "right"
+    OUTER = "outer"
+    CROSS = "cross"
+
+
+@dataclass(frozen=True)
+class JoinPlan(LogicalPlanBase):
+    """Join two logical plans."""
+
+    left: LogicalPlan
+    right: LogicalPlan
+    how: JoinType
+    left_keys: tuple[ColumnId, ...]
+    right_keys: tuple[ColumnId, ...]
+    metadata: FrameMetadata
+    sort: bool = False
+
+
 LogicalPlan: TypeAlias = (
-    ScanPlan | FilterPlan | ProjectPlan | SortPlan | LimitPlan | AggregatePlan
+    ScanPlan
+    | FilterPlan
+    | ProjectPlan
+    | SortPlan
+    | LimitPlan
+    | AggregatePlan
+    | JoinPlan
 )

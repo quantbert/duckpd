@@ -131,37 +131,41 @@ class DataFrameGroupBy:
                 )
 
             func_lower = func_name.lower()
-            target_col = find_column(self._frame._plan.metadata, target_col_name)
-
             if func_lower == "size":
                 op = AggregateOperator.SIZE
                 target_expr = None
                 input_type = None
                 out_type = "BIGINT"
-            elif func_lower == "count":
-                op = AggregateOperator.COUNT
-                target_expr = ColumnRef(target_col.id)
-                input_type = target_col.duckdb_type
-                out_type = "BIGINT"
-            elif func_lower in {"sum", "mean", "min", "max"}:
-                op = {
-                    "sum": AggregateOperator.SUM,
-                    "mean": AggregateOperator.MEAN,
-                    "min": AggregateOperator.MIN,
-                    "max": AggregateOperator.MAX,
-                }[func_lower]
-                if not is_numeric_type(target_col.duckdb_type):
-                    raise UnsupportedOperationError(
-                        f"{func_lower} requires numeric or boolean column; "
-                        f"{target_col_name!r} is {target_col.duckdb_type}"
-                    )
-                target_expr = ColumnRef(target_col.id)
-                input_type = target_col.duckdb_type
-                out_type = "DOUBLE" if func_lower == "mean" else target_col.duckdb_type
             else:
-                raise UnsupportedOperationError(
-                    f"Unsupported aggregate function: {func_name!r}"
+                target_col = find_column(
+                    self._frame._plan.metadata, target_col_name, include_hidden=True
                 )
+                if func_lower == "count":
+                    op = AggregateOperator.COUNT
+                    target_expr = ColumnRef(target_col.id)
+                    input_type = target_col.duckdb_type
+                    out_type = "BIGINT"
+                elif func_lower in {"sum", "mean", "min", "max"}:
+                    op = {
+                        "sum": AggregateOperator.SUM,
+                        "mean": AggregateOperator.MEAN,
+                        "min": AggregateOperator.MIN,
+                        "max": AggregateOperator.MAX,
+                    }[func_lower]
+                    if not is_numeric_type(target_col.duckdb_type):
+                        raise UnsupportedOperationError(
+                            f"{func_lower} requires numeric or boolean column; "
+                            f"{target_col_name!r} is {target_col.duckdb_type}"
+                        )
+                    target_expr = ColumnRef(target_col.id)
+                    input_type = target_col.duckdb_type
+                    out_type = (
+                        "DOUBLE" if func_lower == "mean" else target_col.duckdb_type
+                    )
+                else:
+                    raise UnsupportedOperationError(
+                        f"Unsupported aggregate function: {func_name!r}"
+                    )
 
             out_col = Column(ColumnId.create(), output_name, out_type, hidden=False)
             output_columns.append(out_col)

@@ -12,6 +12,7 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     Expression,
+    FunctionCall,
     LiteralValue,
     LogicalPlan,
     UnaryExpression,
@@ -61,6 +62,15 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         return "UNKNOWN"
     if isinstance(expression, UnaryExpression):
         return expression_type(plan, expression.operand)
+    if isinstance(expression, FunctionCall):
+        func_name = expression.name.lower()
+        if func_name in {"length", "year", "month", "day", "hour", "minute", "second"}:
+            return "BIGINT"
+        if func_name in {"starts_with", "ends_with", "contains"}:
+            return "BOOLEAN"
+        if func_name in {"upper", "lower", "trim", "replace", "strftime"}:
+            return "VARCHAR"
+        return "UNKNOWN"
     left = expression_type(plan, expression.left)
     right = expression_type(plan, expression.right)
     if is_numeric_type(left) and is_numeric_type(right):

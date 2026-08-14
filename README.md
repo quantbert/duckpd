@@ -3,9 +3,16 @@
 DuckPD is an experimental lazy DataFrame library with a pandas-shaped frontend
 and DuckDB as its execution engine.
 
-The project is in early development. It intentionally supports a small,
-explicit subset of pandas rather than silently falling back to materializing a
-complete pandas DataFrame.
+> [!WARNING]
+> **DuckPD is a work in progress and is not yet recommended for
+> production-critical workloads.** The API and supported pandas semantics may
+> change between `0.x` releases, and many pandas operations are intentionally
+> unsupported. Validate results and resource behavior for each intended
+> workload before adopting it.
+
+DuckPD intentionally supports a small, explicit subset of pandas rather than
+silently falling back to materializing a complete pandas DataFrame. See the
+[release policy](docs/RELEASES.md) for the pre-`1.0` stability policy.
 
 ## Current capabilities
 
@@ -30,11 +37,10 @@ import duckpd as pd
 orders = pd.read_parquet("orders/*.parquet")
 
 result = (
-	orders[orders["status"] == "paid"]
-	.assign(net=lambda frame: frame["amount"] - frame["refund_amount"])
-	.sort_values("net", ascending=False)
-	[["order_id", "net"]]
-	.limit(100)
+    orders[orders["status"] == "paid"]
+    .assign(net=lambda frame: frame["amount"] - frame["refund_amount"])
+    .sort_values("net", ascending=False)[["order_id", "net"]]
+    .limit(100)
 )
 
 print(result.explain())
@@ -56,16 +62,29 @@ uv run python demo/basic_pipeline.py
 uv run python demo/parquet_pipeline.py
 uv run python demo/reduction_pipeline.py
 uv run python demo/generate_market_data.py
+uv run python demo/market_data_demo.py
 ```
+
+See the [benchmark results](docs/BENCHMARK.md) for performance and memory
+comparisons between DuckPD and pandas across 100 MB, 1 GB, and 5 GB datasets.
 
 ## Development
 
 ```bash
-uv sync --group dev
+uv sync --frozen --group dev
+make check
+make build
+```
+
+GNU Make is optional. The equivalent commands are:
+
+```bash
 uv run pytest
 uv run ruff check .
+uv run ruff format --check .
 uv run pyright
 uv build
 ```
 
-See [todo.md](todo.md) for the implementation roadmap and compatibility scope.
+See the [documentation index](docs/README.md) for the implementation roadmap,
+architecture decisions, benchmarks, research, and changelog.

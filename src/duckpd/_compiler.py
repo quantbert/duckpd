@@ -20,6 +20,9 @@ from duckpd._logical import (
     ColumnRef,
     Expression,
     FilterPlan,
+    FunctionCall,
+    JoinPlan,
+    JoinType,
     LiteralValue,
     LogicalPlan,
     NullPlacement,
@@ -93,6 +96,9 @@ class DuckDBCompiler:
             bindings = {column.id: column.label for column in plan.columns}
             return CompiledFrame(relation, bindings)
 
+        if isinstance(plan, JoinPlan):
+            return self._compile_join(plan)
+
         compiled_input = self.compile(plan.input)
         if isinstance(plan, FilterPlan):
             predicate = self.compile_expression(plan.predicate, compiled_input.bindings)
@@ -101,8 +107,9 @@ class DuckDBCompiler:
             )
         if isinstance(plan, ProjectPlan):
             expressions = tuple(
-                self.compile_expression(projection.expression, compiled_input.bindings)
-                .alias(projection.column.label)
+                self.compile_expression(
+                    projection.expression, compiled_input.bindings
+                ).alias(projection.column.label)
                 for projection in plan.projections
             )
             relation = compiled_input.relation.project(*expressions)
@@ -136,8 +143,7 @@ class DuckDBCompiler:
                 relation = input_rel.aggregate(expressions, groups_spec)
                 if plan.sort:
                     sort_keys = [
-                        duckdb.SQLExpression(k).asc().nulls_last()
-                        for k in key_labels
+                        duckdb.SQLExpression(k).asc().nulls_last() for k in key_labels
                     ]
                     relation = relation.sort(*sort_keys)
             else:
@@ -170,8 +176,7 @@ class DuckDBCompiler:
                 label = bindings[expression.column_id]
             except KeyError as error:
                 msg = (
-                    f"Column {expression.column_id.value} is not available "
-                    "in this plan"
+                    f"Column {expression.column_id.value} is not available in this plan"
                 )
                 raise KeyError(msg) from error
             return duckdb.SQLExpression(quote_identifier(label))
@@ -186,6 +191,15 @@ class DuckDBCompiler:
             if expression.operator is UnaryOperator.POSITIVE:
                 return operand
             raise AssertionError(f"Unknown unary operator: {expression.operator}")
+        if isinstance(expression, FunctionCall):
+            compiled_args = [
+                self.compile_expression(arg, bindings) for arg in expression.arguments
+            ]
+            if expression.name.lower() == "coalesce" and len(compiled_args) == 2:
+                return duckdb.CaseExpression(
+                    compiled_args[0].isnull(), compiled_args[1]
+                ).otherwise(compiled_args[0])
+            return duckdb.FunctionExpression(expression.name, *compiled_args)
 
         left = self.compile_expression(expression.left, bindings)
         right = self.compile_expression(expression.right, bindings)
@@ -254,9 +268,7 @@ class DuckDBCompiler:
     ) -> duckdb.Expression:
         result = self.compile_expression(key.expression, bindings)
         result = (
-            result.asc()
-            if key.direction is SortDirection.ASCENDING
-            else result.desc()
+            result.asc() if key.direction is SortDirection.ASCENDING else result.desc()
         )
         return (
             result.nulls_first()
@@ -320,3 +332,133 @@ class DuckDBCompiler:
             invalid,
             duckdb.ConstantExpression(None),
         ).otherwise(value)
+
+    def _compile_join(self, plan: JoinPlan) -> CompiledFrame:
+        left_compiled = self.compile(plan.left)
+        right_compiled = self.compile(plan.right)
+
+        lhs_alias = "lhs"
+        rhs_alias = "rhs"
+
+        # Explicitly project each side with unique physical column names
+        left_proj: list[duckdb.Expression] = []
+        left_temp_bindings: dict[ColumnId, str] = {}
+        for col in plan.left.columns:
+            temp_name = f"l_{col.id.value.hex[:8]}"
+            left_proj.append(
+                duckdb.SQLExpression(
+                    quote_identifier(left_compiled.bindings[col.id])
+                ).alias(temp_name)
+            )
+            left_temp_bindings[col.id] = temp_name
+
+        right_proj: list[duckdb.Expression] = []
+        right_temp_bindings: dict[ColumnId, str] = {}
+        for col in plan.right.columns:
+            temp_name = f"r_{col.id.value.hex[:8]}"
+            right_proj.append(
+                duckdb.SQLExpression(
+                    quote_identifier(right_compiled.bindings[col.id])
+                ).alias(temp_name)
+            )
+            right_temp_bindings[col.id] = temp_name
+
+        lhs_rel = left_compiled.relation.project(*left_proj).set_alias(lhs_alias)
+        rhs_rel = right_compiled.relation.project(*right_proj).set_alias(rhs_alias)
+
+        if plan.how is JoinType.CROSS:
+            join_rel = lhs_rel.cross(rhs_rel)
+        elif plan.how is JoinType.INNER:
+            join_cond_parts = [
+                (
+                    f"{lhs_alias}.{quote_identifier(left_temp_bindings[l_id])} "
+                    f"IS NOT DISTINCT FROM "
+                    f"{rhs_alias}.{quote_identifier(right_temp_bindings[r_id])}"
+                )
+                for l_id, r_id in zip(plan.left_keys, plan.right_keys, strict=True)
+            ]
+            join_rel = lhs_rel.join(rhs_rel, " AND ".join(join_cond_parts), how="inner")
+        elif plan.how is JoinType.LEFT:
+            join_cond_parts = [
+                (
+                    f"{lhs_alias}.{quote_identifier(left_temp_bindings[l_id])} "
+                    f"IS NOT DISTINCT FROM "
+                    f"{rhs_alias}.{quote_identifier(right_temp_bindings[r_id])}"
+                )
+                for l_id, r_id in zip(plan.left_keys, plan.right_keys, strict=True)
+            ]
+            join_rel = lhs_rel.join(rhs_rel, " AND ".join(join_cond_parts), how="left")
+        elif plan.how is JoinType.RIGHT:
+            join_cond_parts = [
+                (
+                    f"{lhs_alias}.{quote_identifier(left_temp_bindings[l_id])} "
+                    f"IS NOT DISTINCT FROM "
+                    f"{rhs_alias}.{quote_identifier(right_temp_bindings[r_id])}"
+                )
+                for l_id, r_id in zip(plan.left_keys, plan.right_keys, strict=True)
+            ]
+            join_rel = lhs_rel.join(rhs_rel, " AND ".join(join_cond_parts), how="right")
+        elif plan.how is JoinType.OUTER:
+            join_cond_parts = [
+                (
+                    f"{lhs_alias}.{quote_identifier(left_temp_bindings[l_id])} "
+                    f"IS NOT DISTINCT FROM "
+                    f"{rhs_alias}.{quote_identifier(right_temp_bindings[r_id])}"
+                )
+                for l_id, r_id in zip(plan.left_keys, plan.right_keys, strict=True)
+            ]
+            join_rel = lhs_rel.join(rhs_rel, " AND ".join(join_cond_parts), how="outer")
+        else:
+            raise AssertionError(f"Unknown JoinType: {plan.how}")
+
+        # Output projection to match plan.metadata.columns
+        final_proj: list[duckdb.Expression] = []
+        final_bindings: dict[ColumnId, str] = {}
+        for col in plan.metadata.columns:
+            l_bind = left_temp_bindings.get(col.id)
+            r_bind = None
+            if col.id in plan.left_keys:
+                idx = plan.left_keys.index(col.id)
+                r_key_id = plan.right_keys[idx]
+                r_bind = right_temp_bindings.get(r_key_id)
+
+            if (
+                l_bind is not None
+                and r_bind is not None
+                and plan.how in {JoinType.RIGHT, JoinType.OUTER}
+            ):
+                # Coalesce left and right key so right-only rows retain value
+                l_col = f"{lhs_alias}.{quote_identifier(l_bind)}"
+                r_col = f"{rhs_alias}.{quote_identifier(r_bind)}"
+                source_col = f"COALESCE({l_col}, {r_col})"
+            elif l_bind is not None:
+                source_col = f"{lhs_alias}.{quote_identifier(l_bind)}"
+            elif col.id in right_temp_bindings:
+                source_col = (
+                    f"{rhs_alias}.{quote_identifier(right_temp_bindings[col.id])}"
+                )
+            else:
+                # Could happen if a key column was synthesized
+                raise AssertionError(
+                    f"Column {col.id} not found in join input bindings"
+                )
+
+            final_proj.append(duckdb.SQLExpression(source_col).alias(col.label))
+            final_bindings[col.id] = col.label
+
+        result_rel = join_rel.project(*final_proj)
+
+        if plan.sort and plan.metadata.ordering.keys:
+            sort_keys = [
+                duckdb.SQLExpression(quote_identifier(final_bindings[k.column_id]))
+                .asc()
+                .nulls_last()
+                if k.direction is SortDirection.ASCENDING
+                else duckdb.SQLExpression(quote_identifier(final_bindings[k.column_id]))
+                .desc()
+                .nulls_last()
+                for k in plan.metadata.ordering.keys
+            ]
+            result_rel = result_rel.sort(*sort_keys)
+
+        return CompiledFrame(result_rel, final_bindings)

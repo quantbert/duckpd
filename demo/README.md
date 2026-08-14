@@ -9,6 +9,7 @@ uv run python demo/basic_pipeline.py
 uv run python demo/parquet_pipeline.py
 uv run python demo/reduction_pipeline.py
 uv run python demo/generate_market_data.py
+uv run python demo/market_data_demo.py
 ```
 
 - `basic_pipeline.py` builds a lazy frame from pandas, sets an explicit index,
@@ -23,6 +24,22 @@ uv run python demo/generate_market_data.py
 - `generate_market_data.py` calibrates compressed bytes per row, then streams a
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
+- `market_data_demo.py` benchmarks and compares execution time and memory usage
+  between DuckPD and standard pandas across OHLC market datasets.
+- `DuckPD_Quickstart.ipynb` is a 5-minute interactive Jupyter Notebook
+  demonstrating remote data loading, column reductions, string transformations,
+  `groupby` aggregations, query plans, and Parquet exports on the Goodreads
+  Books dataset.
+
+Run market data benchmarks:
+
+```bash
+uv run python demo/market_data_demo.py smoke
+uv run python demo/market_data_demo.py 100mb
+uv run python demo/market_data_demo.py 1gb
+uv run python demo/market_data_demo.py 5gb
+uv run python demo/market_data_demo.py all
+```
 
 Generate individual benchmark files:
 

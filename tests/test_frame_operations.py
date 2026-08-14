@@ -19,9 +19,7 @@ INVALID_BOUNDED_OPERATIONS: list[tuple[InvalidOperation, str]] = [
     (lambda frame: frame.head(-1), "count must be non-negative"),
     (lambda frame: frame.sort_values([]), "at least one column"),
     (
-        lambda frame: frame.sort_values(
-            ["value", "other"], ascending=[True]
-        ),
+        lambda frame: frame.sort_values(["value", "other"], ascending=[True]),
         "Length of ascending",
     ),
 ]
@@ -48,8 +46,7 @@ def test_expression_pipeline_is_lazy(source: pd.DataFrame) -> None:
             total=lambda current: current["value"] + current["other"],
             doubled=lambda current: current["total"] * 2,
         )
-        .sort_values("doubled", ascending=False)
-        [["label", "doubled"]]
+        .sort_values("doubled", ascending=False)[["label", "doubled"]]
         .limit(2)
     )
 
@@ -75,9 +72,9 @@ def test_quoted_column_identifier_is_structured() -> None:
     source = pd.DataFrame({'odd "name': [1, 2]})
     frame = duckpd.from_pandas(source)
 
-    result = frame.assign(
-        calculated=frame['odd "name'] + 1
-    )[['odd "name', "calculated"]].collect()
+    result = frame.assign(calculated=frame['odd "name'] + 1)[
+        ['odd "name', "calculated"]
+    ].collect()
 
     expected = source.assign(calculated=[2, 3])
     assert_frame_equal(result, expected)

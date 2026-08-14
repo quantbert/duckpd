@@ -11,14 +11,13 @@ from duckpd.session import Session, connect
 __version__ = version("duckpd")
 
 __all__ = [
-	"DataFrame",
-	"DataFrameGroupBy",
-	"Series",
-	"Session",
-	"__version__",
-	"connect",
-	"from_arrow",
-	"from_pandas",
-	"read_parquet",
+    "DataFrame",
+    "DataFrameGroupBy",
+    "Series",
+    "Session",
+    "__version__",
+    "connect",
+    "from_arrow",
+    "from_pandas",
+    "read_parquet",
 ]
-

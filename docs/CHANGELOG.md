@@ -22,3 +22,10 @@ All notable changes to DuckPD will be documented in this file.
 - Expression metadata for scalar, elementwise, and length-preserving behavior.
 - Calibrated synthetic OHLC Parquet generator with smoke, 100 MB, 1 GB, and
   5 GB target-size presets.
+- Self-documenting Make targets for development checks, builds, demo smoke
+  runs, release validation, and cleanup.
+- Package classifiers, project URLs, and PEP 561 typed-package metadata.
+- Central documentation index with roadmap, design, decision, benchmark,
+  changelog, and research sections.
+- Explicit work-in-progress warning and a documented pre-`1.0` release policy.
+- Make target for tested patch-version builds and manual PyPI publication.

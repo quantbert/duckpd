@@ -114,9 +114,23 @@ class DataFrame:
             overwrite=overwrite,
         )
 
-    def explain(self) -> str:
-        """Return DuckDB's physical plan without fetching result rows."""
-        return self._session._executor.explain(self._plan)
+    def explain(
+        self,
+        mode: Literal["all", "logical", "sql", "physical"] = "all",
+    ) -> str:
+        """Return DuckDB's execution plan views without fetching result rows."""
+        return self._session._executor.explain(self._plan, mode=mode)
+
+    def explain_write(
+        self,
+        path: str | Path,
+        *,
+        compression: ParquetCompression = "snappy",
+    ) -> str:
+        """Inspect write strategy and execution plan without writing rows."""
+        return self._session._executor.explain_write(
+            self._plan, str(path), compression=compression
+        )
 
     @property
     def size(self) -> int:
@@ -276,14 +290,11 @@ class DataFrame:
                 resolved, alternate_plan=original_plan
             )
             try:
-                existing = find_column(
-                    frame._plan.metadata, label, include_hidden=True
-                )
+                existing = find_column(frame._plan.metadata, label, include_hidden=True)
             except KeyError:
                 existing = None
-            if (
-                existing is not None
-                and existing.id in protected_column_ids(frame._plan.metadata)
+            if existing is not None and existing.id in protected_column_ids(
+                frame._plan.metadata
             ):
                 raise ValueError(
                     "Cannot replace an index or ordering column; reset metadata first"
@@ -301,9 +312,7 @@ class DataFrame:
                 ),
                 NamedExpression(output, expression),
             )
-            projected_columns = tuple(
-                projection.column for projection in projections
-            )
+            projected_columns = tuple(projection.column for projection in projections)
             plan = ProjectPlan(
                 frame._plan,
                 projections,
@@ -335,9 +344,7 @@ class DataFrame:
             raise ValueError("Length of ascending must match length of by")
 
         null_placement = (
-            NullPlacement.FIRST
-            if na_position == "first"
-            else NullPlacement.LAST
+            NullPlacement.FIRST if na_position == "first" else NullPlacement.LAST
         )
         keys = tuple(
             SortKey(
@@ -373,6 +380,58 @@ class DataFrame:
             observed=observed,
         )
 
+    def merge(
+        self,
+        right: DataFrame,
+        how: Literal["left", "right", "outer", "inner", "cross"] = "inner",
+        on: str | Sequence[str] | None = None,
+        left_on: str | Sequence[str] | None = None,
+        right_on: str | Sequence[str] | None = None,
+        left_index: bool = False,
+        right_index: bool = False,
+        sort: bool = False,
+        suffixes: tuple[str, str] = ("_x", "_y"),
+    ) -> DataFrame:
+        """Merge DataFrame or named Series objects with a database-style join."""
+        from duckpd._merging import plan_merge
+
+        if self._session is not right._session:
+            raise AlignmentError("Cannot merge frames from different sessions")
+
+        plan = plan_merge(
+            self,
+            right,
+            how=how,
+            on=on,
+            left_on=left_on,
+            right_on=right_on,
+            left_index=left_index,
+            right_index=right_index,
+            sort=sort,
+            suffixes=suffixes,
+        )
+        return DataFrame(self._session, plan)
+
+    def join(
+        self,
+        other: DataFrame,
+        on: str | Sequence[str] | None = None,
+        how: Literal["left", "right", "outer", "inner"] = "left",
+        lsuffix: str = "",
+        rsuffix: str = "",
+        sort: bool = False,
+    ) -> DataFrame:
+        """Join columns of another DataFrame using index or a key column."""
+        return self.merge(
+            other,
+            how=how,
+            left_on=on,
+            right_index=True,
+            left_index=(on is None),
+            sort=sort,
+            suffixes=(lsuffix, rsuffix),
+        )
+
     def limit(self, count: int, *, offset: int = 0) -> DataFrame:
         """Return a lazy frame containing at most ``count`` rows."""
         if count < 0:
@@ -384,9 +443,7 @@ class DataFrame:
             LimitPlan(self._plan, count, offset, self._plan.metadata),
         )
 
-    def set_index(
-        self, keys: str | Sequence[str], *, drop: bool = True
-    ) -> DataFrame:
+    def set_index(self, keys: str | Sequence[str], *, drop: bool = True) -> DataFrame:
         """Set one or more existing columns as an explicit lazy index."""
         labels = (keys,) if isinstance(keys, str) else tuple(keys)
         if not labels:
@@ -428,8 +485,7 @@ class DataFrame:
         if not isinstance(metadata, FrameMetadata):
             raise TypeError("Expected FrameMetadata")
         projections = tuple(
-            NamedExpression(column, ColumnRef(column.id))
-            for column in metadata.columns
+            NamedExpression(column, ColumnRef(column.id)) for column in metadata.columns
         )
         return DataFrame(
             self._session,

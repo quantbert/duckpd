@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+import duckpd
+
+
+def test_resource_limits_and_spill_directory_execution() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        spill_dir = Path(tmpdir) / "spill"
+        spill_dir.mkdir(parents=True, exist_ok=True)
+
+        with duckpd.connect(
+            memory_limit="32MB",
+            temp_directory=spill_dir,
+            max_temp_directory_size="1GB",
+            threads=2,
+        ) as session:
+            # Generate 250,000 rows
+            frame = session.sql(
+                """
+                SELECT 
+                    (i % 100)::INTEGER as group_key,
+                    (i * 1.5)::DOUBLE as value,
+                    (i % 2 = 0)::BOOLEAN as flag
+                FROM range(250000) t(i)
+                """
+            )
+
+            # Sort and write parquet directly
+            out_parquet = Path(tmpdir) / "sorted.parquet"
+            sorted_frame = frame.sort_values("value", ascending=False)
+            sorted_frame.write_parquet(out_parquet)
+
+            assert out_parquet.exists()
+            assert out_parquet.stat().st_size > 0
+
+            # GroupBy aggregation
+            grouped = frame.groupby("group_key", as_index=False).agg(
+                total_val=("value", "sum"),
+                count_flag=("flag", "count"),
+                size=("value", "size"),
+            )
+            res = grouped.collect()
+
+            assert isinstance(res, pd.DataFrame)
+            assert res.shape == (100, 4)
+            assert session.execution_count == 2
+
+
+def test_explain_modes() -> None:
+    frame = duckpd.from_pandas(pd.DataFrame({"x": [1, 2, 3]}))
+
+    logical = frame.explain(mode="logical")
+    assert "DuckPD logical plan:" in logical
+    assert "DuckDB SQL:" not in logical
+
+    sql = frame.explain(mode="sql")
+    assert "DuckDB SQL:" in sql
+    assert "DuckPD logical plan:" not in sql
+
+    physical = frame.explain(mode="physical")
+    assert "DuckDB physical plan:" in physical
+    assert "DuckPD logical plan:" not in physical
+
+    all_views = frame.explain(mode="all")
+    assert "DuckPD logical plan:" in all_views
+    assert "DuckDB SQL:" in all_views
+    assert "DuckDB physical plan:" in all_views
+
+    with pytest.raises(ValueError, match="Unknown explain mode"):
+        frame.explain(mode="invalid")  # type: ignore[arg-type]
+
+
+def test_explain_write(tmp_path: Path) -> None:
+    frame = duckpd.from_pandas(pd.DataFrame({"x": [1, 2, 3]}))
+    target = tmp_path / "out.parquet"
+
+    info = frame.explain_write(target, compression="zstd")
+    assert f"Write target: {target}" in info
+    assert "Compression: zstd" in info
+    assert "Output columns:" in info
+    assert "DuckDB physical plan:" in info
