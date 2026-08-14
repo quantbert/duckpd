@@ -152,10 +152,10 @@ class NamedExpression:
 
 @dataclass(frozen=True)
 class AggregateExpression:
-    """A pandas-aware global aggregate over an optional input expression."""
+    """A pandas-aware aggregate over an optional input expression."""
 
     column: Column
-    operator: AggregateOperator
+    operator: AggregateOperator | None
     expression: Expression | None = None
     input_duckdb_type: str | None = None
     skipna: bool = True
@@ -323,11 +323,14 @@ class LimitPlan(LogicalPlanBase):
 
 @dataclass(frozen=True)
 class AggregatePlan(LogicalPlanBase):
-    """Reduce an input frame to exactly one row."""
+    """Aggregate an input frame with optional grouping keys."""
 
     input: LogicalPlan
     aggregates: tuple[AggregateExpression, ...]
     metadata: FrameMetadata
+    keys: tuple[ColumnId, ...] = ()
+    dropna: bool = True
+    sort: bool = True
 
 
 LogicalPlan: TypeAlias = (

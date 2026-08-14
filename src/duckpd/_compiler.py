@@ -112,13 +112,37 @@ class DuckDBCompiler:
             }
             return CompiledFrame(relation, bindings)
         if isinstance(plan, AggregatePlan):
+            input_rel = compiled_input.relation
+            if plan.keys and plan.dropna:
+                # filter out rows where any group key is null
+                for key_id in plan.keys:
+                    key_label = quote_identifier(compiled_input.bindings[key_id])
+                    input_rel = input_rel.filter(
+                        duckdb.SQLExpression(f"{key_label} IS NOT NULL")
+                    )
+
             expressions = [
                 self._compile_aggregate(aggregate, compiled_input.bindings).alias(
                     aggregate.column.label
                 )
                 for aggregate in plan.aggregates
             ]
-            relation = compiled_input.relation.aggregate(expressions)
+            if plan.keys:
+                key_labels = [
+                    quote_identifier(compiled_input.bindings[key_id])
+                    for key_id in plan.keys
+                ]
+                groups_spec = ", ".join(key_labels)
+                relation = input_rel.aggregate(expressions, groups_spec)
+                if plan.sort:
+                    sort_keys = [
+                        duckdb.SQLExpression(k).asc().nulls_last()
+                        for k in key_labels
+                    ]
+                    relation = relation.sort(*sort_keys)
+            else:
+                relation = input_rel.aggregate(expressions)
+
             return CompiledFrame(
                 relation,
                 {
@@ -249,6 +273,10 @@ class DuckDBCompiler:
             return duckdb.SQLExpression("count(*)")
         if aggregate.expression is None:
             raise AssertionError("Only size aggregates may omit an expression")
+
+        # Identity column pass-through for group keys in projection
+        if aggregate.operator is None:
+            return self.compile_expression(aggregate.expression, bindings)
 
         operand = self.compile_expression(aggregate.expression, bindings)
         non_null_count = duckdb.FunctionExpression("count", operand)

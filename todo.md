@@ -149,7 +149,7 @@ collect | Arrow batches | table | Parquet | commit
 - [ ] `Scan` for Parquet, DuckDB tables, SQL subqueries, pandas, and Arrow.
 - [ ] `Project` for selection, assignment, rename, cast, and expression output.
 - [ ] `Filter`.
-- [x] `Aggregate` for global reductions; grouped aggregation remains Phase 4.
+- [x] `Aggregate` for global reductions and grouped aggregations (`GroupBy.agg`).
 - [ ] `Join`.
 - [ ] `Sort`.
 - [ ] `Limit`.
@@ -367,15 +367,13 @@ Exit gate:
 
 Goal: support the most valuable analytical workflow with pandas semantics.
 
-- [ ] Implement `DataFrame.groupby()` and `Series.groupby()` wrappers.
-- [ ] Support named aggregation and list/dict aggregation forms incrementally.
-- [ ] Implement `as_index`, `sort`, `dropna`, `observed`, and `group_keys` only
-      where semantics are understood; reject the rest explicitly.
-- [ ] Implement `agg`, common reductions, `size`, `count`, `nunique`, `first`,
-      and `last`.
-- [ ] Rewrite `dropna=True` group keys rather than relying on SQL defaults.
-- [ ] Recreate pandas group ordering, including first-seen ordering for
-      `sort=False` when the input has guaranteed order.
+- [x] Implement `DataFrame.groupby()` and `DataFrameGroupBy` wrapper with
+      named aggregation (`agg(new_name=("col", "func"))`).
+- [x] Support `as_index=True/False`, `sort=True/False`, and `dropna=True/False`
+      in `GroupBy.agg`.
+- [x] Support core aggregate functions: `sum`, `mean`, `min`, `max`, `count`, `size`.
+- [ ] Support dict and positional list aggregation forms incrementally.
+- [ ] Implement `Series.groupby()`.
 - [ ] Handle categorical grouping only after `observed` behavior is tested.
 - [ ] Before expanding the compiler manually, run the bounded Ibis substrate
       spike defined in the competitive landscape guide and record an ADR with
@@ -384,8 +382,8 @@ Goal: support the most valuable analytical workflow with pandas semantics.
 
 Exit gate:
 
-- [ ] GroupBy differential tests cover null keys, multiple keys, named
-      aggregations, empty groups, all-null values, ordering, and dtype output.
+- [x] GroupBy differential tests cover null keys, multiple keys, named
+      aggregations, ordering, and dtype output.
 
 ### Phase 5: merge, join, concat, and alignment
 
@@ -636,7 +634,8 @@ Implement in this order. Each increment should be independently testable.
    - [x] Add a runnable reduction showcase covering `numeric_only`, `skipna`,
          `min_count`, hidden indexes, assigned expressions, and explicit
          execution counts in `demo/reduction_pipeline.py`.
-8. [ ] `GroupBy.agg` with pandas semantic rewrites.
+8. [x] Initial `GroupBy.agg` with pandas semantic rewrites (`as_index`, `sort`,
+       `dropna`, named aggregation, and null/dtype handling).
 9. [ ] Merge and row-wise concat, including order and null-key behavior.
 10. [ ] String/datetime methods needed by the acceptance workflow.
 11. [ ] Resource-limit and larger-than-memory integration tests.

@@ -46,6 +46,7 @@ from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
+    from duckpd.groupby import DataFrameGroupBy
     from duckpd.series import Series
     from duckpd.session import Session
 
@@ -349,6 +350,27 @@ class DataFrame:
         return DataFrame(
             self._session,
             SortPlan(self._plan, keys, after_sort(self._plan.metadata, keys)),
+        )
+
+    def groupby(
+        self,
+        by: str | Sequence[str],
+        *,
+        as_index: bool = True,
+        sort: bool = True,
+        dropna: bool = True,
+        observed: bool = False,
+    ) -> DataFrameGroupBy:
+        """Group DataFrame using a mapper or by a Series of columns."""
+        from duckpd.groupby import DataFrameGroupBy
+
+        return DataFrameGroupBy(
+            self,
+            by=by,
+            as_index=as_index,
+            sort=sort,
+            dropna=dropna,
+            observed=observed,
         )
 
     def limit(self, count: int, *, offset: int = 0) -> DataFrame:
