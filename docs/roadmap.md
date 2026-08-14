@@ -343,8 +343,14 @@ Exit gate:
 
 Goal: cover common analytical transformations that do not require alignment.
 
-- [ ] `rename`, `drop`, `astype`, `fillna`, `dropna`, `isna`, `notna`, `where`,
+- [x] `rename`, `drop`, `astype`, `fillna`, `dropna`, `isna`, `notna`, `where`,
       and `mask`.
+- [x] `rename` and `drop` for column labels with `errors`, `axis`, and `columns`
+      keyword support; index renaming and row dropping remain unsupported.
+- [x] `astype` for Series and DataFrame supporting string/pandas/DuckDB dtype mappings.
+- [x] `fillna` for Series and DataFrame supporting scalar and column-mapping dicts.
+- [x] `dropna` for Series (axis=0) and DataFrame with `how='any'/'all'`, `subset`, and `thresh`.
+- [x] `where` and `mask` for Series and DataFrame with `cond` and `other` expressions.
 - [ ] Scalar and Series arithmetic, comparisons, boolean operations, and casts.
 - [ ] Reductions: `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
       `median`, `quantile`, `any`, and `all`.
@@ -359,7 +365,10 @@ Goal: cover common analytical transformations that do not require alignment.
       `min_count`, `ddof`, empty inputs, and all-null inputs.
 - [ ] `drop_duplicates` with `keep="first"`, `keep="last"`, and `keep=False`
       using explicit ordering and window rewrites.
-- [ ] `value_counts`, `nunique`, `unique`, `nlargest`, and `nsmallest`.
+- [x] `drop_duplicates` with `subset` and `keep="first"` using `DISTINCT`-style
+      aggregates; `keep="last"` and `keep=False` remain unsupported until window
+      functions are available.
+- [x] `value_counts`, `nunique`, `unique`, `nlargest`, and `nsmallest`.
 - [ ] `sample` only after defining deterministic seed and ordering behavior.
 - [x] Reject unsupported axes, argument combinations, and reduction dtypes
       before execution for the implemented reduction subset.

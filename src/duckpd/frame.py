@@ -4,17 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 import pandas as pd
 import pyarrow as pa
 
 from duckpd._logical import (
+    AggregateExpression,
     AggregateOperator,
+    AggregatePlan,
+    BinaryExpression,
+    BinaryOperator,
+    CaseWhen,
+    CastExpression,
     Column,
     ColumnId,
     ColumnRef,
     FilterPlan,
+    FrameMetadata,
+    FunctionCall,
     LimitPlan,
     LiteralValue,
     NamedExpression,
@@ -25,6 +33,7 @@ from duckpd._logical import (
     SortPlan,
 )
 from duckpd._metadata import (
+    after_aggregate,
     after_projection,
     after_sort,
     find_column,
@@ -41,7 +50,7 @@ from duckpd._reductions import (
     validate_axis,
     validate_min_count,
 )
-from duckpd._typing import ParquetCompression, is_scalar_value
+from duckpd._typing import ParquetCompression, is_scalar_value, normalize_dtype
 from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
@@ -230,6 +239,405 @@ class DataFrame:
             AggregateOperator.MAX,
             columns,
             skipna=skipna,
+        )
+
+    def isna(self) -> DataFrame:
+        """Return a lazy boolean frame marking missing values."""
+        return self._null_check("isnull")
+
+    def notna(self) -> DataFrame:
+        """Return a lazy boolean frame marking non-missing values."""
+        return self._null_check("notnull")
+
+    def isnull(self) -> DataFrame:
+        """Alias for :meth:`isna`."""
+        return self.isna()
+
+    def notnull(self) -> DataFrame:
+        """Alias for :meth:`notna`."""
+        return self.notna()
+
+    def astype(
+        self,
+        dtype: object,
+        *,
+        copy: bool = True,
+        errors: Literal["raise", "ignore"] = "raise",
+    ) -> DataFrame:
+        """Cast DataFrame columns to specified dtype(s)."""
+        if not copy:
+            raise UnsupportedOperationError("DuckPD does not support copy=False")
+        if errors not in {"raise", "ignore"}:
+            raise ValueError("errors must be 'raise' or 'ignore'")
+
+        visible = self._plan.metadata.visible_columns
+        index_ids = set(self._plan.metadata.index.columns)
+        index_columns = tuple(
+            column
+            for column in self._plan.metadata.columns
+            if column.id in index_ids and column.hidden
+        )
+
+        from dataclasses import replace as replace_column
+
+        if isinstance(dtype, dict):
+            mapping = cast("dict[object, object]", dtype)
+            projections: list[NamedExpression] = []
+            for col in visible:
+                if col.label in mapping:
+                    target_spec = mapping[col.label]
+                    try:
+                        target_type = normalize_dtype(target_spec)
+                        out_col = replace_column(col, duckdb_type=target_type)
+                        projections.append(
+                            NamedExpression(
+                                out_col, CastExpression(ColumnRef(col.id), target_type)
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        if errors == "raise":
+                            raise
+                        projections.append(NamedExpression(col, ColumnRef(col.id)))
+                else:
+                    projections.append(NamedExpression(col, ColumnRef(col.id)))
+        else:
+            try:
+                target_type = normalize_dtype(dtype)
+                projections = [
+                    NamedExpression(
+                        replace_column(col, duckdb_type=target_type),
+                        CastExpression(ColumnRef(col.id), target_type),
+                    )
+                    for col in visible
+                ]
+            except (TypeError, ValueError):
+                if errors == "raise":
+                    raise
+                projections = [
+                    NamedExpression(col, ColumnRef(col.id)) for col in visible
+                ]
+
+        for col in index_columns:
+            projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        projected_columns = tuple(p.column for p in projections)
+        return DataFrame(
+            self._session,
+            ProjectPlan(
+                self._plan,
+                tuple(projections),
+                after_projection(self._plan.metadata, projected_columns),
+            ),
+        )
+
+    def fillna(
+        self,
+        value: object = None,
+        *,
+        axis: int | str | None = None,
+        inplace: bool = False,
+        limit: int | None = None,
+    ) -> DataFrame:
+        """Fill NA/NaN values using the specified value."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if limit is not None:
+            raise UnsupportedOperationError(
+                "DuckPD does not support limit in fillna without explicit windows"
+            )
+        if axis not in {0, "index", None}:
+            raise UnsupportedOperationError(
+                "DuckPD fillna currently supports only axis=0 or axis='index'"
+            )
+        if value is None:
+            raise ValueError("Must specify a value to fill NA/NaN values with")
+
+        visible = self._plan.metadata.visible_columns
+        index_ids = set(self._plan.metadata.index.columns)
+        index_columns = tuple(
+            column
+            for column in self._plan.metadata.columns
+            if column.id in index_ids and column.hidden
+        )
+
+        from duckpd.series import Series
+
+        if isinstance(value, dict):
+            val_map = cast("dict[object, object]", value)
+            projections: list[NamedExpression] = []
+            for col in visible:
+                if col.label in val_map:
+                    fill_expr = self._coerce_expression(val_map[col.label])
+                    projections.append(
+                        NamedExpression(
+                            col,
+                            FunctionCall("coalesce", (ColumnRef(col.id), fill_expr)),
+                        )
+                    )
+                else:
+                    projections.append(NamedExpression(col, ColumnRef(col.id)))
+        elif isinstance(value, Series):
+            self._require_same_plan(value)
+            projections = [
+                NamedExpression(
+                    col,
+                    FunctionCall("coalesce", (ColumnRef(col.id), value._expression)),
+                )
+                for col in visible
+            ]
+        elif is_scalar_value(value):
+            fill_expr = LiteralValue(value)
+            projections = [
+                NamedExpression(
+                    col,
+                    FunctionCall("coalesce", (ColumnRef(col.id), fill_expr)),
+                )
+                for col in visible
+            ]
+        else:
+            raise TypeError(
+                "value must be a scalar, Series, or dict mapping column names to values"
+            )
+
+        for col in index_columns:
+            projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        projected_columns = tuple(p.column for p in projections)
+        return DataFrame(
+            self._session,
+            ProjectPlan(
+                self._plan,
+                tuple(projections),
+                after_projection(self._plan.metadata, projected_columns),
+            ),
+        )
+
+    def dropna(
+        self,
+        *,
+        axis: int | str = 0,
+        how: Literal["any", "all"] = "any",
+        thresh: int | None = None,
+        subset: str | Sequence[str] | None = None,
+        inplace: bool = False,
+        ignore_index: bool = False,
+    ) -> DataFrame:
+        """Remove missing values."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if ignore_index:
+            raise UnsupportedOperationError(
+                "DuckPD does not support ignore_index=True in dropna"
+            )
+        if how not in {"any", "all"}:
+            raise ValueError("how must be 'any' or 'all'")
+
+        if axis in {1, "columns"}:
+            raise UnsupportedOperationError(
+                "dropna(axis=1) is not supported because "
+                "column dropping requires data inspection"
+            )
+
+        if axis not in {0, "index"}:
+            raise ValueError("axis must be 0, 'index', 1, or 'columns'")
+
+        # Resolve subset columns
+        if subset is not None:
+            sub_labels = (subset,) if isinstance(subset, str) else tuple(subset)
+            target_columns = tuple(self._column(label) for label in sub_labels)
+        else:
+            target_columns = self._plan.metadata.visible_columns
+
+        if not target_columns:
+            return self
+
+        # Build predicate
+        if thresh is not None:
+            if thresh <= 0:
+                return self
+            count_expr: Expression = CastExpression(
+                FunctionCall("notnull", (ColumnRef(target_columns[0].id),)),
+                "INTEGER",
+            )
+            for col in target_columns[1:]:
+                count_expr = BinaryExpression(
+                    count_expr,
+                    BinaryOperator.ADD,
+                    CastExpression(
+                        FunctionCall("notnull", (ColumnRef(col.id),)), "INTEGER"
+                    ),
+                )
+            predicate: Expression = BinaryExpression(
+                count_expr, BinaryOperator.GREATER_EQUAL, LiteralValue(thresh)
+            )
+        elif how == "any":
+            predicate = FunctionCall("notnull", (ColumnRef(target_columns[0].id),))
+            for col in target_columns[1:]:
+                predicate = BinaryExpression(
+                    predicate,
+                    BinaryOperator.AND,
+                    FunctionCall("notnull", (ColumnRef(col.id),)),
+                )
+        else:  # how == "all"
+            predicate = FunctionCall("notnull", (ColumnRef(target_columns[0].id),))
+            for col in target_columns[1:]:
+                predicate = BinaryExpression(
+                    predicate,
+                    BinaryOperator.OR,
+                    FunctionCall("notnull", (ColumnRef(col.id),)),
+                )
+
+        return DataFrame(
+            self._session,
+            FilterPlan(self._plan, predicate, self._plan.metadata),
+        )
+
+    def where(
+        self,
+        cond: object,
+        other: object = None,
+        *,
+        inplace: bool = False,
+        axis: int | str | None = None,
+    ) -> DataFrame:
+        """Replace values where the condition is False."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if axis not in {0, "index", None}:
+            raise UnsupportedOperationError(
+                "DuckPD where currently supports only axis=0 or axis='index'"
+            )
+        return self._where_mask(cond, other, invert=False)
+
+    def mask(
+        self,
+        cond: object,
+        other: object = None,
+        *,
+        inplace: bool = False,
+        axis: int | str | None = None,
+    ) -> DataFrame:
+        """Replace values where the condition is True."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if axis not in {0, "index", None}:
+            raise UnsupportedOperationError(
+                "DuckPD mask currently supports only axis=0 or axis='index'"
+            )
+        return self._where_mask(cond, other, invert=True)
+
+    def _where_mask(
+        self,
+        cond: object,
+        other: object,
+        *,
+        invert: bool,
+    ) -> DataFrame:
+        from duckpd.series import Series
+
+        visible = self._plan.metadata.visible_columns
+        index_ids = set(self._plan.metadata.index.columns)
+        index_columns = tuple(
+            column
+            for column in self._plan.metadata.columns
+            if column.id in index_ids and column.hidden
+        )
+
+        # Handle cond: DataFrame, Series, or boolean literal
+        if isinstance(cond, DataFrame):
+            if cond._session is not self._session or cond._plan is not self._plan:
+                raise AlignmentError(
+                    "Condition DataFrame from different frame "
+                    "requires explicit index alignment"
+                )
+            # Match each column of cond to self
+            cond_map = {
+                col.label: ColumnRef(col.id)
+                for col in cond._plan.metadata.visible_columns
+            }
+        elif isinstance(cond, Series):
+            self._require_same_plan(cond)
+            cond_map = {col.label: cond._expression for col in visible}
+        elif isinstance(cond, bool):
+            cond_map = {col.label: LiteralValue(cond) for col in visible}
+        else:
+            raise TypeError("cond must be a DataFrame, Series, or boolean")
+
+        # Handle other: DataFrame, Series, scalar, or dict
+        if isinstance(other, DataFrame):
+            if other._session is not self._session or other._plan is not self._plan:
+                raise AlignmentError(
+                    "Other DataFrame from different frame "
+                    "requires explicit index alignment"
+                )
+            other_map = {
+                col.label: ColumnRef(col.id)
+                for col in other._plan.metadata.visible_columns
+            }
+        elif isinstance(other, Series):
+            self._require_same_plan(other)
+            other_map = {col.label: other._expression for col in visible}
+        elif isinstance(other, dict):
+            other_dict = cast("dict[object, object]", other)
+            other_map = {
+                col.label: self._coerce_expression(other_dict.get(col.label))
+                for col in visible
+            }
+        elif is_scalar_value(other):
+            other_map = {col.label: LiteralValue(other) for col in visible}
+        else:
+            raise TypeError("other must be a scalar, Series, DataFrame, or dict")
+
+        projections: list[NamedExpression] = []
+        for col in visible:
+            c_expr = cond_map.get(col.label, LiteralValue(True))
+            o_expr = other_map.get(col.label, LiteralValue(None))
+            val_if_true = ColumnRef(col.id) if not invert else o_expr
+            val_if_false = o_expr if not invert else ColumnRef(col.id)
+            expr = CaseWhen(c_expr, val_if_true, val_if_false)
+            projections.append(NamedExpression(col, expr))
+
+        for col in index_columns:
+            projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        projected_columns = tuple(p.column for p in projections)
+        return DataFrame(
+            self._session,
+            ProjectPlan(
+                self._plan,
+                tuple(projections),
+                after_projection(self._plan.metadata, projected_columns),
+            ),
+        )
+
+    def _null_check(self, function_name: str) -> DataFrame:
+        visible = self._plan.metadata.visible_columns
+        index_ids = set(self._plan.metadata.index.columns)
+        # Keep hidden index columns as identity pass-through so the index survives.
+        index_columns = tuple(
+            column
+            for column in self._plan.metadata.columns
+            if column.id in index_ids and column.hidden
+        )
+        null_projections = tuple(
+            NamedExpression(
+                Column(column.id, column.label, "BOOLEAN"),
+                FunctionCall(function_name, (ColumnRef(column.id),)),
+            )
+            for column in visible
+        )
+        index_projections = tuple(
+            NamedExpression(column, ColumnRef(column.id)) for column in index_columns
+        )
+        projections = (*null_projections, *index_projections)
+        projected_columns = tuple(projection.column for projection in projections)
+        return DataFrame(
+            self._session,
+            ProjectPlan(
+                self._plan,
+                projections,
+                after_projection(self._plan.metadata, projected_columns),
+            ),
         )
 
     @overload
@@ -459,11 +867,295 @@ class DataFrame:
         metadata = reset_index_metadata(self._plan.metadata, drop=drop)
         return self._identity_project(metadata)
 
+    def rename(
+        self,
+        columns: dict[str, str] | None = None,
+        *,
+        mapper: object | None = None,
+        axis: int | str = 0,
+        index: object | None = None,
+        copy: bool = True,
+        inplace: bool = False,
+        level: object | None = None,
+        errors: Literal["ignore", "raise"] = "raise",
+    ) -> DataFrame:
+        """Rename columns or index labels lazily."""
+        if not copy:
+            raise UnsupportedOperationError("DuckPD does not support copy=False")
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if level is not None:
+            raise UnsupportedOperationError("DuckPD does not support MultiIndex levels")
+        if index is not None:
+            raise UnsupportedOperationError(
+                "DuckPD does not yet support renaming index labels"
+            )
+        if axis not in {0, "index", "columns"}:
+            raise ValueError("axis must be 0, 'index', or 'columns'")
+        if mapper is not None and columns is not None:
+            raise TypeError("Cannot specify both mapper and columns")
+        mapping: dict[str, str] = {}
+        source = mapper if mapper is not None else columns
+        if source is None:
+            return self
+        if not isinstance(source, dict):
+            raise TypeError("rename currently supports only a dict mapping")
+        mapping: dict[str, str] = {}
+        for old_item, new_item in cast("dict[object, object]", source).items():
+            if not isinstance(old_item, str) or not isinstance(new_item, str):
+                raise TypeError("rename mapping keys and values must be strings")
+            mapping[old_item] = new_item
+        if not mapping:
+            return self
+        if errors not in {"ignore", "raise"}:
+            raise ValueError("errors must be 'ignore' or 'raise'")
+
+        existing_labels = {column.label for column in self._plan.metadata.columns}
+        for old in mapping:
+            if old not in existing_labels and errors == "raise":
+                raise KeyError(old)
+
+        from dataclasses import replace as replace_column
+
+        new_columns = tuple(
+            replace_column(column, label=mapping[column.label])
+            if column.label in mapping
+            else column
+            for column in self._plan.metadata.columns
+        )
+        new_metadata = FrameMetadata(
+            new_columns,
+            self._plan.metadata.index,
+            self._plan.metadata.ordering,
+        )
+        return self._identity_project(new_metadata)
+
+    def drop(
+        self,
+        labels: str | Sequence[str] | None = None,
+        *,
+        axis: int | str = 0,
+        columns: str | Sequence[str] | None = None,
+        index: object | None = None,
+        level: object | None = None,
+        inplace: bool = False,
+        errors: Literal["ignore", "raise"] = "raise",
+    ) -> DataFrame:
+        """Drop columns or rows lazily."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if level is not None:
+            raise UnsupportedOperationError("DuckPD does not support MultiIndex levels")
+        if index is not None:
+            raise UnsupportedOperationError(
+                "DuckPD does not yet support dropping rows by index"
+            )
+        if axis not in {0, "index", "columns"}:
+            raise ValueError("axis must be 0, 'index', or 'columns'")
+        if errors not in {"ignore", "raise"}:
+            raise ValueError("errors must be 'ignore' or 'raise'")
+
+        if columns is not None:
+            drop_labels = (columns,) if isinstance(columns, str) else tuple(columns)
+        elif labels is None:
+            raise TypeError("must specify either labels or columns")
+        elif axis in {0, "index"} and not isinstance(labels, str):
+            drop_labels = tuple(labels)
+        elif axis in {0, "index"}:
+            drop_labels = (labels,)
+        else:
+            drop_labels = (labels,) if isinstance(labels, str) else tuple(labels)
+
+        if not drop_labels:
+            return self
+
+        existing_labels = {column.label for column in self._plan.metadata.columns}
+        for label in drop_labels:
+            if label not in existing_labels and errors == "raise":
+                raise KeyError(label)
+
+        drop_set = set(drop_labels)
+        kept_visible = tuple(
+            column
+            for column in self._plan.metadata.visible_columns
+            if column.label not in drop_set
+        )
+        if not kept_visible:
+            raise ValueError("DuckPD does not yet support empty projections")
+        projections = tuple(
+            NamedExpression(column, ColumnRef(column.id)) for column in kept_visible
+        )
+        selected = tuple(projection.column for projection in projections)
+        columns_to_keep = projection_columns(self._plan.metadata, selected)
+        projections = tuple(
+            NamedExpression(column, ColumnRef(column.id)) for column in columns_to_keep
+        )
+        return DataFrame(
+            self._session,
+            ProjectPlan(
+                self._plan,
+                projections,
+                after_projection(self._plan.metadata, columns_to_keep),
+            ),
+        )
+
     def head(self, count: int = 5) -> pd.DataFrame:
         """Execute a bounded preview and return a pandas DataFrame."""
         if count < 0:
             raise ValueError("count must be non-negative")
         return self.limit(count).collect()
+
+    def nunique(
+        self,
+        *,
+        axis: int | str = 0,
+        dropna: bool = True,
+    ) -> pd.Series:
+        """Return the number of unique values per column."""
+        if axis not in {0, "index"}:
+            raise UnsupportedOperationError(
+                "DuckPD nunique currently supports only axis=0 or axis='index'"
+            )
+        visible = self._plan.metadata.visible_columns
+        if not visible:
+            raise UnsupportedOperationError("No columns are available for nunique")
+        requests = tuple(
+            (column.label, ColumnRef(column.id), column.duckdb_type)
+            for column in visible
+        )
+        plan = aggregate_plan(self._plan, requests, AggregateOperator.NUNIQUE)
+        result = self._session._executor.reduce_columns(plan)
+        if not dropna:
+            raise UnsupportedOperationError(
+                "DuckPD nunique currently supports only dropna=True"
+            )
+        return result
+
+    def drop_duplicates(
+        self,
+        subset: str | Sequence[str] | None = None,
+        *,
+        keep: Literal["first", "last", False] = "first",
+        inplace: bool = False,
+        ignore_index: bool = False,
+    ) -> DataFrame:
+        """Return DataFrame with duplicate rows removed."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if ignore_index:
+            raise UnsupportedOperationError(
+                "DuckPD does not support ignore_index=True in drop_duplicates"
+            )
+        if keep not in {"first", "last", False}:
+            raise ValueError("keep must be 'first', 'last', or False")
+
+        if subset is None:
+            subset_labels = tuple(self.columns)
+        elif isinstance(subset, str):
+            subset_labels = (subset,)
+        else:
+            subset_labels = tuple(subset)
+
+        if not subset_labels:
+            raise ValueError("subset must not be empty")
+
+        subset_columns = tuple(self._column(label) for label in subset_labels)
+        subset_ids = {col.id for col in subset_columns}
+
+        # Group by the subset columns; pass through all visible columns.
+        # Non-subset columns use any_value() to pick one row per group.
+        all_visible = self._plan.metadata.visible_columns
+
+        aggregates: list[AggregateExpression] = []
+        output_columns: list[Column] = []
+        for col in all_visible:
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                col.duckdb_type,
+                hidden=False,
+            )
+            output_columns.append(out_col)
+            if col.id in subset_ids:
+                # Subset columns are group keys — identity pass-through
+                aggregates.append(
+                    AggregateExpression(
+                        out_col,
+                        operator=None,
+                        expression=ColumnRef(col.id),
+                        input_duckdb_type=col.duckdb_type,
+                    )
+                )
+            else:
+                # Non-subset columns: use any_value to pick one row per group
+                aggregates.append(
+                    AggregateExpression(
+                        out_col,
+                        operator=AggregateOperator.ANY_VALUE,
+                        expression=ColumnRef(col.id),
+                        input_duckdb_type=col.duckdb_type,
+                    )
+                )
+
+        key_ids = tuple(col.id for col in subset_columns)
+        metadata = after_aggregate(
+            tuple(output_columns), index_ids=(), ordering_keys=()
+        )
+        distinct_plan = AggregatePlan(
+            self._plan,
+            tuple(aggregates),
+            metadata,
+            keys=key_ids,
+            dropna=False,
+            sort=False,
+        )
+        return DataFrame(self._session, distinct_plan)
+
+    def nlargest(
+        self,
+        n: int,
+        columns: str | Sequence[str],
+        *,
+        keep: Literal["first", "last", "all"] = "first",
+    ) -> DataFrame:
+        """Return the first ``n`` rows ordered by ``columns`` in descending order."""
+        return self._top_n(n, columns, largest=True, keep=keep)
+
+    def nsmallest(
+        self,
+        n: int,
+        columns: str | Sequence[str],
+        *,
+        keep: Literal["first", "last", "all"] = "first",
+    ) -> DataFrame:
+        """Return the first ``n`` rows ordered by ``columns`` in ascending order."""
+        return self._top_n(n, columns, largest=False, keep=keep)
+
+    def _top_n(
+        self,
+        n: int,
+        columns: str | Sequence[str],
+        *,
+        largest: bool,
+        keep: str,
+    ) -> DataFrame:
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        if keep not in {"first", "last", "all"}:
+            raise ValueError("keep must be 'first', 'last', or 'all'")
+        if keep == "all":
+            raise UnsupportedOperationError(
+                "DuckPD does not yet support keep='all' in nlargest/nsmallest"
+            )
+        sorted_frame = self.sort_values(columns, ascending=not largest)
+        if keep == "last":
+            # Reverse the sort, limit, then the result is in reverse order.
+            # For simplicity, sort in opposite direction and limit.
+            sorted_frame = self.sort_values(columns, ascending=largest)
+            result = sorted_frame.limit(n)
+            # Re-sort in the requested direction
+            return result.sort_values(columns, ascending=not largest)
+        return sorted_frame.limit(n)
 
     def __repr__(self) -> str:
         labels = ", ".join(repr(label) for label in self.columns)
@@ -480,8 +1172,6 @@ class DataFrame:
         raise AssertionError(f"Column ID is missing from metadata: {column_id}")
 
     def _identity_project(self, metadata: object) -> DataFrame:
-        from duckpd._logical import FrameMetadata
-
         if not isinstance(metadata, FrameMetadata):
             raise TypeError("Expected FrameMetadata")
         projections = tuple(

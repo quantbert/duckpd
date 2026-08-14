@@ -15,6 +15,8 @@ from duckpd._logical import (
     AggregatePlan,
     ArrowSource,
     BinaryOperator,
+    CaseWhen,
+    CastExpression,
     Column,
     ColumnId,
     ColumnRef,
@@ -39,6 +41,7 @@ from duckpd._logical import (
     UnaryOperator,
 )
 from duckpd._quoting import quote_identifier
+from duckpd.errors import UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd.session import Session
@@ -191,14 +194,27 @@ class DuckDBCompiler:
             if expression.operator is UnaryOperator.POSITIVE:
                 return operand
             raise AssertionError(f"Unknown unary operator: {expression.operator}")
+        if isinstance(expression, CastExpression):
+            operand = self.compile_expression(expression.operand, bindings)
+            return operand.cast(expression.target_type)
+        if isinstance(expression, CaseWhen):
+            cond = self.compile_expression(expression.condition, bindings)
+            val = self.compile_expression(expression.value, bindings)
+            other = self.compile_expression(expression.otherwise, bindings)
+            return duckdb.CaseExpression(cond, val).otherwise(other)
         if isinstance(expression, FunctionCall):
             compiled_args = [
                 self.compile_expression(arg, bindings) for arg in expression.arguments
             ]
-            if expression.name.lower() == "coalesce" and len(compiled_args) == 2:
+            name = expression.name.lower()
+            if name == "coalesce" and len(compiled_args) == 2:
                 return duckdb.CaseExpression(
                     compiled_args[0].isnull(), compiled_args[1]
                 ).otherwise(compiled_args[0])
+            if name == "isnull" and len(compiled_args) == 1:
+                return compiled_args[0].isnull()
+            if name == "notnull" and len(compiled_args) == 1:
+                return compiled_args[0].isnotnull()
             return duckdb.FunctionExpression(expression.name, *compiled_args)
 
         left = self.compile_expression(expression.left, bindings)
@@ -294,6 +310,24 @@ class DuckDBCompiler:
         non_null_count = duckdb.FunctionExpression("count", operand)
         if aggregate.operator is AggregateOperator.COUNT:
             return non_null_count
+        if aggregate.operator is AggregateOperator.NUNIQUE:
+            # DuckDB's Python FunctionExpression doesn't support DISTINCT,
+            # so use a SQL expression with count(distinct ...).
+            # We need the SQL representation of the operand; for a simple
+            # ColumnRef this is the quoted binding label.
+            if isinstance(aggregate.expression, ColumnRef):
+                label = bindings[aggregate.expression.column_id]
+                return duckdb.SQLExpression(
+                    f"count(DISTINCT {quote_identifier(label)})"
+                )
+            # For non-column expressions, fall back to a subquery-free approach:
+            # cast the expression to a SQL fragment via the relation's SQL.
+            # This is a limitation; for now only ColumnRef is supported.
+            raise UnsupportedOperationError(
+                "nunique currently supports only direct column references"
+            )
+        if aggregate.operator is AggregateOperator.ANY_VALUE:
+            return duckdb.FunctionExpression("any_value", operand)
 
         function = {
             AggregateOperator.SUM: "sum",

@@ -106,6 +106,8 @@ class AggregateOperator(Enum):
     MEAN = "mean"
     MIN = "min"
     MAX = "max"
+    NUNIQUE = "nunique"
+    ANY_VALUE = "any_value"
 
 
 @dataclass(frozen=True)
@@ -147,8 +149,31 @@ class FunctionCall:
     arguments: tuple[Expression, ...]
 
 
+@dataclass(frozen=True)
+class CastExpression:
+    """Cast an expression to a target DuckDB type."""
+
+    operand: Expression
+    target_type: str
+
+
+@dataclass(frozen=True)
+class CaseWhen:
+    """A SQL CASE WHEN cond THEN val ELSE default END expression."""
+
+    condition: Expression
+    value: Expression
+    otherwise: Expression
+
+
 Expression: TypeAlias = (
-    ColumnRef | LiteralValue | BinaryExpression | UnaryExpression | FunctionCall
+    ColumnRef
+    | LiteralValue
+    | BinaryExpression
+    | UnaryExpression
+    | FunctionCall
+    | CastExpression
+    | CaseWhen
 )
 
 
@@ -261,6 +286,40 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
         return ExpressionMetadata(True, True, True, True)
     if isinstance(expression, UnaryExpression):
         return expression_metadata(expression.operand)
+    if isinstance(expression, CastExpression):
+        return expression_metadata(expression.operand)
+    if isinstance(expression, CaseWhen):
+        cond_meta = expression_metadata(expression.condition)
+        val_meta = expression_metadata(expression.value)
+        other_meta = expression_metadata(expression.otherwise)
+        return ExpressionMetadata(
+            is_elementwise=(
+                cond_meta.is_elementwise
+                and val_meta.is_elementwise
+                and other_meta.is_elementwise
+            ),
+            preserves_length=(
+                cond_meta.preserves_length
+                and val_meta.preserves_length
+                and other_meta.preserves_length
+            ),
+            is_scalar_like=(
+                cond_meta.is_scalar_like
+                and val_meta.is_scalar_like
+                and other_meta.is_scalar_like
+            ),
+            is_literal=(
+                cond_meta.is_literal and val_meta.is_literal and other_meta.is_literal
+            ),
+            has_window=(
+                cond_meta.has_window or val_meta.has_window or other_meta.has_window
+            ),
+            order_dependency_count=(
+                cond_meta.order_dependency_count
+                + val_meta.order_dependency_count
+                + other_meta.order_dependency_count
+            ),
+        )
     if isinstance(expression, FunctionCall):
         arg_metas = [expression_metadata(arg) for arg in expression.arguments]
         return ExpressionMetadata(

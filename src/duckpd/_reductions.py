@@ -8,6 +8,8 @@ from duckpd._logical import (
     AggregateExpression,
     AggregateOperator,
     AggregatePlan,
+    CaseWhen,
+    CastExpression,
     Column,
     ColumnId,
     ColumnRef,
@@ -62,11 +64,20 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         return "UNKNOWN"
     if isinstance(expression, UnaryExpression):
         return expression_type(plan, expression.operand)
+    if isinstance(expression, CastExpression):
+        return expression.target_type
+    if isinstance(expression, CaseWhen):
+        val_type = expression_type(plan, expression.value)
+        if val_type != "UNKNOWN":
+            return val_type
+        return expression_type(plan, expression.otherwise)
     if isinstance(expression, FunctionCall):
         func_name = expression.name.lower()
         if func_name in {"length", "year", "month", "day", "hour", "minute", "second"}:
             return "BIGINT"
         if func_name in {"starts_with", "ends_with", "contains"}:
+            return "BOOLEAN"
+        if func_name in {"isnull", "notnull"}:
             return "BOOLEAN"
         if func_name in {"upper", "lower", "trim", "replace", "strftime"}:
             return "VARCHAR"
@@ -115,16 +126,23 @@ def aggregate_plan(
     """Build one global aggregate plan with outputs in request order."""
     aggregates: list[AggregateExpression] = []
     for label, expression, input_type in requests:
-        if operator not in {AggregateOperator.COUNT, AggregateOperator.SIZE} and (
-            input_type is None or not is_numeric_type(input_type)
-        ):
+        if operator not in {
+            AggregateOperator.COUNT,
+            AggregateOperator.SIZE,
+            AggregateOperator.NUNIQUE,
+        } and (input_type is None or not is_numeric_type(input_type)):
             raise UnsupportedOperationError(
                 f"{operator.value} currently supports only numeric and boolean data; "
                 f"column {label!r} has DuckDB type {input_type}"
             )
         output_type = (
             "BIGINT"
-            if operator in {AggregateOperator.COUNT, AggregateOperator.SIZE}
+            if operator
+            in {
+                AggregateOperator.COUNT,
+                AggregateOperator.SIZE,
+                AggregateOperator.NUNIQUE,
+            }
             else "UNKNOWN"
         )
         output = Column(ColumnId.create(), label, output_type)
