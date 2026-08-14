@@ -30,6 +30,10 @@ uv run python demo/market_data_demo.py
   demonstrating remote data loading, column reductions, string transformations,
   `groupby` aggregations, query plans, and Parquet exports on the Goodreads
   Books dataset.
+- `DuckPD_Features_Walkthrough.ipynb` is a comprehensive interactive walkthrough
+  showcasing recent additions (remote cloud parquet, relational joins, `.str` and
+  `.dt` accessors, `duckpd.concat`, statistical/quantile reductions, and
+  multi-column groupbys) using the AlphaDojo stock news dataset (~3.9M rows).
 
 Run market data benchmarks:
 

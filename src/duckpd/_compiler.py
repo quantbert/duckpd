@@ -621,7 +621,12 @@ class DuckDBCompiler:
                     cast_sql = f"CAST({source_label} AS {target_col.duckdb_type})"
                     expr = duckdb.SQLExpression(cast_sql).alias(target_temp_name)
                 else:
-                    cast_null_sql = f"CAST(NULL AS {target_col.duckdb_type})"
+                    target_type = (
+                        "VARCHAR"
+                        if target_col.duckdb_type == "UNKNOWN"
+                        else target_col.duckdb_type
+                    )
+                    cast_null_sql = f"CAST(NULL AS {target_type})"
                     expr = duckdb.SQLExpression(cast_null_sql).alias(target_temp_name)
                 projections.append(expr)
 

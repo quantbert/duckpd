@@ -61,7 +61,9 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
             return "BIGINT"
         if isinstance(value, float):
             return "DOUBLE"
-        return "UNKNOWN"
+        if isinstance(value, str):
+            return "VARCHAR"
+        return "VARCHAR"
     if isinstance(expression, UnaryExpression):
         return expression_type(plan, expression.operand)
     if isinstance(expression, CastExpression):

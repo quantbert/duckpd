@@ -1,5 +1,9 @@
 # duckpd
 
+<p align="center">
+  <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
+</p>
+
 DuckPD is an experimental lazy DataFrame library with a pandas-shaped frontend
 and DuckDB as its execution engine.
 
@@ -18,14 +22,23 @@ silently falling back to materializing a complete pandas DataFrame. See the
 
 - Lazy pandas, Arrow, Parquet, DuckDB table, and read-only SQL sources.
 - Column selection, boolean filtering, arithmetic expressions, `assign`,
-  `sort_values`, and `limit`.
-- Eager DataFrame and Series `count`, `size`, `sum`, `mean`, `min`, and `max`
-	reductions over numeric and boolean data, including `skipna`, `min_count`,
-	and DataFrame `numeric_only` support.
+  `sort_values`, `limit`, and distinct/drop_duplicates deduplication.
+- Relational DataFrame joins (`merge`) supporting `inner`, `left`, `right`,
+  `outer`, and `cross` with column collision suffix management.
+- Multi-DataFrame row-wise concatenation (`duckpd.concat`) with schema alignment
+  and null-padding.
+- Vectorized `.str` (e.g. `upper`, `lower`, `strip`, `len`, `contains`, `replace`)
+  and `.dt` (e.g. `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime`,
+  `to_period`) accessor pipelines.
+- Multi-column `groupby()` supporting eager and lazy `agg()`, `sum()`, `mean()`,
+  `min()`, `max()`, `std()`, `var()`, and `count()`.
+- Eager DataFrame and Series reductions: `count`, `size`, `sum`, `mean`, `min`,
+  `max`, `std`, `var`, `median`, `quantile`, `any`, and `all` over numeric and
+  boolean data, including `skipna`, `min_count`, and DataFrame `numeric_only` support.
 - Explicit lazy indexes with `set_index()`/`reset_index()` and source
 	`index=`/`order_by=` declarations.
 - Explicit pandas collection, bounded `head`, Arrow tables and record batches,
-  physical plan inspection, and direct Parquet writes.
+  physical plan inspection (`explain`), and direct zero-copy Parquet writes.
 - Session-level memory, spill-directory, temporary-size, and thread settings.
 - Rejection of ambiguous cross-frame alignment and mutating SQL.
 
@@ -55,7 +68,10 @@ and file output are explicit execution boundaries. `limit()` stays lazy while
 
 ## Demos
 
-Small runnable programs are available in [demo/](demo/README.md):
+Interactive notebooks and small runnable programs are available in [demo/](demo/README.md):
+
+- `demo/DuckPD_Quickstart.ipynb` — 5-minute quickstart on the Goodreads Books dataset.
+- `demo/DuckPD_Features_Walkthrough.ipynb` — Deep dive into recent additions (remote cloud parquet, multi-table joins, `.str`/`.dt` accessors, `duckpd.concat`, statistical reductions, and multi-column groupbys) using the AlphaDojo stock news dataset (~3.9M rows).
 
 ```bash
 uv run python demo/basic_pipeline.py
