@@ -10,6 +10,9 @@ import pandas as pd
 import pyarrow as pa
 
 from duckpd._logical import (
+    AggregateExpression,
+    AggregateOperator,
+    AggregatePlan,
     ArrowSource,
     BinaryOperator,
     Column,
@@ -108,6 +111,21 @@ class DuckDBCompiler:
                 for projection in plan.projections
             }
             return CompiledFrame(relation, bindings)
+        if isinstance(plan, AggregatePlan):
+            expressions = [
+                self._compile_aggregate(aggregate, compiled_input.bindings).alias(
+                    aggregate.column.label
+                )
+                for aggregate in plan.aggregates
+            ]
+            relation = compiled_input.relation.aggregate(expressions)
+            return CompiledFrame(
+                relation,
+                {
+                    aggregate.column.id: aggregate.column.label
+                    for aggregate in plan.aggregates
+                },
+            )
         if isinstance(plan, SortPlan):
             keys = tuple(
                 self._compile_sort_key(key, compiled_input.bindings)
@@ -221,3 +239,56 @@ class DuckDBCompiler:
             if key.null_placement is NullPlacement.FIRST
             else result.nulls_last()
         )
+
+    def _compile_aggregate(
+        self,
+        aggregate: AggregateExpression,
+        bindings: dict[ColumnId, str],
+    ) -> duckdb.Expression:
+        if aggregate.operator is AggregateOperator.SIZE:
+            return duckdb.SQLExpression("count(*)")
+        if aggregate.expression is None:
+            raise AssertionError("Only size aggregates may omit an expression")
+
+        operand = self.compile_expression(aggregate.expression, bindings)
+        non_null_count = duckdb.FunctionExpression("count", operand)
+        if aggregate.operator is AggregateOperator.COUNT:
+            return non_null_count
+
+        function = {
+            AggregateOperator.SUM: "sum",
+            AggregateOperator.MEAN: "avg",
+            AggregateOperator.MIN: "min",
+            AggregateOperator.MAX: "max",
+        }[aggregate.operator]
+        aggregate_operand = operand
+        if aggregate.input_duckdb_type == "BOOLEAN" and function in {"sum", "avg"}:
+            aggregate_operand = operand.cast("BIGINT")
+        value = duckdb.FunctionExpression(function, aggregate_operand)
+        if aggregate.operator is AggregateOperator.SUM:
+            value = duckdb.CaseExpression(
+                non_null_count == duckdb.ConstantExpression(0),
+                duckdb.ConstantExpression(0),
+            ).otherwise(value)
+            if aggregate.input_duckdb_type == "BOOLEAN" or (
+                aggregate.input_duckdb_type is not None
+                and aggregate.input_duckdb_type
+                in {"TINYINT", "SMALLINT", "INTEGER", "BIGINT"}
+            ):
+                value = value.cast("BIGINT")
+            elif aggregate.input_duckdb_type in {
+                "UTINYINT",
+                "USMALLINT",
+                "UINTEGER",
+                "UBIGINT",
+            }:
+                value = value.cast("UBIGINT")
+
+        invalid = non_null_count < duckdb.ConstantExpression(aggregate.min_count)
+        if not aggregate.skipna:
+            row_count = duckdb.SQLExpression("count(*)")
+            invalid = invalid | (non_null_count < row_count)
+        return duckdb.CaseExpression(
+            invalid,
+            duckdb.ConstantExpression(None),
+        ).otherwise(value)

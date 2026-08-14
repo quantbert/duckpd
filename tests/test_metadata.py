@@ -8,6 +8,7 @@ from pandas.testing import assert_frame_equal
 
 import duckpd
 from duckpd._logical import (
+    AggregateOperator,
     BinaryExpression,
     BinaryOperator,
     ColumnRef,
@@ -21,6 +22,7 @@ from duckpd._logical import (
     expression_metadata,
 )
 from duckpd._metadata import validate_metadata
+from duckpd._reductions import aggregate_plan
 
 
 def test_source_index_and_order_are_lazy() -> None:
@@ -160,6 +162,27 @@ def test_expression_metadata_tracks_scalar_and_length_semantics() -> None:
     assert result_metadata.is_elementwise
     assert result_metadata.preserves_length
     assert not result_metadata.is_scalar_like
+
+
+def test_global_aggregate_clears_index_and_order_metadata() -> None:
+    source = pd.DataFrame({"row_id": [1, 2], "value": [10, 20]})
+    frame = duckpd.from_pandas(source, index="row_id", order_by="row_id")
+    value = next(
+        column
+        for column in frame._plan.metadata.visible_columns
+        if column.label == "value"
+    )
+
+    plan = aggregate_plan(
+        frame._plan,
+        ((value.label, ColumnRef(value.id), value.duckdb_type),),
+        AggregateOperator.SUM,
+    )
+
+    validate_metadata(plan.metadata)
+    assert plan.metadata.index.columns == ()
+    assert plan.metadata.ordering.keys == ()
+    assert [column.label for column in plan.metadata.columns] == ["value"]
 
 
 def test_parquet_source_accepts_index_and_order(tmp_path: Path) -> None:

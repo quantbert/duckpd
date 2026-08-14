@@ -12,6 +12,9 @@ complete pandas DataFrame.
 - Lazy pandas, Arrow, Parquet, DuckDB table, and read-only SQL sources.
 - Column selection, boolean filtering, arithmetic expressions, `assign`,
   `sort_values`, and `limit`.
+- Eager DataFrame and Series `count`, `size`, `sum`, `mean`, `min`, and `max`
+	reductions over numeric and boolean data, including `skipna`, `min_count`,
+	and DataFrame `numeric_only` support.
 - Explicit lazy indexes with `set_index()`/`reset_index()` and source
 	`index=`/`order_by=` declarations.
 - Explicit pandas collection, bounded `head`, Arrow tables and record batches,
@@ -51,6 +54,7 @@ Small runnable programs are available in [demo/](demo/README.md):
 ```bash
 uv run python demo/basic_pipeline.py
 uv run python demo/parquet_pipeline.py
+uv run python demo/reduction_pipeline.py
 uv run python demo/generate_market_data.py
 ```
 

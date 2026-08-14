@@ -10,6 +10,7 @@ import pandas as pd
 import pyarrow as pa
 
 from duckpd._logical import (
+    AggregateOperator,
     Column,
     ColumnId,
     ColumnRef,
@@ -32,8 +33,16 @@ from duckpd._metadata import (
 )
 from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._metadata import set_index as set_index_metadata
+from duckpd._reductions import (
+    aggregate_plan,
+    expression_type,
+    is_numeric_type,
+    materialized_int,
+    validate_axis,
+    validate_min_count,
+)
 from duckpd._typing import ParquetCompression, is_scalar_value
-from duckpd.errors import AlignmentError
+from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
@@ -108,6 +117,106 @@ class DataFrame:
         """Return DuckDB's physical plan without fetching result rows."""
         return self._session._executor.explain(self._plan)
 
+    @property
+    def size(self) -> int:
+        """Return the number of visible elements in the frame."""
+        plan = aggregate_plan(
+            self._plan,
+            (("__duckpd_size__", None, None),),
+            AggregateOperator.SIZE,
+        )
+        rows = materialized_int(self._session._executor.reduce_scalar(plan))
+        return rows * len(self._plan.metadata.visible_columns)
+
+    def count(
+        self,
+        axis: int | str = 0,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return the number of non-null values in each supported column."""
+        validate_axis(axis, series=False)
+        columns = self._reduction_columns(numeric_only=numeric_only)
+        return self._reduce_columns(AggregateOperator.COUNT, columns)
+
+    def sum(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+    ) -> pd.Series:
+        """Return column-wise sums for supported numeric and boolean columns."""
+        validate_axis(axis, series=False)
+        validate_min_count(min_count)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.SUM,
+            columns,
+            skipna=skipna,
+            min_count=min_count,
+        )
+
+    def mean(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return column-wise means for supported numeric and boolean columns."""
+        validate_axis(axis, series=False)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.MEAN,
+            columns,
+            skipna=skipna,
+        )
+
+    def min(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return column-wise minima for supported numeric and boolean columns."""
+        validate_axis(axis, series=False)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.MIN,
+            columns,
+            skipna=skipna,
+        )
+
+    def max(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> pd.Series:
+        """Return column-wise maxima for supported numeric and boolean columns."""
+        validate_axis(axis, series=False)
+        columns = self._reduction_columns(
+            numeric_only=numeric_only,
+            require_numeric=True,
+        )
+        return self._reduce_columns(
+            AggregateOperator.MAX,
+            columns,
+            skipna=skipna,
+        )
+
     @overload
     def __getitem__(self, key: str) -> Series: ...
 
@@ -178,7 +287,11 @@ class DataFrame:
                 raise ValueError(
                     "Cannot replace an index or ordering column; reset metadata first"
                 )
-            output = Column(ColumnId.create(), label, "UNKNOWN")
+            output = Column(
+                ColumnId.create(),
+                label,
+                expression_type(frame._plan, expression),
+            )
             projections = (
                 *(
                     NamedExpression(column, ColumnRef(column.id))
@@ -325,3 +438,51 @@ class DataFrame:
         if not is_scalar_value(value):
             raise TypeError("DuckPD does not support this scalar literal type")
         return LiteralValue(value)
+
+    def _reduction_columns(
+        self,
+        *,
+        numeric_only: bool,
+        require_numeric: bool = False,
+    ) -> tuple[Column, ...]:
+        visible = self._plan.metadata.visible_columns
+        numeric = tuple(
+            column for column in visible if is_numeric_type(column.duckdb_type)
+        )
+        if numeric_only:
+            if not numeric:
+                raise UnsupportedOperationError(
+                    "No numeric columns are available for this reduction"
+                )
+            return numeric
+        if require_numeric and len(numeric) != len(visible):
+            unsupported = next(
+                column for column in visible if not is_numeric_type(column.duckdb_type)
+            )
+            raise UnsupportedOperationError(
+                "This reduction currently supports only numeric and boolean data; "
+                f"column {unsupported.label!r} has DuckDB type "
+                f"{unsupported.duckdb_type}. Pass numeric_only=True to exclude it."
+            )
+        return visible
+
+    def _reduce_columns(
+        self,
+        operator: AggregateOperator,
+        columns: tuple[Column, ...],
+        *,
+        skipna: bool = True,
+        min_count: int = 0,
+    ) -> pd.Series:
+        requests = tuple(
+            (column.label, ColumnRef(column.id), column.duckdb_type)
+            for column in columns
+        )
+        plan = aggregate_plan(
+            self._plan,
+            requests,
+            operator,
+            skipna=skipna,
+            min_count=min_count,
+        )
+        return self._session._executor.reduce_columns(plan)

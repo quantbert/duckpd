@@ -5,14 +5,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from duckpd._logical import (
+    AggregateOperator,
     BinaryExpression,
     BinaryOperator,
     LiteralValue,
     UnaryExpression,
     UnaryOperator,
 )
+from duckpd._reductions import (
+    aggregate_plan,
+    expression_type,
+    materialized_int,
+    validate_axis,
+    validate_min_count,
+)
 from duckpd._typing import is_scalar_value
-from duckpd.errors import AlignmentError
+from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
@@ -100,6 +108,74 @@ class Series:
     def __bool__(self) -> bool:
         raise ValueError("The truth value of a DuckPD Series is ambiguous")
 
+    @property
+    def size(self) -> int:
+        """Return the number of elements, including null values."""
+        plan = aggregate_plan(
+            self._plan,
+            ((self.name or "__duckpd_size__", None, None),),
+            AggregateOperator.SIZE,
+        )
+        return materialized_int(self._session._executor.reduce_scalar(plan))
+
+    def count(self) -> int:
+        """Return the number of non-null elements."""
+        return materialized_int(self._reduce(AggregateOperator.COUNT))
+
+    def sum(
+        self,
+        *,
+        axis: int | str | None = None,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+    ) -> object:
+        """Return the sum of supported numeric or boolean values."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        validate_min_count(min_count)
+        return self._reduce(
+            AggregateOperator.SUM,
+            skipna=skipna,
+            min_count=min_count,
+        )
+
+    def mean(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> object:
+        """Return the mean of supported numeric or boolean values."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        return self._reduce(AggregateOperator.MEAN, skipna=skipna)
+
+    def min(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> object:
+        """Return the minimum of supported numeric or boolean values."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        return self._reduce(AggregateOperator.MIN, skipna=skipna)
+
+    def max(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> object:
+        """Return the maximum of supported numeric or boolean values."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        return self._reduce(AggregateOperator.MAX, skipna=skipna)
+
     def _binary(self, other: object, operator: BinaryOperator) -> Series:
         right = self._coerce_other(other)
         return Series(
@@ -136,3 +212,27 @@ class Series:
         if not is_scalar_value(other):
             raise TypeError("DuckPD does not support this scalar literal type")
         return LiteralValue(other)
+
+    def _reduce(
+        self,
+        operator: AggregateOperator,
+        *,
+        skipna: bool = True,
+        min_count: int = 0,
+    ) -> object:
+        input_type = expression_type(self._plan, self._expression)
+        plan = aggregate_plan(
+            self._plan,
+            ((self.name or "__duckpd_reduction__", self._expression, input_type),),
+            operator,
+            skipna=skipna,
+            min_count=min_count,
+        )
+        return self._session._executor.reduce_scalar(plan)
+
+    @staticmethod
+    def _validate_numeric_only(numeric_only: bool) -> None:
+        if numeric_only:
+            raise UnsupportedOperationError(
+                "Series reductions do not support numeric_only=True"
+            )

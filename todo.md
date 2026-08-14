@@ -149,7 +149,7 @@ collect | Arrow batches | table | Parquet | commit
 - [ ] `Scan` for Parquet, DuckDB tables, SQL subqueries, pandas, and Arrow.
 - [ ] `Project` for selection, assignment, rename, cast, and expression output.
 - [ ] `Filter`.
-- [ ] `Aggregate`.
+- [x] `Aggregate` for global reductions; grouped aggregation remains Phase 4.
 - [ ] `Join`.
 - [ ] `Sort`.
 - [ ] `Limit`.
@@ -165,7 +165,7 @@ optimizer need proves otherwise.
 - [ ] `ColumnRef(ColumnId)` and `Literal`.
 - [ ] Unary, binary, and boolean expressions.
 - [ ] `Function`, `Case`, and `Cast`.
-- [ ] `AggregateExpression`.
+- [x] `AggregateExpression` for global reductions.
 - [ ] `WindowExpression` with partition, order, and frame metadata.
 - [ ] Typed aliases and nullability.
 
@@ -296,7 +296,10 @@ Exit gate:
 
 Goal: make metadata trustworthy before implementing many methods.
 
-- [ ] Define the supported DuckDB-to-pandas dtype matrix.
+- [ ] Define the complete supported DuckDB-to-pandas dtype matrix. The initial
+      reduction matrix now covers DuckDB boolean, signed/unsigned integer,
+      floating, and decimal inputs; temporal, string, binary, nested, and
+      nullable-extension output policies remain open.
 - [ ] Initially cover booleans, signed/unsigned integers, floats, strings,
       binary, decimal, date, timestamp, timezone-aware timestamp, and interval.
 - [ ] Decide nullable dtype output policy and test `pd.NA`, `NaN`, `NaT`, and
@@ -338,13 +341,21 @@ Goal: cover common analytical transformations that do not require alignment.
 - [ ] Scalar and Series arithmetic, comparisons, boolean operations, and casts.
 - [ ] Reductions: `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
       `median`, `quantile`, `any`, and `all`.
+- [x] Implement the initial eager `count`, `size`, `sum`, `mean`, `min`, and
+      `max` subset for Series and column-wise DataFrame reductions over numeric
+      and boolean data, using one global aggregate query per call.
+- [x] Match pandas 3.0 for the initial subset's `skipna`, `min_count`, empty,
+      all-null, boolean, numeric, and hidden-index cases.
+- [x] Propagate basic numeric expression types through `assign()` so assigned
+      arithmetic columns can be reduced without collecting.
 - [ ] Implement pandas-specific reduction semantics, including `skipna`,
       `min_count`, `ddof`, empty inputs, and all-null inputs.
 - [ ] `drop_duplicates` with `keep="first"`, `keep="last"`, and `keep=False`
       using explicit ordering and window rewrites.
 - [ ] `value_counts`, `nunique`, `unique`, `nlargest`, and `nsmallest`.
 - [ ] `sample` only after defining deterministic seed and ordering behavior.
-- [ ] Reject unsupported axes and arguments before execution.
+- [x] Reject unsupported axes, argument combinations, and reduction dtypes
+      before execution for the implemented reduction subset.
 
 Exit gate:
 
@@ -619,7 +630,12 @@ Implement in this order. Each increment should be independently testable.
 4. [x] `DataFrame`, `Series`, selection, arithmetic, filtering, and `assign`.
 5. [x] `collect`, `head`, Arrow batches, direct Parquet write, and `explain`.
 6. [x] Index/order declarations and metadata transition test suite.
-7. [ ] Null/dtype semantics and basic reductions.
+7. [x] Initial numeric/boolean null and dtype semantics plus basic `count`,
+       `size`, `sum`, `mean`, `min`, and `max` reductions. Broader dtype policy
+       and advanced reductions remain in Phases 2 and 3.
+   - [x] Add a runnable reduction showcase covering `numeric_only`, `skipna`,
+         `min_count`, hidden indexes, assigned expressions, and explicit
+         execution counts in `demo/reduction_pipeline.py`.
 8. [ ] `GroupBy.agg` with pandas semantic rewrites.
 9. [ ] Merge and row-wise concat, including order and null-key behavior.
 10. [ ] String/datetime methods needed by the acceptance workflow.

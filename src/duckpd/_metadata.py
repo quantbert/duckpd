@@ -103,6 +103,13 @@ def after_sort(metadata: FrameMetadata, keys: tuple[SortKey, ...]) -> FrameMetad
     return result
 
 
+def after_aggregate(columns: tuple[Column, ...]) -> FrameMetadata:
+    """Create metadata for a global aggregate with no inherited index or order."""
+    result = FrameMetadata(columns)
+    validate_metadata(result)
+    return result
+
+
 def set_index(
     metadata: FrameMetadata, columns: tuple[Column, ...], *, drop: bool
 ) -> FrameMetadata:

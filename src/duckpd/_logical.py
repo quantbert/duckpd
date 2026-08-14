@@ -97,6 +97,17 @@ class UnaryOperator(Enum):
     POSITIVE = "positive"
 
 
+class AggregateOperator(Enum):
+    """Global aggregate operations supported by the initial reduction API."""
+
+    COUNT = "count"
+    SIZE = "size"
+    SUM = "sum"
+    MEAN = "mean"
+    MIN = "min"
+    MAX = "max"
+
+
 @dataclass(frozen=True)
 class ColumnRef:
     """Reference a logical column by identity."""
@@ -137,6 +148,18 @@ class NamedExpression:
 
     column: Column
     expression: Expression
+
+
+@dataclass(frozen=True)
+class AggregateExpression:
+    """A pandas-aware global aggregate over an optional input expression."""
+
+    column: Column
+    operator: AggregateOperator
+    expression: Expression | None = None
+    input_duckdb_type: str | None = None
+    skipna: bool = True
+    min_count: int = 0
 
 
 class SortDirection(Enum):
@@ -298,4 +321,15 @@ class LimitPlan(LogicalPlanBase):
     metadata: FrameMetadata
 
 
-LogicalPlan: TypeAlias = ScanPlan | FilterPlan | ProjectPlan | SortPlan | LimitPlan
+@dataclass(frozen=True)
+class AggregatePlan(LogicalPlanBase):
+    """Reduce an input frame to exactly one row."""
+
+    input: LogicalPlan
+    aggregates: tuple[AggregateExpression, ...]
+    metadata: FrameMetadata
+
+
+LogicalPlan: TypeAlias = (
+    ScanPlan | FilterPlan | ProjectPlan | SortPlan | LimitPlan | AggregatePlan
+)
