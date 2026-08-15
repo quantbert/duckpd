@@ -159,7 +159,13 @@ def reset_index(metadata: FrameMetadata, *, drop: bool) -> FrameMetadata:
             *(replace(column, hidden=False) for column in index_columns),
             *other_columns,
         )
-    result = FrameMetadata(columns, IndexSpec(), metadata.ordering)
+    available = {column.id for column in columns}
+    ordering = (
+        metadata.ordering
+        if all(key.column_id in available for key in metadata.ordering.keys)
+        else OrderSpec()
+    )
+    result = FrameMetadata(columns, IndexSpec(), ordering)
     validate_metadata(result)
     return result
 

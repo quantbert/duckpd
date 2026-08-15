@@ -37,7 +37,7 @@ class DataFrameGroupBy:
         as_index: bool = True,
         sort: bool = True,
         dropna: bool = True,
-        observed: bool = False,
+        observed: bool = True,
     ) -> None:
         self._frame = frame
         self._session: Session = frame._session
@@ -55,8 +55,10 @@ class DataFrameGroupBy:
         self._as_index = as_index
         self._sort = sort
         self._dropna = dropna
-        if observed:
-            pass
+        if not observed:
+            raise UnsupportedOperationError(
+                "DuckPD does not support unobserved categorical groups"
+            )
 
     @overload
     def __getitem__(self, key: str) -> SeriesGroupBy: ...
@@ -411,7 +413,7 @@ class SeriesGroupBy:
         as_index: bool = True,
         sort: bool = True,
         dropna: bool = True,
-        observed: bool = False,
+        observed: bool = True,
     ) -> None:
         from duckpd.frame import DataFrame
         from duckpd.series import Series
@@ -421,8 +423,10 @@ class SeriesGroupBy:
         self._as_index = as_index
         self._sort = sort
         self._dropna = dropna
-        if observed:
-            pass
+        if not observed:
+            raise UnsupportedOperationError(
+                "DuckPD does not support unobserved categorical groups"
+            )
 
         # If by is string or sequence of strings, series must have that column
         # in its underlying plan

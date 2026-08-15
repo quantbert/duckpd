@@ -24,6 +24,14 @@ def test_from_pandas_is_lazy_until_collect() -> None:
     assert session.execution_count == 1
 
 
+def test_from_pandas_preserves_nullable_unsigned_integers() -> None:
+    source = pd.DataFrame({"value": pd.Series([2**63 + 1, None], dtype="UInt64")})
+
+    result = duckpd.from_pandas(source).collect()
+
+    assert_frame_equal(result, source)
+
+
 def test_repr_does_not_execute() -> None:
     session = duckpd.connect()
     frame = session.from_pandas(pd.DataFrame({"value": [1]}))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import duckdb
 import pandas as pd
@@ -14,12 +14,14 @@ from duckpd._logical import (
     AggregateOperator,
     AggregatePlan,
     ArrowSource,
+    BinaryExpression,
     BinaryOperator,
     CaseWhen,
     CastExpression,
     Column,
     ColumnId,
     ColumnRef,
+    CsvSource,
     Expression,
     FilterPlan,
     FunctionCall,
@@ -40,6 +42,7 @@ from duckpd._logical import (
     UnaryExpression,
     UnaryOperator,
     UnionPlan,
+    WindowExpression,
 )
 from duckpd._quoting import quote_identifier
 from duckpd.errors import UnsupportedOperationError
@@ -64,7 +67,14 @@ class DuckDBCompiler:
 
     def inspect_source(
         self,
-        source: ArrowSource | PandasSource | ParquetSource | SqlSource | TableSource,
+        source: (
+            ArrowSource
+            | CsvSource
+            | PandasSource
+            | ParquetSource
+            | SqlSource
+            | TableSource
+        ),
     ) -> tuple[Column, ...]:
         relation = self._relation_for_source(source)
         labels = relation.columns
@@ -220,6 +230,9 @@ class DuckDBCompiler:
             if name == "notnull" and len(compiled_args) == 1:
                 return compiled_args[0].isnotnull()
             return duckdb.FunctionExpression(expression.name, *compiled_args)
+        if isinstance(expression, WindowExpression):
+            sql = self._expression_to_sql(expression, bindings)
+            return duckdb.SQLExpression(sql)
 
         left = self.compile_expression(expression.left, bindings)
         right = self.compile_expression(expression.right, bindings)
@@ -252,9 +265,114 @@ class DuckDBCompiler:
             return left | right
         raise AssertionError(f"Unknown binary operator: {operator}")
 
+    def _expression_to_sql(
+        self, expression: Expression, bindings: dict[ColumnId, str]
+    ) -> str:
+        """Convert an expression to an equivalent SQL fragment."""
+        if isinstance(expression, ColumnRef):
+            return quote_identifier(bindings[expression.column_id])
+        if isinstance(expression, LiteralValue):
+            val = expression.value
+            if val is None:
+                return "NULL"
+            if isinstance(val, bool):
+                return "TRUE" if val else "FALSE"
+            if isinstance(val, (int, float)):
+                return str(val)
+            if isinstance(val, str):
+                escaped = val.replace("'", "''")
+                return f"'{escaped}'"
+            return f"'{val}'"
+        if isinstance(expression, UnaryExpression):
+            operand_sql = self._expression_to_sql(expression.operand, bindings)
+            if expression.operator is UnaryOperator.INVERT:
+                return f"(NOT ({operand_sql}))"
+            if expression.operator is UnaryOperator.NEGATE:
+                return f"(-({operand_sql}))"
+            if expression.operator is UnaryOperator.POSITIVE:
+                return f"(+({operand_sql}))"
+            raise AssertionError(f"Unknown unary operator: {expression.operator}")
+        if isinstance(expression, CastExpression):
+            operand_sql = self._expression_to_sql(expression.operand, bindings)
+            return f"CAST(({operand_sql}) AS {expression.target_type})"
+        if isinstance(expression, CaseWhen):
+            cond_sql = self._expression_to_sql(expression.condition, bindings)
+            val_sql = self._expression_to_sql(expression.value, bindings)
+            other_sql = self._expression_to_sql(expression.otherwise, bindings)
+            return f"(CASE WHEN {cond_sql} THEN {val_sql} ELSE {other_sql} END)"
+        if isinstance(expression, FunctionCall):
+            name = expression.name
+            if name.lower() == "coalesce" and len(expression.arguments) == 2:
+                arg0 = self._expression_to_sql(expression.arguments[0], bindings)
+                arg1 = self._expression_to_sql(expression.arguments[1], bindings)
+                return f"(CASE WHEN ({arg0}) IS NULL THEN ({arg1}) ELSE ({arg0}) END)"
+            if name.lower() == "isnull" and len(expression.arguments) == 1:
+                arg0 = self._expression_to_sql(expression.arguments[0], bindings)
+                return f"(({arg0}) IS NULL)"
+            if name.lower() == "notnull" and len(expression.arguments) == 1:
+                arg0 = self._expression_to_sql(expression.arguments[0], bindings)
+                return f"(({arg0}) IS NOT NULL)"
+            args_sql = ", ".join(
+                self._expression_to_sql(arg, bindings) for arg in expression.arguments
+            )
+            return f"{name}({args_sql})"
+        if isinstance(expression, BinaryExpression):
+            left_sql = self._expression_to_sql(expression.left, bindings)
+            right_sql = self._expression_to_sql(expression.right, bindings)
+            op_map = {
+                BinaryOperator.ADD: "+",
+                BinaryOperator.SUBTRACT: "-",
+                BinaryOperator.MULTIPLY: "*",
+                BinaryOperator.TRUE_DIVIDE: "/",
+                BinaryOperator.MODULO: "%",
+                BinaryOperator.EQUAL: "=",
+                BinaryOperator.NOT_EQUAL: "!=",
+                BinaryOperator.LESS_THAN: "<",
+                BinaryOperator.LESS_EQUAL: "<=",
+                BinaryOperator.GREATER_THAN: ">",
+                BinaryOperator.GREATER_EQUAL: ">=",
+                BinaryOperator.AND: "AND",
+                BinaryOperator.OR: "OR",
+            }
+            op_str = op_map[expression.operator]
+            return f"(({left_sql}) {op_str} ({right_sql}))"
+
+        args_str = ", ".join(
+            self._expression_to_sql(arg, bindings) for arg in expression.arguments
+        )
+        window_parts: list[str] = []
+        if expression.partition_by:
+            parts = ", ".join(
+                self._expression_to_sql(p, bindings) for p in expression.partition_by
+            )
+            window_parts.append(f"PARTITION BY {parts}")
+        if expression.order_by:
+            order_strs: list[str] = []
+            for k in expression.order_by:
+                expr_sql = self._expression_to_sql(k.expression, bindings)
+                dir_sql = "ASC" if k.direction is SortDirection.ASCENDING else "DESC"
+                null_sql = (
+                    "NULLS FIRST"
+                    if k.null_placement is NullPlacement.FIRST
+                    else "NULLS LAST"
+                )
+                order_strs.append(f"{expr_sql} {dir_sql} {null_sql}")
+            window_parts.append(f"ORDER BY {', '.join(order_strs)}")
+        if expression.frame_spec:
+            window_parts.append(expression.frame_spec)
+        over_clause = " ".join(window_parts)
+        return f"{expression.function}({args_str}) OVER ({over_clause})"
+
     def _relation_for_source(
         self,
-        source: ArrowSource | PandasSource | ParquetSource | SqlSource | TableSource,
+        source: (
+            ArrowSource
+            | CsvSource
+            | PandasSource
+            | ParquetSource
+            | SqlSource
+            | TableSource
+        ),
     ) -> duckdb.DuckDBPyRelation:
         self._session._ensure_open()
         if isinstance(source, PandasSource):
@@ -273,6 +391,16 @@ class DuckDBCompiler:
             return self._session._connection.table(source.name)
         if isinstance(source, SqlSource):
             return self._session._connection.sql(source.query)
+        if isinstance(source, CsvSource):
+            csv_paths: str | list[str] = (
+                source.paths[0] if len(source.paths) == 1 else list(source.paths)
+            )
+            return self._session._connection.read_csv(
+                cast("str", csv_paths),
+                header=source.header,
+                sep=source.delimiter,
+                auto_detect=source.auto_detect,
+            )
 
         paths: str | list[str] = (
             source.paths[0] if len(source.paths) == 1 else list(source.paths)
@@ -334,11 +462,12 @@ class DuckDBCompiler:
             return duckdb.FunctionExpression("any_value", operand)
 
         if aggregate.operator in {AggregateOperator.ANY, AggregateOperator.ALL}:
-            bool_op = (
-                operand
-                if aggregate.input_duckdb_type == "BOOLEAN"
-                else operand.cast("BOOLEAN")
-            )
+            if aggregate.input_duckdb_type == "BOOLEAN":
+                bool_op = operand
+            elif aggregate.input_duckdb_type == "VARCHAR":
+                bool_op = duckdb.FunctionExpression("length", operand) > 0
+            else:
+                bool_op = operand.cast("BOOLEAN")
             func_name = (
                 "bool_or" if aggregate.operator is AggregateOperator.ANY else "bool_and"
             )
@@ -347,11 +476,18 @@ class DuckDBCompiler:
             # When skipna is True, all-null gives False for any, True for all.
             # When skipna is False, any gives False if all null, all gives False
             # if null present.
-            if aggregate.operator is AggregateOperator.ALL and not aggregate.skipna:
+            null_override: bool | None = None
+            if not aggregate.skipna:
+                floating_input = aggregate.input_duckdb_type in {"FLOAT", "DOUBLE"}
+                if aggregate.operator is AggregateOperator.ANY and floating_input:
+                    null_override = True
+                elif aggregate.operator is AggregateOperator.ALL and not floating_input:
+                    null_override = False
+            if null_override is not None:
                 row_count = duckdb.SQLExpression("count(*)")
                 value = duckdb.CaseExpression(
                     non_null_count < row_count,
-                    duckdb.ConstantExpression(False),
+                    duckdb.ConstantExpression(null_override),
                 ).otherwise(
                     duckdb.CaseExpression(
                         raw_val.isnull(),

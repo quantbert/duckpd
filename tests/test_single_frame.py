@@ -152,6 +152,13 @@ def test_rename_missing_label_ignored(mixed_source: pd.DataFrame) -> None:
     assert result.columns == tuple(mixed_source.columns)
 
 
+def test_rename_rejects_duplicate_output_labels() -> None:
+    frame = duckpd.from_pandas(pd.DataFrame({"a": [1], "b": [2]}))
+
+    with pytest.raises(ValueError, match="duplicate column labels"):
+        frame.rename(columns={"a": "value", "b": "value"})
+
+
 def test_rename_invalid_arguments_raise_early(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
@@ -166,9 +173,11 @@ def test_rename_invalid_arguments_raise_early(mixed_source: pd.DataFrame) -> Non
     with pytest.raises(TypeError, match="both mapper and columns"):
         frame.rename(mapper={"a": "b"}, columns={"c": "d"})
     with pytest.raises(TypeError, match="only a dict"):
-        frame.rename(mapper=["a", "b"])  # type: ignore[arg-type]
+        frame.rename(mapper=["a", "b"], axis="columns")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="errors must be"):
         frame.rename(columns={"a": "b"}, errors="invalid")  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedOperationError, match="renaming index"):
+        frame.rename(mapper={"a": "b"})
 
 
 # --- drop -------------------------------------------------------------------
@@ -178,7 +187,7 @@ def test_drop_single_column_matches_pandas(mixed_source: pd.DataFrame) -> None:
     session = duckpd.connect()
     frame = session.from_pandas(mixed_source)
 
-    result = frame.drop("integer")
+    result = frame.drop(columns="integer")
     assert session.execution_count == 0
     assert result.columns == ("floating", "string", "boolean")
 
@@ -190,7 +199,7 @@ def test_drop_single_column_matches_pandas(mixed_source: pd.DataFrame) -> None:
 def test_drop_multiple_columns_matches_pandas(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
-    result = frame.drop(["integer", "string"])
+    result = frame.drop(["integer", "string"], axis=1)
     expected = mixed_source.drop(columns=["integer", "string"])
     assert_frame_equal(result.collect(), expected)
 
@@ -209,7 +218,7 @@ def test_drop_preserves_index_metadata() -> None:
     )
     frame = duckpd.from_pandas(source, index="row_id", order_by="seq")
 
-    result = frame.drop("value")
+    result = frame.drop(columns="value")
 
     assert result.columns == ("seq",)
     assert result.index_names == ("row_id",)
@@ -220,13 +229,13 @@ def test_drop_missing_label_raises(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
     with pytest.raises(KeyError):
-        frame.drop("missing")
+        frame.drop(columns="missing")
 
 
 def test_drop_missing_label_ignored(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
-    result = frame.drop("missing", errors="ignore")
+    result = frame.drop(columns="missing", errors="ignore")
     assert result.columns == tuple(mixed_source.columns)
 
 
@@ -234,7 +243,7 @@ def test_drop_all_columns_raises(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
     with pytest.raises(ValueError, match="empty projections"):
-        frame.drop(list(mixed_source.columns))
+        frame.drop(columns=list(mixed_source.columns))
 
 
 def test_drop_invalid_arguments_raise_early(mixed_source: pd.DataFrame) -> None:
@@ -250,12 +259,14 @@ def test_drop_invalid_arguments_raise_early(mixed_source: pd.DataFrame) -> None:
         frame.drop("integer", errors="invalid")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="axis must be"):
         frame.drop("integer", axis="invalid")  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedOperationError, match="dropping rows by index"):
+        frame.drop("integer")
 
 
 def test_drop_empty_labels_returns_self(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
-    result = frame.drop([])
+    result = frame.drop(columns=[])
 
     assert result is frame
 
@@ -512,6 +523,12 @@ def test_dataframe_dropna_invalid_raises() -> None:
         frame.dropna(how="invalid")  # type: ignore[arg-type]
     with pytest.raises(UnsupportedOperationError, match="axis=1"):
         frame.dropna(axis=1)
+    with pytest.raises(TypeError, match="both how and thresh"):
+        frame.dropna(how="any", thresh=1)
+    with pytest.raises(TypeError, match="thresh must be an integer"):
+        frame.dropna(thresh=1.5)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="non-negative"):
+        frame.dropna(thresh=-1)
 
 
 # --- where / mask -----------------------------------------------------------
@@ -646,7 +663,12 @@ def test_where_mask_cross_frame_alignment_error() -> None:
 def test_isna_rename_drop_pipeline_matches_pandas(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
-    result = frame.rename(columns={"integer": "int"}).drop("boolean").isna().collect()
+    result = (
+        frame.rename(columns={"integer": "int"})
+        .drop(columns="boolean")
+        .isna()
+        .collect()
+    )
 
     expected = (
         mixed_source.rename(columns={"integer": "int"}).drop(columns="boolean").isna()

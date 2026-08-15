@@ -85,6 +85,18 @@ def test_reset_index_drop_discards_hidden_index() -> None:
     assert_frame_equal(result.collect(), source[["value"]])
 
 
+def test_reset_index_drop_clears_ordering_on_removed_index() -> None:
+    source = pd.DataFrame({"row_id": [2, 1], "value": [20, 10]})
+
+    result = duckpd.from_pandas(source, index="row_id", order_by="row_id").reset_index(
+        drop=True
+    )
+
+    assert result.ordering == ()
+    expected = source.sort_values("row_id")[["value"]].reset_index(drop=True)
+    assert_frame_equal(result.collect(), expected)
+
+
 def test_set_index_drop_false_matches_pandas_collection() -> None:
     source = pd.DataFrame({"row_id": [10, 20], "value": [1, 2]})
 

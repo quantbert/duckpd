@@ -55,6 +55,16 @@ class ParquetSource:
 
 
 @dataclass(frozen=True)
+class CsvSource:
+    """One or more CSV files scanned by DuckDB."""
+
+    paths: tuple[str, ...]
+    header: bool = True
+    delimiter: str = ","
+    auto_detect: bool = True
+
+
+@dataclass(frozen=True)
 class TableSource:
     """A table in the owning DuckDB connection."""
 
@@ -68,7 +78,9 @@ class SqlSource:
     query: str
 
 
-Source = ArrowSource | PandasSource | ParquetSource | SqlSource | TableSource
+Source = (
+    ArrowSource | CsvSource | PandasSource | ParquetSource | SqlSource | TableSource
+)
 
 
 class BinaryOperator(Enum):
@@ -172,6 +184,17 @@ class CaseWhen:
     otherwise: Expression
 
 
+@dataclass(frozen=True)
+class WindowExpression:
+    """An expression evaluated over a window specification."""
+
+    function: str
+    arguments: tuple[Expression, ...] = ()
+    partition_by: tuple[Expression, ...] = ()
+    order_by: tuple[SortKey, ...] = ()
+    frame_spec: str | None = None
+
+
 Expression: TypeAlias = (
     ColumnRef
     | LiteralValue
@@ -180,6 +203,7 @@ Expression: TypeAlias = (
     | FunctionCall
     | CastExpression
     | CaseWhen
+    | WindowExpression
 )
 
 
@@ -337,6 +361,22 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
             is_literal=all(m.is_literal for m in arg_metas),
             has_window=any(m.has_window for m in arg_metas),
             order_dependency_count=sum(m.order_dependency_count for m in arg_metas),
+        )
+    if isinstance(expression, WindowExpression):
+        arg_metas = [expression_metadata(arg) for arg in expression.arguments]
+        part_metas = [expression_metadata(p) for p in expression.partition_by]
+        order_metas = [expression_metadata(k.expression) for k in expression.order_by]
+        all_metas = arg_metas + part_metas + order_metas
+        return ExpressionMetadata(
+            is_elementwise=False,
+            preserves_length=True,
+            is_scalar_like=False,
+            is_literal=False,
+            has_window=True,
+            order_dependency_count=(
+                len(expression.order_by)
+                + sum(m.order_dependency_count for m in all_metas)
+            ),
         )
 
     left = expression_metadata(expression.left)

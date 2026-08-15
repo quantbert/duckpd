@@ -8,6 +8,15 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from duckpd._logical import (
+    ColumnId,
+    ColumnRef,
+    JoinPlan,
+    PandasSource,
+    ScanPlan,
+    SortKey,
+    UnionPlan,
+)
 from duckpd._typing import ParquetCompression
 from duckpd.errors import MaterializationError
 
@@ -27,14 +36,37 @@ class Executor:
     def collect(self, plan: LogicalPlan) -> pd.DataFrame:
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
-        result = compiled.relation.to_df()
-        # Normalize DuckDB nullable integer columns to float64 if they contain nulls
-        for col in result.columns:
-            dtype_str = str(result[col].dtype)
-            if (dtype_str.startswith("Int") or dtype_str.startswith("UInt")) and result[
-                col
-            ].isna().any():
-                result[col] = result[col].astype("float64")
+        rel = compiled.relation
+        if plan.metadata.ordering.keys:
+            order_exprs = [
+                self._compiler._compile_sort_key(
+                    SortKey(
+                        ColumnRef(k.column_id),
+                        k.direction,
+                        k.null_placement,
+                    ),
+                    compiled.bindings,
+                )
+                for k in plan.metadata.ordering.keys
+                if k.column_id in compiled.bindings
+            ]
+            if order_exprs:
+                rel = rel.sort(*order_exprs)
+        result = rel.to_df()
+        preserved_ids = self._pandas_nullable_integer_ids(plan)
+        preserved_labels = {
+            compiled.bindings[column_id]
+            for column_id in preserved_ids
+            if column_id in compiled.bindings
+        }
+        for label in result.columns:
+            dtype_name = str(result[label].dtype)
+            if (
+                label not in preserved_labels
+                and dtype_name.startswith(("Int", "UInt"))
+                and result[label].isna().any()
+            ):
+                result[label] = result[label].astype("float64")
 
         index_ids = plan.metadata.index.columns
         if index_ids:
@@ -48,6 +80,29 @@ class Executor:
         if hidden_labels:
             result = result.drop(columns=hidden_labels)
         return result
+
+    def _pandas_nullable_integer_ids(self, plan: LogicalPlan) -> set[ColumnId]:
+        if isinstance(plan, ScanPlan):
+            if not isinstance(plan.source, PandasSource):
+                return set()
+            source = self._session._get_registered_source(plan.source.key)
+            if not isinstance(source, pd.DataFrame):
+                raise TypeError("Registered pandas source must be a DataFrame")
+            return {
+                column.id
+                for column in plan.metadata.columns
+                if str(source[column.label].dtype).startswith(("Int", "UInt"))
+            }
+        if isinstance(plan, JoinPlan):
+            return self._pandas_nullable_integer_ids(
+                plan.left
+            ) | self._pandas_nullable_integer_ids(plan.right)
+        if isinstance(plan, UnionPlan):
+            preserved: set[ColumnId] = set()
+            for input_plan in plan.inputs:
+                preserved.update(self._pandas_nullable_integer_ids(input_plan))
+            return preserved
+        return self._pandas_nullable_integer_ids(plan.input)
 
     def to_arrow(self, plan: LogicalPlan) -> pa.Table:
         compiled = self._compiler.compile(plan)
@@ -78,6 +133,31 @@ class Executor:
             compression=compression,
             overwrite=overwrite,
         )
+
+    def write_csv(
+        self,
+        plan: LogicalPlan,
+        path: str,
+        *,
+        sep: str = ",",
+        header: bool = True,
+    ) -> None:
+        compiled = self._compiler.compile(plan)
+        self._session._begin_execution()
+        self._compiler.project_visible(compiled, plan).relation.write_csv(
+            path,
+            sep=sep,
+            header=header,
+        )
+
+    def persist(
+        self,
+        plan: LogicalPlan,
+        name: str,
+    ) -> None:
+        compiled = self._compiler.compile(plan)
+        self._session._begin_execution()
+        self._compiler.project_visible(compiled, plan).relation.create(name)
 
     def explain(
         self,

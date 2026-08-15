@@ -99,6 +99,14 @@ def test_groupby_dropna_behavior(sample_sales: pd.DataFrame) -> None:
     assert_frame_equal(result_keepna.collect(), expected_keepna)
 
 
+def test_groupby_rejects_unobserved_categorical_groups() -> None:
+    source = pd.DataFrame({"group": ["a"], "value": [1]})
+    frame = duckpd.from_pandas(source)
+
+    with pytest.raises(UnsupportedOperationError, match="unobserved categorical"):
+        frame.groupby("group", observed=False)
+
+
 def test_groupby_sort_false_preserves_order() -> None:
     df = pd.DataFrame(
         {

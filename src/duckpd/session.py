@@ -14,6 +14,7 @@ from duckpd._compiler import DuckDBCompiler
 from duckpd._executor import Executor
 from duckpd._logical import (
     ArrowSource,
+    CsvSource,
     PandasSource,
     ParquetSource,
     ScanPlan,
@@ -94,7 +95,7 @@ class Session:
             raise TypeError(msg)
 
         key = uuid4().hex
-        self._registered_sources[key] = value
+        self._registered_sources[key] = value.copy()
         source = PandasSource(key)
         plan = self._source_plan(source, index=index, order_by=order_by)
         return DataFrame(self, plan)
@@ -138,6 +139,37 @@ class Session:
             raise ValueError(msg)
 
         source = ParquetSource(paths, hive_partitioning, union_by_name)
+        plan = self._source_plan(source, index=index, order_by=order_by)
+        return DataFrame(self, plan)
+
+    def read_csv(
+        self,
+        path: str | Path | Sequence[str | Path],
+        *,
+        header: bool = True,
+        delimiter: str = ",",
+        auto_detect: bool = True,
+        index: str | Sequence[str] | None = None,
+        order_by: str | Sequence[str] | None = None,
+    ) -> DataFrame:
+        """Create a lazy scan over one or more CSV files."""
+        from duckpd.frame import DataFrame
+
+        self._ensure_open()
+        if isinstance(path, (str, Path)):
+            paths = (str(path),)
+        else:
+            paths = tuple(str(item) for item in path)
+        if not paths:
+            msg = "At least one CSV path is required"
+            raise ValueError(msg)
+
+        source = CsvSource(
+            paths,
+            header=header,
+            delimiter=delimiter,
+            auto_detect=auto_detect,
+        )
         plan = self._source_plan(source, index=index, order_by=order_by)
         return DataFrame(self, plan)
 
@@ -209,7 +241,14 @@ class Session:
 
     def _source_plan(
         self,
-        source: ArrowSource | PandasSource | ParquetSource | SqlSource | TableSource,
+        source: (
+            ArrowSource
+            | CsvSource
+            | PandasSource
+            | ParquetSource
+            | SqlSource
+            | TableSource
+        ),
         *,
         index: str | Sequence[str] | None,
         order_by: str | Sequence[str] | None,

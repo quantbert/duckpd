@@ -145,15 +145,15 @@ collect | Arrow batches | table | Parquet | commit
 
 ### Initial logical plan
 
-- [ ] `Scan` for Parquet, DuckDB tables, SQL subqueries, pandas, and Arrow.
-- [ ] `Project` for selection, assignment, rename, cast, and expression output.
-- [ ] `Filter`.
+- [x] `Scan` for Parquet, DuckDB tables, SQL subqueries, pandas, and Arrow.
+- [x] `Project` for selection, assignment, rename, cast, and expression output.
+- [x] `Filter`.
 - [x] `Aggregate` for global reductions and grouped aggregations (`GroupBy.agg`).
 - [x] `Join` for DataFrame merges (`DataFrame.merge`) and index joins (`DataFrame.join`).
-- [ ] `Sort`.
-- [ ] `Limit`.
-- [ ] `Union` for row-wise concatenation.
-- [ ] `Window`.
+- [x] `Sort`.
+- [x] `Limit`.
+- [x] `Union` for row-wise concatenation.
+- [x] `Window`.
 - [ ] `MaterializedScan` for persisted intermediates.
 
 Keep writes as executor sinks rather than relational nodes until a concrete
@@ -161,25 +161,25 @@ optimizer need proves otherwise.
 
 ### Initial expression IR
 
-- [ ] `ColumnRef(ColumnId)` and `Literal`.
-- [ ] Unary, binary, and boolean expressions.
-- [ ] `Function`, `Case`, and `Cast`.
+- [x] `ColumnRef(ColumnId)` and `Literal`.
+- [x] Unary, binary, and boolean expressions.
+- [x] `Function`, `Case`, and `Cast`.
 - [x] `AggregateExpression` for global reductions.
-- [ ] `WindowExpression` with partition, order, and frame metadata.
+- [x] `WindowExpression` with partition, order, and frame metadata.
 - [ ] Typed aliases and nullability.
 
 ### Frame metadata
 
-- [ ] `Schema`: internal IDs, displayed labels, DuckDB type, pandas dtype,
+- [x] `Schema`: internal IDs, displayed labels, DuckDB type, pandas dtype,
       nullability, and hidden/visible state.
-- [ ] `IndexSpec`: absent/deferred range index or explicit index columns,
+- [x] `IndexSpec`: absent/deferred range index or explicit index columns,
       uniqueness state, and names.
-- [ ] `OrderSpec`: unknown or guaranteed ordered keys, directions, null
+- [x] `OrderSpec`: unknown or guaranteed ordered keys, directions, null
       placement, and stability.
 - [ ] `RowIdentity`: lineage token and optional stable key columns.
 - [ ] `SourceProvenance`: source kind, location, fingerprint, write capability,
       and transformations that preserve source rows.
-- [ ] `FrameState`: plan, schema, index, order, row identity, provenance, and
+- [x] `FrameState`: plan, schema, index, order, row identity, provenance, and
       owning session.
 
 ### Proposed package layout
@@ -266,7 +266,7 @@ Exit gate:
 
 Goal: prove the complete lazy path before broadening the API.
 
-- [ ] Implement `Session` as the owner of one DuckDB connection, configuration,
+- [x] Implement `Session` as the owner of one DuckDB connection, configuration,
       registered Python/Arrow sources, temporary objects, and cleanup.
 - [x] Support `memory_limit`, `temp_directory`, maximum temporary size,
       `threads`, and read-only mode where applicable.
@@ -316,15 +316,15 @@ Goal: make metadata trustworthy before implementing many methods.
 - [x] Implement displayed-label lookup through internal column IDs.
 - [x] Keep hidden index and ordering columns available through projections.
 - [x] Implement metadata transition functions for every existing plan node.
-- [ ] Add DuckPD-owned expression metadata inspired by Narwhals:
+- [x] Add DuckPD-owned expression metadata inspired by Narwhals:
       elementwise, preserves-length, scalar-like, literal, windowed,
       order-dependent, and static/multi-output expansion state.
-- [ ] Use expression metadata to validate broadcasting, window rewrites,
+- [x] Use expression metadata to validate broadcasting, window rewrites,
       assignment length, and operations that require an explicit order.
 - [x] Implement explicit `set_index()` and `reset_index()` without assuming
       uniqueness.
 - [x] Add `order_by=` declarations at data-source boundaries.
-- [ ] Reject order-dependent methods when `OrderSpec` is unknown.
+- [x] Reject order-dependent methods when `OrderSpec` is unknown.
 - [ ] Define collection behavior for absent, explicit, duplicate, named, and
       null-containing indexes.
 - [ ] Define Series behavior after the parent DataFrame handle is reassigned;
@@ -351,7 +351,7 @@ Goal: cover common analytical transformations that do not require alignment.
 - [x] `fillna` for Series and DataFrame supporting scalar and column-mapping dicts.
 - [x] `dropna` for Series (axis=0) and DataFrame with `how='any'/'all'`, `subset`, and `thresh`.
 - [x] `where` and `mask` for Series and DataFrame with `cond` and `other` expressions.
-- [ ] Scalar and Series arithmetic, comparisons, boolean operations, and casts.
+- [x] Scalar and Series arithmetic, comparisons, boolean operations, and casts.
 - [x] Reductions: `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
       `median`, `quantile`, `any`, and `all`.
 - [x] Implement eager `count`, `size`, `sum`, `mean`, `min`, `max`, `std`, `var`,
@@ -363,11 +363,8 @@ Goal: cover common analytical transformations that do not require alignment.
       arithmetic columns can be reduced without collecting.
 - [x] Implement pandas-specific reduction semantics, including `skipna`,
       `min_count`, `ddof`, empty inputs, and all-null inputs.
-- [ ] `drop_duplicates` with `keep="first"`, `keep="last"`, and `keep=False`
+- [x] `drop_duplicates` with `keep="first"`, `keep="last"`, and `keep=False`
       using explicit ordering and window rewrites.
-- [x] `drop_duplicates` with `subset` and `keep="first"` using `DISTINCT`-style
-      aggregates; `keep="last"` and `keep=False` remain unsupported until window
-      functions are available.
 - [x] `value_counts`, `nunique`, `unique`, `nlargest`, and `nsmallest`.
 - [ ] `sample` only after defining deterministic seed and ordering behavior.
 - [x] Reject unsupported axes, argument combinations, and reduction dtypes
@@ -430,14 +427,16 @@ Exit gate:
 
 Goal: add positional and order-sensitive behavior only on sound foundations.
 
-- [ ] Implement label-based `.loc` reads for explicit indexes.
-- [ ] Implement a documented subset of `.iloc` reads when stable order exists.
-- [ ] Implement positional slicing through row-number windows.
-- [ ] Implement `shift`, `diff`, `pct_change`, `cumsum`, `cummin`, `cummax`, and
+- [x] Implement label-based `.loc` reads for explicit indexes.
+- [x] Implement a documented subset of `.iloc` reads when stable order exists.
+- [x] Implement positional slicing through row-number windows.
+- [x] Implement `shift`, `diff`, `pct_change`, `cumsum`, `cummin`, `cummax`, and
       `cumprod`.
-- [ ] Implement `rank` methods with pandas tie, null, percentage, and ascending
+- [x] Implement `rank` methods with pandas tie, null, percentage, and ascending
       behavior.
-- [ ] Implement expanding and rolling `count`, `sum`, `mean`, `min`, `max`,
+- [x] Extend `drop_duplicates` to support `keep='last'` and `keep=False` via
+      window row numbers and counts.
+- [x] Implement expanding and rolling `count`, `sum`, `mean`, `min`, `max`,
       `std`, and `var` for row-based windows first.
 - [ ] Add time-based rolling windows only after timezone and closed-boundary
       semantics are specified.
@@ -473,11 +472,11 @@ Exit gate:
 
 Goal: make execution boundaries safe and explainable.
 
-- [ ] Implement `to_pandas()`, `to_arrow()`, `to_arrow_batches()`, and optional
+- [x] Implement `to_pandas()`, `to_arrow()`, `to_arrow_batches()`, and optional
       pandas-batch iteration with explicit memory behavior.
-- [ ] Implement `persist()` to temporary and named DuckDB tables.
+- [x] Implement `persist()` to temporary and named DuckDB tables.
 - [ ] Implement `save_as_table()` and append behavior with schema validation.
-- [ ] Implement direct CSV and Parquet sinks using relation writers or
+- [x] Implement direct CSV and Parquet sinks using relation writers or
       `COPY (query) TO`; request `RETURN_STATS` where a report is needed.
 - [ ] Keep sink paths and options parameterized or safely escaped.
 - [x] Add `explain(mode="logical" | "sql" | "physical" | "all")`.
@@ -516,10 +515,10 @@ Exit gate:
 Goal: make pandas-shaped assignment mutate only the Python plan until an
 explicit sink is called.
 
-- [ ] Implement `DataFrame.__setitem__` by replacing the handle's `FrameState`
+- [x] Implement `DataFrame.__setitem__` by replacing the handle's `FrameState`
       with a new `Project` plan.
-- [ ] Implement a narrow `.loc[mask, column] = value` as a `Case` expression.
-- [ ] Initially require assignments to be row-preserving and reject schema or
+- [x] Implement a narrow `.loc[mask, column] = value` as a `Case` expression.
+- [x] Initially require assignments to be row-preserving and reject schema or
       index ambiguities.
 - [ ] Define copy and alias behavior for two DataFrame handles sharing one
       immutable state.

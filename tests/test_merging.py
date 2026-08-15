@@ -160,7 +160,7 @@ def test_merge_invalid_arguments_raise_early(
     with pytest.raises(ValueError, match="Invalid how"):
         frame.merge(other, how="invalid")  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="must be a tuple of two strings"):
+    with pytest.raises(ValueError, match="two strings or None"):
         frame.merge(other, on="key", suffixes=("_x",))  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="Can not pass on"):
@@ -171,3 +171,18 @@ def test_merge_invalid_arguments_raise_early(
 
     with pytest.raises(ValueError, match="left_index=True requires left frame"):
         frame.merge(other, left_index=True, right_on="key")
+
+
+def test_merge_suffixes_reject_ambiguous_output() -> None:
+    session = duckpd.connect()
+    left = session.from_pandas(pd.DataFrame({"key": [1], "value": [2], "value_x": [3]}))
+    right = session.from_pandas(pd.DataFrame({"key": [1], "value": [4]}))
+
+    with pytest.raises(ValueError, match="no suffix"):
+        left.merge(right, on="key", suffixes=(None, None))
+    with pytest.raises(ValueError, match="duplicate columns"):
+        left.merge(right, on="key", suffixes=("_x", "_x"))
+
+    expected = pd.DataFrame({"key": [1], "value": [2], "value_x": [3], "value_r": [4]})
+    result = left.merge(right, on="key", suffixes=(None, "_r"))
+    assert_frame_equal(result.collect(), expected)

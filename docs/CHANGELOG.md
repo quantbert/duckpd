@@ -6,6 +6,12 @@ All notable changes to DuckPD will be documented in this file.
 
 ### Added
 
+- Window expressions (`WindowExpression`) and compiler translation to DuckDB `OVER (...)` window clauses.
+- Lazy cumulative operations on `DataFrame` and `Series`: `cumsum`, `cummin`, `cummax`, and `cumprod` with `skipna` support and explicit `OrderSpec` validation.
+- Lazy positional shifts and differences: `Series.shift` and `DataFrame.shift` (with `fill_value`), `Series.diff` and `DataFrame.diff`, and `Series.pct_change` and `DataFrame.pct_change`.
+- Numerical ranking on `Series.rank` and `DataFrame.rank` supporting methods (`average`, `min`, `max`, `first`, `dense`), `na_option` (`keep`, `top`, `bottom`), `ascending`, and `pct`.
+- Extended `DataFrame.drop_duplicates` to support `keep='last'` and `keep=False` via window row numbers and count filtering.
+- Added `Series.to_frame()` and `Series.collect()` for lazy Series evaluation and materialization.
 - Extended `DataFrameGroupBy` supporting dictionary aggregations (`agg({"a": "sum", "b": "mean"})`),
   string function aggregations (`agg("sum")`), convenience methods (`sum`, `mean`, `min`, `max`,
   `count`, `size`), and column selection indexing (`g["col"]`, `g[["col1", "col2"]]`).

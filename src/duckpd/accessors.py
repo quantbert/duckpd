@@ -49,12 +49,32 @@ class StringMethods:
         res = self._series._call_function("ends_with", LiteralValue(pat))
         return res._call_function("coalesce", LiteralValue(False))
 
-    def contains(self, pat: str, na: bool = False) -> Series:
+    def contains(
+        self,
+        pat: str,
+        case: bool = True,
+        flags: int = 0,
+        na: bool = False,
+        regex: bool = True,
+    ) -> Series:
         """Test if pattern or regex is contained within a string of a Series."""
-        if na:
+        if flags != 0:
+            raise UnsupportedOperationError(
+                "DuckPD str.contains does not currently support regex flags"
+            )
+        if regex:
+            arguments = [LiteralValue(pat)]
+            if not case:
+                arguments.append(LiteralValue("i"))
+            res = self._series._call_function("regexp_matches", *arguments)
+        elif case:
             res = self._series._call_function("contains", LiteralValue(pat))
+        else:
+            res = self._series._call_function("lower")._call_function(
+                "contains", LiteralValue(pat.lower())
+            )
+        if na:
             return res._call_function("coalesce", LiteralValue(True))
-        res = self._series._call_function("contains", LiteralValue(pat))
         return res._call_function("coalesce", LiteralValue(False))
 
     def replace(self, pat: str, repl: str) -> Series:
@@ -109,7 +129,7 @@ class DatetimeProperties:
         """Format datetime using specified format string."""
         return self._series._call_function("strftime", LiteralValue(date_format))
 
-    def to_period(self, freq: Literal["Y", "M", "D", "W"] = "M") -> Series:
+    def to_period(self, freq: Literal["Y", "M", "D"] = "M") -> Series:
         """Cast datetime to period representation (as period string like 'YYYY-MM')."""
         if freq == "M":
             return self.strftime("%Y-%m")

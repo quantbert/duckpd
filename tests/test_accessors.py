@@ -41,6 +41,27 @@ def test_string_methods_match_pandas() -> None:
     assert_frame_equal(transformed.collect(), expected)
 
 
+def test_string_contains_regex_and_literal_options_match_pandas() -> None:
+    source = pd.DataFrame({"value": ["abc", "x.y", "ABC", None]})
+    frame = duckpd.from_pandas(source)
+
+    result = frame.assign(
+        regex=frame["value"].str.contains("."),
+        literal=frame["value"].str.contains(".", regex=False),
+        insensitive=frame["value"].str.contains("abc", case=False),
+    )
+    expected = source.assign(
+        regex=source["value"].str.contains("."),
+        literal=source["value"].str.contains(".", regex=False),
+        insensitive=source["value"].str.contains("abc", case=False),
+    )
+
+    assert_frame_equal(result.collect(), expected)
+
+    with pytest.raises(UnsupportedOperationError, match="regex flags"):
+        frame["value"].str.contains("abc", flags=2)
+
+
 def test_datetime_properties_match_pandas() -> None:
     source = pd.DataFrame(
         {

@@ -9,6 +9,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 
 - [Implementation roadmap](roadmap.md) — product contract, phased work, testing
   strategy, and release criteria.
+- [API Compatibility Matrix](COMPATIBILITY.md) — supported methods, parameters,
+  and behavioral guarantees versus pandas 3.0.
 - [Changelog](CHANGELOG.md) — notable changes by release.
 - [Release policy](RELEASES.md) — pre-`1.0` versioning, deprecation, and
   publishing rules.

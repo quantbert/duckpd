@@ -34,7 +34,7 @@ def plan_merge(
     left_index: bool = False,
     right_index: bool = False,
     sort: bool = False,
-    suffixes: tuple[str, str] = ("_x", "_y"),
+    suffixes: tuple[str | None, str | None] = ("_x", "_y"),
 ) -> JoinPlan:
     """Build a typed JoinPlan following pandas merge semantics."""
     if how not in {"inner", "left", "right", "outer", "cross"}:
@@ -52,8 +52,10 @@ def plan_merge(
         "cross": JoinType.CROSS,
     }[how]
 
-    if len(suffixes) != 2:
-        raise ValueError("suffixes must be a tuple of two strings")
+    if len(suffixes) != 2 or any(
+        suffix is not None and type(suffix) is not str for suffix in suffixes
+    ):
+        raise ValueError("suffixes must contain two strings or None")
     lsuffix, rsuffix = suffixes
 
     # 1. Resolve key columns
@@ -188,13 +190,17 @@ def plan_merge(
         if c.id not in right_to_left_key_map and not c.hidden
     }
     common_labels = left_labels.intersection(right_labels)
+    if common_labels and not lsuffix and not rsuffix:
+        raise ValueError(
+            f"columns overlap but no suffix is specified: {sorted(common_labels)!r}"
+        )
 
     for c in left_included:
         is_collision = not c.hidden and c.label in common_labels
         if (is_collision and c.id not in left_key_ids) or (
             is_collision and c.id in left_key_ids and join_type is JoinType.CROSS
         ):
-            output_columns.append(replace(c, label=f"{c.label}{lsuffix}"))
+            output_columns.append(replace(c, label=f"{c.label}{lsuffix or ''}"))
         else:
             output_columns.append(c)
 
@@ -205,9 +211,16 @@ def plan_merge(
         if (is_collision and c.id not in right_key_ids) or (
             is_collision and c.id in right_key_ids and join_type is JoinType.CROSS
         ):
-            output_columns.append(replace(c, label=f"{c.label}{rsuffix}"))
+            output_columns.append(replace(c, label=f"{c.label}{rsuffix or ''}"))
         else:
             output_columns.append(c)
+
+    output_labels = [column.label for column in output_columns]
+    duplicate_labels = sorted(
+        label for label in set(output_labels) if output_labels.count(label) > 1
+    )
+    if duplicate_labels:
+        raise ValueError(f"suffixes produce duplicate columns: {duplicate_labels!r}")
 
     # 3. Determine output index and ordering
     ordering_keys: list[OrderColumn] = []

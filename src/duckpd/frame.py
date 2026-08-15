@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
+from uuid import uuid4
 
 import pandas as pd
 import pyarrow as pa
@@ -31,6 +32,7 @@ from duckpd._logical import (
     SortDirection,
     SortKey,
     SortPlan,
+    WindowExpression,
 )
 from duckpd._metadata import (
     after_aggregate,
@@ -53,13 +55,18 @@ from duckpd._reductions import (
     validate_quantile,
 )
 from duckpd._typing import ParquetCompression, is_scalar_value, normalize_dtype
-from duckpd.errors import AlignmentError, UnsupportedOperationError
+from duckpd.errors import (
+    AlignmentError,
+    UnsupportedOperationError,
+)
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
     from duckpd.groupby import DataFrameGroupBy
+    from duckpd.indexing import ILocIndexer, LocIndexer
     from duckpd.series import Series
     from duckpd.session import Session
+    from duckpd.window import Expanding, Rolling
 
 
 class DataFrame:
@@ -89,6 +96,20 @@ class DataFrame:
             self._column_by_id(key.column_id).label
             for key in self._plan.metadata.ordering.keys
         )
+
+    @property
+    def loc(self) -> LocIndexer:
+        """Label-based indexing and masked assignment."""
+        from duckpd.indexing import LocIndexer
+
+        return LocIndexer(self)
+
+    @property
+    def iloc(self) -> ILocIndexer:
+        """Positional indexing and row slicing."""
+        from duckpd.indexing import ILocIndexer
+
+        return ILocIndexer(self)
 
     def collect(self) -> pd.DataFrame:
         """Execute the complete plan and return a pandas DataFrame."""
@@ -124,6 +145,37 @@ class DataFrame:
             compression=compression,
             overwrite=overwrite,
         )
+
+    def write_csv(
+        self,
+        path: str | Path,
+        *,
+        sep: str = ",",
+        header: bool = True,
+    ) -> None:
+        """Execute the plan directly into a CSV file."""
+        self._session._executor.write_csv(
+            self._plan,
+            str(path),
+            sep=sep,
+            header=header,
+        )
+
+    def to_csv(
+        self,
+        path: str | Path,
+        *,
+        sep: str = ",",
+        header: bool = True,
+    ) -> None:
+        """Alias for :meth:`write_csv`."""
+        self.write_csv(path, sep=sep, header=header)
+
+    def persist(self, name: str | None = None) -> DataFrame:
+        """Persist intermediate plan into a DuckDB temporary table."""
+        table_name = name if name is not None else f"__duckpd_persist_{uuid4().hex}__"
+        self._session._executor.persist(self._plan, table_name)
+        return self._session.table(table_name)
 
     def explain(
         self,
@@ -552,7 +604,7 @@ class DataFrame:
         self,
         *,
         axis: int | str = 0,
-        how: Literal["any", "all"] = "any",
+        how: Literal["any", "all"] | None = None,
         thresh: int | None = None,
         subset: str | Sequence[str] | None = None,
         inplace: bool = False,
@@ -565,8 +617,16 @@ class DataFrame:
             raise UnsupportedOperationError(
                 "DuckPD does not support ignore_index=True in dropna"
             )
-        if how not in {"any", "all"}:
+        if how not in {None, "any", "all"}:
             raise ValueError("how must be 'any' or 'all'")
+        if how is not None and thresh is not None:
+            raise TypeError("cannot set both how and thresh")
+        if thresh is not None:
+            if type(thresh) is not int:
+                raise TypeError("thresh must be an integer")
+            if thresh < 0:
+                raise ValueError("thresh must be non-negative")
+        how = "any" if how is None else how
 
         if axis in {1, "columns"}:
             raise UnsupportedOperationError(
@@ -821,6 +881,68 @@ class DataFrame:
             ),
         )
 
+    def __setitem__(
+        self,
+        key: str | Sequence[str],
+        value: object | Callable[[DataFrame], object],
+    ) -> None:
+        """Lazily assign or replace columns in this DataFrame handle."""
+        if isinstance(key, str):
+            updated = self.assign(**{key: value})
+            self._plan = updated._plan
+        else:
+            labels = tuple(key)
+            if not labels:
+                raise ValueError("DuckPD does not support empty column keys")
+            if isinstance(value, DataFrame):
+                if value._session is not self._session:
+                    raise AlignmentError(
+                        "Assigned DataFrame from different frame "
+                        "requires explicit alignment"
+                    )
+                if value._plan is self._plan:
+                    expressions = tuple(
+                        ColumnRef(column.id)
+                        for column in value._plan.metadata.visible_columns
+                    )
+                elif (
+                    isinstance(value._plan, ProjectPlan)
+                    and value._plan.input is self._plan
+                ):
+                    expressions = tuple(
+                        projection.expression
+                        for projection in value._plan.projections
+                        if not projection.column.hidden
+                    )
+                else:
+                    raise AlignmentError(
+                        "Assigned DataFrame requires a direct same-frame projection"
+                    )
+                if len(labels) != len(expressions):
+                    raise ValueError(
+                        "Number of columns does not match number of labels"
+                    )
+                from duckpd.series import Series
+
+                kwargs = {
+                    label: Series(self._session, self._plan, expression, label)
+                    for label, expression in zip(labels, expressions, strict=True)
+                }
+                updated = self.assign(**kwargs)
+                self._plan = updated._plan
+            elif isinstance(value, (tuple, list)):
+                val_seq = list(cast("Sequence[object]", value))
+                if len(labels) != len(val_seq):
+                    raise ValueError("Number of values does not match number of labels")
+                kwargs = dict(zip(labels, val_seq, strict=True))
+                updated = self.assign(**kwargs)
+                self._plan = updated._plan
+            else:
+                # Scalar broadcast across all specified labels
+                kwargs = {label: value for label in labels}
+                updated = self.assign(**kwargs)
+                self._plan = updated._plan
+
     def assign(
         self,
         **columns: object | Callable[[DataFrame], object],
@@ -848,14 +970,25 @@ class DataFrame:
                 label,
                 expression_type(frame._plan, expression),
             )
-            projections = (
-                *(
-                    NamedExpression(column, ColumnRef(column.id))
+            if existing is not None:
+                # Replace column in-place to preserve original column order
+                projections = tuple(
+                    (
+                        NamedExpression(output, expression)
+                        if column.label == label
+                        else NamedExpression(column, ColumnRef(column.id))
+                    )
                     for column in frame._plan.columns
-                    if column.label != label
-                ),
-                NamedExpression(output, expression),
-            )
+                )
+            else:
+                # Append new column at the end
+                projections = (
+                    *(
+                        NamedExpression(column, ColumnRef(column.id))
+                        for column in frame._plan.columns
+                    ),
+                    NamedExpression(output, expression),
+                )
             projected_columns = tuple(projection.column for projection in projections)
             plan = ProjectPlan(
                 frame._plan,
@@ -910,7 +1043,7 @@ class DataFrame:
         as_index: bool = True,
         sort: bool = True,
         dropna: bool = True,
-        observed: bool = False,
+        observed: bool = True,
     ) -> DataFrameGroupBy:
         """Group DataFrame using a mapper or by a Series of columns."""
         from duckpd.groupby import DataFrameGroupBy
@@ -934,7 +1067,7 @@ class DataFrame:
         left_index: bool = False,
         right_index: bool = False,
         sort: bool = False,
-        suffixes: tuple[str, str] = ("_x", "_y"),
+        suffixes: tuple[str | None, str | None] = ("_x", "_y"),
     ) -> DataFrame:
         """Merge DataFrame or named Series objects with a database-style join."""
         from duckpd._merging import plan_merge
@@ -1026,8 +1159,8 @@ class DataFrame:
             raise UnsupportedOperationError(
                 "DuckPD does not yet support renaming index labels"
             )
-        if axis not in {0, "index", "columns"}:
-            raise ValueError("axis must be 0, 'index', or 'columns'")
+        if axis not in {0, 1, "index", "columns"}:
+            raise ValueError("axis must be 0, 'index', 1, or 'columns'")
         if mapper is not None and columns is not None:
             raise TypeError("Cannot specify both mapper and columns")
         mapping: dict[str, str] = {}
@@ -1036,6 +1169,10 @@ class DataFrame:
             return self
         if not isinstance(source, dict):
             raise TypeError("rename currently supports only a dict mapping")
+        if mapper is not None and axis in {0, "index"}:
+            raise UnsupportedOperationError(
+                "DuckPD does not yet support renaming index labels"
+            )
         mapping: dict[str, str] = {}
         for old_item, new_item in cast("dict[object, object]", source).items():
             if not isinstance(old_item, str) or not isinstance(new_item, str):
@@ -1059,6 +1196,9 @@ class DataFrame:
             else column
             for column in self._plan.metadata.columns
         )
+        new_labels = [column.label for column in new_columns]
+        if len(new_labels) != len(set(new_labels)):
+            raise ValueError("rename would create duplicate column labels")
         new_metadata = FrameMetadata(
             new_columns,
             self._plan.metadata.index,
@@ -1086,8 +1226,8 @@ class DataFrame:
             raise UnsupportedOperationError(
                 "DuckPD does not yet support dropping rows by index"
             )
-        if axis not in {0, "index", "columns"}:
-            raise ValueError("axis must be 0, 'index', or 'columns'")
+        if axis not in {0, 1, "index", "columns"}:
+            raise ValueError("axis must be 0, 'index', 1, or 'columns'")
         if errors not in {"ignore", "raise"}:
             raise ValueError("errors must be 'ignore' or 'raise'")
 
@@ -1095,10 +1235,10 @@ class DataFrame:
             drop_labels = (columns,) if isinstance(columns, str) else tuple(columns)
         elif labels is None:
             raise TypeError("must specify either labels or columns")
-        elif axis in {0, "index"} and not isinstance(labels, str):
-            drop_labels = tuple(labels)
         elif axis in {0, "index"}:
-            drop_labels = (labels,)
+            raise UnsupportedOperationError(
+                "DuckPD does not yet support dropping rows by index"
+            )
         else:
             drop_labels = (labels,) if isinstance(labels, str) else tuple(labels)
 
@@ -1135,6 +1275,254 @@ class DataFrame:
             ),
         )
 
+    def cumsum(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> DataFrame:
+        """Return cumulative sum over a DataFrame axis."""
+        validate_axis(axis, series=False)
+        return self._cumulative_transform(
+            "cumsum", skipna=skipna, numeric_only=numeric_only
+        )
+
+    def cummin(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> DataFrame:
+        """Return cumulative minimum over a DataFrame axis."""
+        validate_axis(axis, series=False)
+        return self._cumulative_transform(
+            "cummin", skipna=skipna, numeric_only=numeric_only
+        )
+
+    def cummax(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> DataFrame:
+        """Return cumulative maximum over a DataFrame axis."""
+        validate_axis(axis, series=False)
+        return self._cumulative_transform(
+            "cummax", skipna=skipna, numeric_only=numeric_only
+        )
+
+    def cumprod(
+        self,
+        *,
+        axis: int | str | None = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> DataFrame:
+        """Return cumulative product over a DataFrame axis."""
+        validate_axis(axis, series=False)
+        return self._cumulative_transform(
+            "cumprod", skipna=skipna, numeric_only=numeric_only
+        )
+
+    def _cumulative_transform(
+        self,
+        name: Literal["cumsum", "cummin", "cummax", "cumprod"],
+        *,
+        skipna: bool = True,
+        numeric_only: bool = False,
+    ) -> DataFrame:
+        from duckpd.series import Series
+
+        visible = self._plan.metadata.visible_columns
+        protected = [col for col in self._plan.metadata.columns if col.hidden]
+        new_projections: list[NamedExpression] = []
+
+        for col in visible:
+            is_num = is_numeric_type(col.duckdb_type)
+            if numeric_only and not is_num:
+                continue
+            s = Series(self._session, self._plan, ColumnRef(col.id), col.label)
+            method = getattr(s, name)
+            res_s: Series = method(skipna=skipna)
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                expression_type(self._plan, res_s._expression),
+            )
+            new_projections.append(NamedExpression(out_col, res_s._expression))
+
+        for col in protected:
+            new_projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        output_columns = tuple(p.column for p in new_projections)
+        metadata = after_projection(self._plan.metadata, output_columns)
+        return DataFrame(
+            self._session,
+            ProjectPlan(self._plan, tuple(new_projections), metadata),
+        )
+
+    def shift(
+        self,
+        periods: int = 1,
+        *,
+        freq: object = None,
+        axis: int | str | None = 0,
+        fill_value: object = None,
+    ) -> DataFrame:
+        """Shift index by desired number of periods."""
+        validate_axis(axis, series=False)
+        from duckpd.series import Series
+
+        visible = self._plan.metadata.visible_columns
+        protected = [col for col in self._plan.metadata.columns if col.hidden]
+        new_projections: list[NamedExpression] = []
+
+        for col in visible:
+            s = Series(self._session, self._plan, ColumnRef(col.id), col.label)
+            res_s = s.shift(periods=periods, freq=freq, fill_value=fill_value)
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                expression_type(self._plan, res_s._expression),
+            )
+            new_projections.append(NamedExpression(out_col, res_s._expression))
+
+        for col in protected:
+            new_projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        output_columns = tuple(p.column for p in new_projections)
+        metadata = after_projection(self._plan.metadata, output_columns)
+        return DataFrame(
+            self._session,
+            ProjectPlan(self._plan, tuple(new_projections), metadata),
+        )
+
+    def diff(
+        self,
+        periods: int = 1,
+        *,
+        axis: int | str | None = 0,
+    ) -> DataFrame:
+        """First discrete difference of element."""
+        validate_axis(axis, series=False)
+        from duckpd.series import Series
+
+        visible = self._plan.metadata.visible_columns
+        protected = [col for col in self._plan.metadata.columns if col.hidden]
+        new_projections: list[NamedExpression] = []
+
+        for col in visible:
+            s = Series(self._session, self._plan, ColumnRef(col.id), col.label)
+            res_s = s.diff(periods=periods)
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                expression_type(self._plan, res_s._expression),
+            )
+            new_projections.append(NamedExpression(out_col, res_s._expression))
+
+        for col in protected:
+            new_projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        output_columns = tuple(p.column for p in new_projections)
+        metadata = after_projection(self._plan.metadata, output_columns)
+        return DataFrame(
+            self._session,
+            ProjectPlan(self._plan, tuple(new_projections), metadata),
+        )
+
+    def pct_change(
+        self,
+        periods: int = 1,
+        *,
+        fill_method: object = None,
+        limit: object = None,
+        freq: object = None,
+        axis: int | str | None = 0,
+    ) -> DataFrame:
+        """Percentage change between the current and a prior element."""
+        validate_axis(axis, series=False)
+        from duckpd.series import Series
+
+        visible = self._plan.metadata.visible_columns
+        protected = [col for col in self._plan.metadata.columns if col.hidden]
+        new_projections: list[NamedExpression] = []
+
+        for col in visible:
+            s = Series(self._session, self._plan, ColumnRef(col.id), col.label)
+            res_s = s.pct_change(
+                periods=periods,
+                fill_method=fill_method,
+                limit=limit,
+                freq=freq,
+            )
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                expression_type(self._plan, res_s._expression),
+            )
+            new_projections.append(NamedExpression(out_col, res_s._expression))
+
+        for col in protected:
+            new_projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        output_columns = tuple(p.column for p in new_projections)
+        metadata = after_projection(self._plan.metadata, output_columns)
+        return DataFrame(
+            self._session,
+            ProjectPlan(self._plan, tuple(new_projections), metadata),
+        )
+
+    def rank(
+        self,
+        axis: int | str | None = 0,
+        method: Literal["average", "min", "max", "first", "dense"] = "average",
+        numeric_only: bool = False,
+        na_option: Literal["keep", "top", "bottom"] = "keep",
+        ascending: bool = True,
+        pct: bool = False,
+    ) -> DataFrame:
+        """Compute numerical data ranks (1 through n) along axis."""
+        validate_axis(axis, series=False)
+        from duckpd.series import Series
+
+        visible = self._plan.metadata.visible_columns
+        protected = [col for col in self._plan.metadata.columns if col.hidden]
+        new_projections: list[NamedExpression] = []
+
+        for col in visible:
+            is_num = is_numeric_type(col.duckdb_type)
+            if numeric_only and not is_num:
+                continue
+            s = Series(self._session, self._plan, ColumnRef(col.id), col.label)
+            res_s = s.rank(
+                axis=axis,
+                method=method,
+                numeric_only=False,
+                na_option=na_option,
+                ascending=ascending,
+                pct=pct,
+            )
+            out_col = Column(
+                ColumnId.create(),
+                col.label,
+                expression_type(self._plan, res_s._expression),
+            )
+            new_projections.append(NamedExpression(out_col, res_s._expression))
+
+        for col in protected:
+            new_projections.append(NamedExpression(col, ColumnRef(col.id)))
+
+        output_columns = tuple(p.column for p in new_projections)
+        metadata = after_projection(self._plan.metadata, output_columns)
+        return DataFrame(
+            self._session,
+            ProjectPlan(self._plan, tuple(new_projections), metadata),
+        )
+
     def head(self, count: int = 5) -> pd.DataFrame:
         """Execute a bounded preview and return a pandas DataFrame."""
         if count < 0:
@@ -1167,6 +1555,27 @@ class DataFrame:
             )
         return result
 
+    def rolling(
+        self,
+        window: int,
+        min_periods: int | None = None,
+        *,
+        center: bool = False,
+    ) -> Rolling:
+        """Provide rolling window calculations."""
+        from duckpd.window import Rolling
+
+        return Rolling(self, window, min_periods=min_periods, center=center)
+
+    def expanding(
+        self,
+        min_periods: int = 1,
+    ) -> Expanding:
+        """Provide expanding window calculations."""
+        from duckpd.window import Expanding
+
+        return Expanding(self, min_periods=min_periods)
+
     def drop_duplicates(
         self,
         subset: str | Sequence[str] | None = None,
@@ -1198,54 +1607,151 @@ class DataFrame:
         subset_columns = tuple(self._column(label) for label in subset_labels)
         subset_ids = {col.id for col in subset_columns}
 
-        # Group by the subset columns; pass through all visible columns.
-        # Non-subset columns use any_value() to pick one row per group.
+        # If keep is 'last' or False, we use window functions.
+        # If keep is 'first', we can use either aggregate or window.
+        # If there is no explicit ordering and keep is 'first', aggregate works.
+        # If keep is 'last' or False, window function provides exact semantics.
         all_visible = self._plan.metadata.visible_columns
+        ordering_keys = self._plan.metadata.ordering.keys
 
-        aggregates: list[AggregateExpression] = []
-        output_columns: list[Column] = []
-        for col in all_visible:
-            out_col = Column(
-                ColumnId.create(),
-                col.label,
-                col.duckdb_type,
-                hidden=False,
+        if keep == "first" and not ordering_keys:
+            # Group by the subset columns; pass through all visible columns.
+            aggregates: list[AggregateExpression] = []
+            output_columns: list[Column] = []
+            for col in all_visible:
+                out_col = Column(
+                    ColumnId.create(),
+                    col.label,
+                    col.duckdb_type,
+                    hidden=False,
+                )
+                output_columns.append(out_col)
+                if col.id in subset_ids:
+                    # Subset columns are group keys — identity pass-through
+                    aggregates.append(
+                        AggregateExpression(
+                            out_col,
+                            operator=None,
+                            expression=ColumnRef(col.id),
+                            input_duckdb_type=col.duckdb_type,
+                        )
+                    )
+                else:
+                    # Non-subset columns: use any_value to pick one row per group
+                    aggregates.append(
+                        AggregateExpression(
+                            out_col,
+                            operator=AggregateOperator.ANY_VALUE,
+                            expression=ColumnRef(col.id),
+                            input_duckdb_type=col.duckdb_type,
+                        )
+                    )
+
+            key_ids = tuple(col.id for col in subset_columns)
+            metadata = after_aggregate(
+                tuple(output_columns), index_ids=(), ordering_keys=()
             )
-            output_columns.append(out_col)
-            if col.id in subset_ids:
-                # Subset columns are group keys — identity pass-through
-                aggregates.append(
-                    AggregateExpression(
-                        out_col,
-                        operator=None,
-                        expression=ColumnRef(col.id),
-                        input_duckdb_type=col.duckdb_type,
-                    )
-                )
-            else:
-                # Non-subset columns: use any_value to pick one row per group
-                aggregates.append(
-                    AggregateExpression(
-                        out_col,
-                        operator=AggregateOperator.ANY_VALUE,
-                        expression=ColumnRef(col.id),
-                        input_duckdb_type=col.duckdb_type,
-                    )
-                )
+            distinct_plan = AggregatePlan(
+                self._plan,
+                tuple(aggregates),
+                metadata,
+                keys=key_ids,
+                dropna=False,
+                sort=False,
+            )
+            return DataFrame(self._session, distinct_plan)
 
-        key_ids = tuple(col.id for col in subset_columns)
-        metadata = after_aggregate(
-            tuple(output_columns), index_ids=(), ordering_keys=()
-        )
-        distinct_plan = AggregatePlan(
-            self._plan,
-            tuple(aggregates),
-            metadata,
-            keys=key_ids,
-            dropna=False,
-            sort=False,
-        )
-        return DataFrame(self._session, distinct_plan)
+        # Window-based deduplication
+        partition_exprs = tuple(ColumnRef(col.id) for col in subset_columns)
+        order_by_keys: tuple[SortKey, ...]
+        if ordering_keys:
+            order_by_keys = tuple(
+                SortKey(
+                    ColumnRef(k.column_id),
+                    (
+                        k.direction
+                        if keep != "last"
+                        else (
+                            SortDirection.DESCENDING
+                            if k.direction is SortDirection.ASCENDING
+                            else SortDirection.ASCENDING
+                        )
+                    ),
+                    (
+                        k.null_placement
+                        if keep != "last"
+                        else (
+                            NullPlacement.LAST
+                            if k.null_placement is NullPlacement.FIRST
+                            else NullPlacement.FIRST
+                        )
+                    ),
+                )
+                for k in ordering_keys
+            )
+        else:
+            order_by_keys = ()
+
+        if keep in {"first", "last"}:
+            row_num = WindowExpression(
+                function="row_number",
+                partition_by=partition_exprs,
+                order_by=order_by_keys,
+            )
+            dedup_col = Column(
+                ColumnId.create(), "__duckpd_rn__", "BIGINT", hidden=True
+            )
+            proj_plan = ProjectPlan(
+                self._plan,
+                (
+                    *(
+                        NamedExpression(col, ColumnRef(col.id))
+                        for col in self._plan.metadata.columns
+                    ),
+                    NamedExpression(dedup_col, row_num),
+                ),
+                after_projection(
+                    self._plan.metadata,
+                    (*self._plan.metadata.columns, dedup_col),
+                ),
+            )
+            predicate: Expression = BinaryExpression(
+                ColumnRef(dedup_col.id),
+                BinaryOperator.EQUAL,
+                LiteralValue(1),
+            )
+            filter_plan = FilterPlan(proj_plan, predicate, proj_plan.metadata)
+            return DataFrame(self._session, filter_plan)
+        else:  # keep is False
+            cnt = WindowExpression(
+                function="count",
+                arguments=(LiteralValue(1),),
+                partition_by=partition_exprs,
+            )
+            dedup_col = Column(
+                ColumnId.create(), "__duckpd_cnt__", "BIGINT", hidden=True
+            )
+            proj_plan = ProjectPlan(
+                self._plan,
+                (
+                    *(
+                        NamedExpression(col, ColumnRef(col.id))
+                        for col in self._plan.metadata.columns
+                    ),
+                    NamedExpression(dedup_col, cnt),
+                ),
+                after_projection(
+                    self._plan.metadata,
+                    (*self._plan.metadata.columns, dedup_col),
+                ),
+            )
+            predicate = BinaryExpression(
+                ColumnRef(dedup_col.id),
+                BinaryOperator.EQUAL,
+                LiteralValue(1),
+            )
+            filter_plan = FilterPlan(proj_plan, predicate, proj_plan.metadata)
+            return DataFrame(self._session, filter_plan)
 
     def nlargest(
         self,

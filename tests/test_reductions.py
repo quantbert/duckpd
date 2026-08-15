@@ -163,6 +163,15 @@ def test_assigned_numeric_expression_can_be_reduced() -> None:
     assert session.execution_count == 1
 
 
+def test_boolean_expression_can_be_reduced() -> None:
+    source = pd.DataFrame({"value": [1, 3, 4]})
+    frame = duckpd.from_pandas(source)
+
+    result = (frame["value"] > 2).sum()
+
+    assert result == (source["value"] > 2).sum()
+
+
 InvalidReduction = Callable[[duckpd.DataFrame], object]
 
 
@@ -251,6 +260,30 @@ def test_reductions_any_all() -> None:
 
     assert_series_equal(frame.any(), source.any())
     assert_series_equal(frame.all(), source.all())
+
+
+def test_reductions_any_all_string_truthiness_and_nulls() -> None:
+    source = pd.DataFrame({"value": pd.Series(["", "present", None], dtype=object)})
+    frame = duckpd.from_pandas(source)
+
+    for skipna in (True, False):
+        assert frame["value"].any(skipna=skipna) == source["value"].any(skipna=skipna)
+        assert frame["value"].all(skipna=skipna) == source["value"].all(skipna=skipna)
+
+    nullable = pd.DataFrame({"value": pd.Series([False, None], dtype=object)})
+    nullable_frame = duckpd.from_pandas(nullable)
+    assert nullable_frame["value"].any(skipna=False) == nullable["value"].any(
+        skipna=False
+    )
+
+    floating = pd.DataFrame({"value": [0.0, float("nan")]})
+    floating_frame = duckpd.from_pandas(floating)
+    assert floating_frame["value"].any(skipna=False) == floating["value"].any(
+        skipna=False
+    )
+    assert floating_frame["value"].all(skipna=False) == floating["value"].all(
+        skipna=False
+    )
 
 
 def test_reductions_bool_only_and_invalid_args() -> None:

@@ -8,6 +8,7 @@ from duckpd._logical import (
     AggregateExpression,
     AggregateOperator,
     AggregatePlan,
+    BinaryOperator,
     CaseWhen,
     CastExpression,
     Column,
@@ -18,6 +19,7 @@ from duckpd._logical import (
     LiteralValue,
     LogicalPlan,
     UnaryExpression,
+    WindowExpression,
 )
 from duckpd._metadata import after_aggregate
 from duckpd.errors import UnsupportedOperationError
@@ -84,6 +86,28 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         if func_name in {"upper", "lower", "trim", "replace", "strftime"}:
             return "VARCHAR"
         return "UNKNOWN"
+    if isinstance(expression, WindowExpression):
+        func_name = expression.function.lower()
+        if func_name in {"row_number", "rank", "dense_rank", "count"}:
+            return "BIGINT"
+        if func_name in {"avg"}:
+            return "DOUBLE"
+        if func_name in {"bool_or", "bool_and"}:
+            return "BOOLEAN"
+        if expression.arguments:
+            return expression_type(plan, expression.arguments[0])
+        return "UNKNOWN"
+    if expression.operator in {
+        BinaryOperator.EQUAL,
+        BinaryOperator.NOT_EQUAL,
+        BinaryOperator.LESS_THAN,
+        BinaryOperator.LESS_EQUAL,
+        BinaryOperator.GREATER_THAN,
+        BinaryOperator.GREATER_EQUAL,
+        BinaryOperator.AND,
+        BinaryOperator.OR,
+    }:
+        return "BOOLEAN"
     left = expression_type(plan, expression.left)
     right = expression_type(plan, expression.right)
     if is_numeric_type(left) and is_numeric_type(right):

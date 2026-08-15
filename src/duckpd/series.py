@@ -27,6 +27,7 @@ from duckpd._logical import (
     SortPlan,
     UnaryExpression,
     UnaryOperator,
+    WindowExpression,
 )
 from duckpd._metadata import after_aggregate, after_sort
 from duckpd._reductions import (
@@ -40,13 +41,19 @@ from duckpd._reductions import (
     validate_quantile,
 )
 from duckpd._typing import is_scalar_value, normalize_dtype
-from duckpd.errors import AlignmentError, UnsupportedOperationError
+from duckpd.errors import (
+    AlignmentError,
+    UnorderedOperationError,
+    UnsupportedOperationError,
+)
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
     from duckpd.accessors import DatetimeProperties, StringMethods
+    from duckpd.frame import DataFrame
     from duckpd.groupby import SeriesGroupBy
     from duckpd.session import Session
+    from duckpd.window import Expanding, Rolling
 
 
 class Series:
@@ -63,6 +70,41 @@ class Series:
         self._plan = plan
         self._expression = expression
         self.name = name
+
+    def to_frame(self, name: str | None = None) -> DataFrame:
+        """Convert Series to a DataFrame."""
+        from duckpd._logical import Column, ColumnId, NamedExpression, ProjectPlan
+        from duckpd._metadata import after_projection, projection_columns
+        from duckpd.frame import DataFrame
+
+        out_label = name if name is not None else (self.name or "0")
+        out_col = Column(
+            ColumnId.create(),
+            out_label,
+            expression_type(self._plan, self._expression),
+        )
+        all_cols = projection_columns(self._plan.metadata, (out_col,))
+        projections = [
+            (
+                NamedExpression(col, self._expression)
+                if col.id == out_col.id
+                else NamedExpression(col, ColumnRef(col.id))
+            )
+            for col in all_cols
+        ]
+        metadata = after_projection(self._plan.metadata, all_cols)
+        return DataFrame(
+            self._session, ProjectPlan(self._plan, tuple(projections), metadata)
+        )
+
+    def collect(self) -> pd.Series:
+        """Execute the Series plan and return a pandas Series."""
+        df = self.to_frame()
+        pdf = df.collect()
+        col_label = df.columns[0]
+        s = pdf[col_label]
+        s.name = self.name
+        return s
 
     def __add__(self, other: object) -> Series:
         return self._binary(other, BinaryOperator.ADD)
@@ -583,7 +625,7 @@ class Series:
         as_index: bool = True,
         sort: bool = True,
         dropna: bool = True,
-        observed: bool = False,
+        observed: bool = True,
     ) -> SeriesGroupBy:
         """Group Series using a mapper or by a Series/column of groups."""
         from duckpd.groupby import SeriesGroupBy
@@ -647,6 +689,384 @@ class Series:
         from duckpd.accessors import DatetimeProperties
 
         return DatetimeProperties(self)
+
+    def _require_order(self) -> tuple[SortKey, ...]:
+        """Validate that the plan has guaranteed ordering and return SortKeys."""
+        ordering = self._plan.metadata.ordering
+        if not ordering.keys:
+            raise UnorderedOperationError("Operation requires a guaranteed row order")
+        return tuple(
+            SortKey(
+                ColumnRef(k.column_id),
+                k.direction,
+                k.null_placement,
+            )
+            for k in ordering.keys
+        )
+
+    def cumsum(self, *, axis: int | str | None = None, skipna: bool = True) -> Series:
+        """Return cumulative sum over a DataFrame or Series axis."""
+        validate_axis(axis, series=True)
+        order_keys = self._require_order()
+        in_type = expression_type(self._plan, self._expression)
+        op = (
+            CastExpression(self._expression, "BIGINT")
+            if in_type == "BOOLEAN"
+            else self._expression
+        )
+        window: Expression = WindowExpression(
+            function="sum",
+            arguments=(op,),
+            order_by=order_keys,
+            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+        )
+        if in_type in {
+            "TINYINT",
+            "SMALLINT",
+            "INTEGER",
+            "BIGINT",
+            "HUGEINT",
+            "BOOLEAN",
+        }:
+            window = CastExpression(window, "BIGINT")
+        if skipna:
+            expr = CaseWhen(
+                FunctionCall("isnull", (self._expression,)),
+                LiteralValue(None),
+                window,
+            )
+        else:
+            has_null = WindowExpression(
+                function="bool_or",
+                arguments=(FunctionCall("isnull", (self._expression,)),),
+                order_by=order_keys,
+                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            )
+            expr = CaseWhen(
+                has_null,
+                LiteralValue(None),
+                window,
+            )
+        return Series(self._session, self._plan, expr, self.name)
+
+    def cummin(self, *, axis: int | str | None = None, skipna: bool = True) -> Series:
+        """Return cumulative minimum over a DataFrame or Series axis."""
+        validate_axis(axis, series=True)
+        order_keys = self._require_order()
+        window = WindowExpression(
+            function="min",
+            arguments=(self._expression,),
+            order_by=order_keys,
+            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+        )
+        if skipna:
+            expr = CaseWhen(
+                FunctionCall("isnull", (self._expression,)),
+                LiteralValue(None),
+                window,
+            )
+        else:
+            has_null = WindowExpression(
+                function="bool_or",
+                arguments=(FunctionCall("isnull", (self._expression,)),),
+                order_by=order_keys,
+                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            )
+            expr = CaseWhen(
+                has_null,
+                LiteralValue(None),
+                window,
+            )
+        return Series(self._session, self._plan, expr, self.name)
+
+    def cummax(self, *, axis: int | str | None = None, skipna: bool = True) -> Series:
+        """Return cumulative maximum over a DataFrame or Series axis."""
+        validate_axis(axis, series=True)
+        order_keys = self._require_order()
+        window = WindowExpression(
+            function="max",
+            arguments=(self._expression,),
+            order_by=order_keys,
+            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+        )
+        if skipna:
+            expr = CaseWhen(
+                FunctionCall("isnull", (self._expression,)),
+                LiteralValue(None),
+                window,
+            )
+        else:
+            has_null = WindowExpression(
+                function="bool_or",
+                arguments=(FunctionCall("isnull", (self._expression,)),),
+                order_by=order_keys,
+                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            )
+            expr = CaseWhen(
+                has_null,
+                LiteralValue(None),
+                window,
+            )
+        return Series(self._session, self._plan, expr, self.name)
+
+    def cumprod(self, *, axis: int | str | None = None, skipna: bool = True) -> Series:
+        """Return cumulative product over a DataFrame or Series axis."""
+        validate_axis(axis, series=True)
+        order_keys = self._require_order()
+        in_type = expression_type(self._plan, self._expression)
+        op = (
+            CastExpression(self._expression, "BIGINT")
+            if in_type == "BOOLEAN"
+            else self._expression
+        )
+        window: Expression = WindowExpression(
+            function="product",
+            arguments=(op,),
+            order_by=order_keys,
+            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+        )
+        if in_type in {
+            "TINYINT",
+            "SMALLINT",
+            "INTEGER",
+            "BIGINT",
+            "HUGEINT",
+            "BOOLEAN",
+        }:
+            window = CastExpression(window, "BIGINT")
+        if skipna:
+            expr = CaseWhen(
+                FunctionCall("isnull", (self._expression,)),
+                LiteralValue(None),
+                window,
+            )
+        else:
+            has_null = WindowExpression(
+                function="bool_or",
+                arguments=(FunctionCall("isnull", (self._expression,)),),
+                order_by=order_keys,
+                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            )
+            expr = CaseWhen(
+                has_null,
+                LiteralValue(None),
+                window,
+            )
+        return Series(self._session, self._plan, expr, self.name)
+
+    def shift(
+        self,
+        periods: int = 1,
+        *,
+        freq: object = None,
+        axis: int | str | None = 0,
+        fill_value: object = None,
+    ) -> Series:
+        """Shift index by desired number of periods."""
+        validate_axis(axis, series=True)
+        if freq is not None:
+            raise UnsupportedOperationError("DuckPD does not support freq in shift")
+        order_keys = self._require_order()
+        if periods == 0:
+            return self
+        func_name = "lag" if periods > 0 else "lead"
+        offset = abs(periods)
+        window = WindowExpression(
+            function=func_name,
+            arguments=(self._expression, LiteralValue(offset)),
+            order_by=order_keys,
+        )
+        if fill_value is not None:
+            fill_expr = self._coerce_other(fill_value)
+            expr = CaseWhen(
+                FunctionCall("isnull", (window,)),
+                fill_expr,
+                window,
+            )
+        else:
+            expr = window
+        return Series(self._session, self._plan, expr, self.name)
+
+    def diff(self, periods: int = 1, *, axis: int | str | None = 0) -> Series:
+        """First discrete difference of element."""
+        validate_axis(axis, series=True)
+        shifted = self.shift(periods=periods, axis=axis)
+        return self - shifted
+
+    def pct_change(
+        self,
+        periods: int = 1,
+        *,
+        fill_method: object = None,
+        limit: object = None,
+        freq: object = None,
+        axis: int | str | None = 0,
+    ) -> Series:
+        """Percentage change between the current and a prior element."""
+        validate_axis(axis, series=True)
+        if fill_method is not None:
+            raise UnsupportedOperationError(
+                "DuckPD does not support fill_method in pct_change"
+            )
+        if limit is not None:
+            raise UnsupportedOperationError(
+                "DuckPD does not support limit in pct_change"
+            )
+        if freq is not None:
+            raise UnsupportedOperationError(
+                "DuckPD does not support freq in pct_change"
+            )
+        shifted = self.shift(periods=periods, axis=axis)
+        diff_val = self - shifted
+        return diff_val / shifted
+
+    def rank(
+        self,
+        axis: int | str | None = 0,
+        method: Literal["average", "min", "max", "first", "dense"] = "average",
+        numeric_only: bool = False,
+        na_option: Literal["keep", "top", "bottom"] = "keep",
+        ascending: bool = True,
+        pct: bool = False,
+    ) -> Series:
+        """Compute numerical data ranks (1 through n) along axis."""
+        validate_axis(axis, series=True)
+        self._validate_numeric_only(numeric_only)
+        if method not in {"average", "min", "max", "first", "dense"}:
+            raise ValueError(
+                "method must be 'average', 'min', 'max', 'first', or 'dense'"
+            )
+        if na_option not in {"keep", "top", "bottom"}:
+            raise ValueError("na_option must be 'keep', 'top', or 'bottom'")
+
+        direction = SortDirection.ASCENDING if ascending else SortDirection.DESCENDING
+        if na_option == "keep":
+            null_placement = NullPlacement.LAST
+        elif na_option == "top":
+            null_placement = NullPlacement.FIRST
+        else:  # bottom
+            null_placement = NullPlacement.LAST
+
+        val_sort_key = SortKey(self._expression, direction, null_placement)
+        order_by_keys: tuple[SortKey, ...]
+        if method == "first":
+            # 'first' breaks ties based on original row ordering
+            tiebreaker_keys: list[SortKey] = []
+            if self._plan.metadata.ordering.keys:
+                tiebreaker_keys = [
+                    SortKey(ColumnRef(k.column_id), k.direction, k.null_placement)
+                    for k in self._plan.metadata.ordering.keys
+                ]
+            order_by_keys = (val_sort_key, *tiebreaker_keys)
+        else:
+            # other methods rank solely by value
+            order_by_keys = (val_sort_key,)
+
+        if method == "min":
+            rank_expr: Expression = WindowExpression("rank", order_by=order_by_keys)
+        elif method == "dense":
+            rank_expr = WindowExpression("dense_rank", order_by=order_by_keys)
+        elif method == "first":
+            rank_expr = WindowExpression("row_number", order_by=order_by_keys)
+        elif method == "max":
+            rank_val = WindowExpression("rank", order_by=order_by_keys)
+            count_val = WindowExpression(
+                "count",
+                arguments=(LiteralValue(1),),
+                partition_by=(self._expression,),
+            )
+            # rank + count(*) - 1
+            rank_expr = BinaryExpression(
+                BinaryExpression(rank_val, BinaryOperator.ADD, count_val),
+                BinaryOperator.SUBTRACT,
+                LiteralValue(1),
+            )
+        else:  # average
+            rank_val = WindowExpression("rank", order_by=order_by_keys)
+            count_val = WindowExpression(
+                "count",
+                arguments=(LiteralValue(1),),
+                partition_by=(self._expression,),
+            )
+            # rank + (count(*) - 1.0) / 2.0
+            count_minus_one = BinaryExpression(
+                CastExpression(count_val, "DOUBLE"),
+                BinaryOperator.SUBTRACT,
+                LiteralValue(1.0),
+            )
+            offset = BinaryExpression(
+                count_minus_one,
+                BinaryOperator.TRUE_DIVIDE,
+                LiteralValue(2.0),
+            )
+            rank_expr = BinaryExpression(
+                CastExpression(rank_val, "DOUBLE"),
+                BinaryOperator.ADD,
+                offset,
+            )
+
+        if pct:
+            total_count: Expression
+            if na_option == "keep":
+                # Only count non-nulls for percentage
+                total_count = CastExpression(
+                    WindowExpression(
+                        "count",
+                        arguments=(self._expression,),
+                    ),
+                    "DOUBLE",
+                )
+            else:
+                total_count = CastExpression(
+                    WindowExpression(
+                        "count",
+                        arguments=(LiteralValue(1),),
+                    ),
+                    "DOUBLE",
+                )
+            rank_expr = BinaryExpression(
+                CastExpression(rank_expr, "DOUBLE"),
+                BinaryOperator.TRUE_DIVIDE,
+                total_count,
+            )
+        else:
+            if method == "average":
+                rank_expr = CastExpression(rank_expr, "DOUBLE")
+            elif method in {"min", "dense", "first", "max"}:
+                if na_option == "keep":
+                    rank_expr = CastExpression(rank_expr, "DOUBLE")
+                else:
+                    rank_expr = CastExpression(rank_expr, "BIGINT")
+
+        if na_option == "keep":
+            rank_expr = CaseWhen(
+                FunctionCall("isnull", (self._expression,)),
+                LiteralValue(None),
+                rank_expr,
+            )
+
+        return Series(self._session, self._plan, rank_expr, self.name)
+
+    def rolling(
+        self,
+        window: int,
+        min_periods: int | None = None,
+        *,
+        center: bool = False,
+    ) -> Rolling:
+        """Provide rolling window calculations."""
+        from duckpd.window import Rolling
+
+        return Rolling(self, window, min_periods=min_periods, center=center)
+
+    def expanding(
+        self,
+        min_periods: int = 1,
+    ) -> Expanding:
+        """Provide expanding window calculations."""
+        from duckpd.window import Expanding
+
+        return Expanding(self, min_periods=min_periods)
 
     def _coerce_other(self, other: object) -> Expression:
         if isinstance(other, Series):

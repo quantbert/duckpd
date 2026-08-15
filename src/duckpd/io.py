@@ -68,6 +68,28 @@ def read_parquet(
     )
 
 
+def read_csv(
+    path: str | Path | Sequence[str | Path],
+    *,
+    session: Session | None = None,
+    header: bool = True,
+    delimiter: str = ",",
+    auto_detect: bool = True,
+    index: str | Sequence[str] | None = None,
+    order_by: str | Sequence[str] | None = None,
+) -> DataFrame:
+    """Create a lazy DuckPD frame from one or more CSV files."""
+    owner = session if session is not None else Session()
+    return owner.read_csv(
+        path,
+        header=header,
+        delimiter=delimiter,
+        auto_detect=auto_detect,
+        index=index,
+        order_by=order_by,
+    )
+
+
 def concat(
     objs: Iterable[object],
     *,
