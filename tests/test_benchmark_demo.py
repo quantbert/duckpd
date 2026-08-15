@@ -18,6 +18,7 @@ def test_parse_args_defaults() -> None:
     assert args.preset == "100mb"
     assert args.ticker == "NVDA"
     assert args.threads == 4
+    assert args.repetitions == 3
     assert not args.skip_pandas
 
 
@@ -39,4 +40,12 @@ def test_benchmark_smoke_execution(tmp_path: Path) -> None:
         ).write_parquet(parquet_path)
 
     # Run benchmark_file on the smoke dataset
-    benchmark_file(parquet_path, selected_ticker="NVDA", threads=2, skip_pandas=False)
+    duck_result, pandas_result = benchmark_file(
+        parquet_path,
+        selected_ticker="NVDA",
+        threads=2,
+        skip_pandas=False,
+    )
+    assert duck_result.result_rows == 1
+    assert pandas_result is not None
+    assert pandas_result.result_rows == 1

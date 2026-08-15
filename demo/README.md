@@ -45,6 +45,11 @@ uv run python demo/market_data_demo.py 5gb
 uv run python demo/market_data_demo.py all
 ```
 
+The benchmark defaults to three isolated repetitions per engine and verifies
+semantic equality on every repetition. Use `--repetitions 7` for a more stable
+local median. Reported memory is peak Python heap traced by `tracemalloc`, not
+total process RSS or DuckDB native memory.
+
 Generate individual benchmark files:
 
 ```bash

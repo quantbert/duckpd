@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import multiprocessing
+import statistics
 import sys
 import time
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ class BenchmarkResult:
 
     engine: str
     elapsed_seconds: float
-    peak_python_ram_bytes: int
+    peak_python_heap_bytes: int
     result_rows: int
 
 
@@ -112,10 +113,10 @@ def run_in_subprocess(
     queue: multiprocessing.Queue[tuple[pd_orig.DataFrame, float, int]] = ctx.Queue()
     proc = ctx.Process(target=target, args=(*args, queue))  # type: ignore[arg-type]
     proc.start()
-    res = queue.get()
     proc.join()
     if proc.exitcode != 0:
         raise RuntimeError(f"Subprocess failed with exit code {proc.exitcode}")
+    res = queue.get()
     df, elapsed, peak_ram = res
     return df, elapsed, peak_ram
 
@@ -125,51 +126,88 @@ def benchmark_file(
     selected_ticker: str = "NVDA",
     threads: int = 4,
     skip_pandas: bool = False,
-) -> None:
+    repetitions: int = 1,
+) -> tuple[BenchmarkResult, BenchmarkResult | None]:
     """Benchmark DuckPD vs pandas on a specific dataset file."""
+    if repetitions <= 0:
+        raise ValueError("repetitions must be positive")
     file_size_bytes = parquet_path.stat().st_size
     print("=" * 78)
     print(f"Dataset: {parquet_path.name} ({human_size(file_size_bytes)})")
     print(f"Target filter: ticker == {selected_ticker!r}")
     print("=" * 78)
 
-    # 1. DuckPD Run
-    print("Running DuckPD (lazy projection + predicate pushdown + SQL backend)...")
-    duck_df, duck_time, duck_ram = run_in_subprocess(
-        _run_duckpd_pipeline, str(parquet_path), selected_ticker, threads
+    duck_runs: list[BenchmarkResult] = []
+    pandas_runs: list[BenchmarkResult] = []
+    print(f"Running {repetitions} isolated repetition(s), alternating engine order...")
+    for repetition in range(repetitions):
+        run_pandas_first = repetition % 2 == 1 and not skip_pandas
+        engines = ("pandas", "duckpd") if run_pandas_first else ("duckpd", "pandas")
+        outputs: dict[str, pd_orig.DataFrame] = {}
+        for engine in engines:
+            if engine == "pandas" and skip_pandas:
+                continue
+            if engine == "duckpd":
+                result_df, elapsed, peak_heap = run_in_subprocess(
+                    _run_duckpd_pipeline,
+                    str(parquet_path),
+                    selected_ticker,
+                    threads,
+                )
+                duck_runs.append(
+                    BenchmarkResult("DuckPD", elapsed, peak_heap, len(result_df))
+                )
+            else:
+                result_df, elapsed, peak_heap = run_in_subprocess(
+                    _run_pandas_pipeline, str(parquet_path), selected_ticker
+                )
+                pandas_runs.append(
+                    BenchmarkResult("pandas", elapsed, peak_heap, len(result_df))
+                )
+            outputs[engine] = result_df
+        if not skip_pandas:
+            assert_frame_equal(outputs["duckpd"], outputs["pandas"])
+
+    duck_summary = _summarize_runs(duck_runs)
+    print(_format_summary(duck_summary, duck_runs))
+    if skip_pandas:
+        print("Skipping pandas run (requested).")
+        return duck_summary, None
+
+    pandas_summary = _summarize_runs(pandas_runs)
+    print(_format_summary(pandas_summary, pandas_runs))
+    print("[OK] Semantic verification passed for every repetition.")
+    speedup = pandas_summary.elapsed_seconds / max(duck_summary.elapsed_seconds, 1e-6)
+    heap_ratio = pandas_summary.peak_python_heap_bytes / max(
+        duck_summary.peak_python_heap_bytes, 1
+    )
+    print(f"  * Median speedup:           {speedup:.2f}x")
+    print(f"  * Traced Python heap ratio: {heap_ratio:.2f}x")
+    return duck_summary, pandas_summary
+
+
+def _summarize_runs(runs: list[BenchmarkResult]) -> BenchmarkResult:
+    """Return a median summary for repeated benchmark observations."""
+    if not runs:
+        raise ValueError("At least one benchmark result is required")
+    return BenchmarkResult(
+        runs[0].engine,
+        statistics.median(run.elapsed_seconds for run in runs),
+        round(statistics.median(run.peak_python_heap_bytes for run in runs)),
+        runs[0].result_rows,
     )
 
-    print(f"  -> Execution time: {duck_time:.4f} s")
-    print(f"  -> Peak Python RAM: {human_size(duck_ram)}")
-    print(f"  -> Output rows:    {len(duck_df)}")
 
-    # 2. Pandas Run
-    if skip_pandas:
-        print("\nSkipping pandas run (requested).")
-        return
-
-    print("\nRunning standard pandas (eager full-table read + in-memory execution)...")
-    try:
-        pandas_df, pandas_time, pandas_ram = run_in_subprocess(
-            _run_pandas_pipeline, str(parquet_path), selected_ticker
-        )
-        print(f"  -> Execution time: {pandas_time:.4f} s")
-        print(f"  -> Peak Python RAM: {human_size(pandas_ram)}")
-        print(f"  -> Output rows:    {len(pandas_df)}")
-
-        # Verify exact numerical / semantic equivalence
-        assert_frame_equal(duck_df, pandas_df)
-        print(
-            "\n[OK] Semantic verification: DuckPD and pandas results match identically!"
-        )
-
-        speedup = pandas_time / max(duck_time, 1e-6)
-        ram_saving = pandas_ram / max(duck_ram, 1)
-        print(f"  * Speedup:    {speedup:.2f}x faster")
-        print(f"  * RAM saving: {ram_saving:.2f}x less memory")
-
-    except Exception as exc:
-        print(f"  -> Pandas run failed or OOM: {exc}")
+def _format_summary(summary: BenchmarkResult, runs: list[BenchmarkResult]) -> str:
+    """Format median and observed timing range for console output."""
+    elapsed = [run.elapsed_seconds for run in runs]
+    return (
+        f"{summary.engine}: median {summary.elapsed_seconds:.4f} s "
+        f"(range {min(elapsed):.4f}-{max(elapsed):.4f} s), "
+        f"median peak traced Python heap "
+        f"{human_size(summary.peak_python_heap_bytes)}, "
+        f"output rows {summary.result_rows}"
+    )
 
 
 def parse_args(args: list[str]) -> argparse.Namespace:
@@ -202,6 +240,12 @@ def parse_args(args: list[str]) -> argparse.Namespace:
         help="Number of threads for DuckPD engine (default: 4)",
     )
     parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=3,
+        help="Number of isolated repetitions per engine (default: 3)",
+    )
+    parser.add_argument(
         "--skip-pandas",
         action="store_true",
         help="Skip pandas execution (useful for very large datasets)",
@@ -231,6 +275,7 @@ def main() -> None:
             selected_ticker=args.ticker,
             threads=args.threads,
             skip_pandas=args.skip_pandas,
+            repetitions=args.repetitions,
         )
 
     if not found_any:

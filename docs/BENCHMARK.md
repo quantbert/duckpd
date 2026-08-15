@@ -15,11 +15,14 @@ The benchmark runs an analytical workflow typical in quantitative finance and da
    - `total_bars = ("close", "count")`
 4. **Semantic Validation**: Both engines must produce numerically and structurally identical output (`assert_frame_equal`).
 
-### Why DuckPD Outperforms pandas
+### Why this workload favors DuckPD
 
 - **Predicate & Projection Pushdown**: DuckPD compiles the lazy plan directly to DuckDB's vectorized query engine. Rather than deserializing all columns and rows into Python heap memory, DuckDB scans only the requested columns (`ticker`, `open`, `close`, `high`, `low`) and pushes filtering into the Parquet reader.
 - **Multithreading & Vectorized Execution**: DuckDB processes batches in parallel across CPU cores using SIMD instructions and cache-friendly column vectors.
-- **Constant Memory Footprint**: Python heap allocation remains minimal (~350 KB) because intermediate calculations never materialize into pandas/Python object instances until the small aggregated summary is collected.
+- **Small Python heap footprint**: traced Python allocations remain near 358 KB
+    because intermediate calculations stay in DuckDB until the small aggregate is
+    collected. This is not a measurement of DuckDB native memory or total
+    process RSS.
 
 ---
 
@@ -28,26 +31,61 @@ The benchmark runs an analytical workflow typical in quantitative finance and da
 | Parameter | Value |
 |---|---|
 | **OS** | Linux (Ubuntu, x86_64, Kernel 7.0.0-27-generic) |
-| **CPU Cores** | 24 cores |
+| **CPU** | AMD Ryzen AI 9 HX 370, 12 cores / 24 logical CPUs |
 | **Python Version** | 3.12.13 |
 | **DuckDB Version** | 1.5.5 |
 | **pandas Version** | 3.0.5 |
 | **PyArrow Version** | 25.0.1 |
-| **DuckPD Version** | 0.0.1.dev0 |
-| **Measurement Method** | Isolated worker subprocess (`multiprocessing.get_context("spawn")`), wall-time via `time.perf_counter()`, peak Python heap via `tracemalloc`. |
+| **DuckPD Version** | 0.0.5 |
+| **Repository State** | Commit `721bd03` plus the working-tree changes described in this document |
+| **DuckPD Threads** | 4 |
+| **Measurement Method** | Three isolated worker subprocesses per engine (`spawn`), alternating engine order; median and observed range from `time.perf_counter()`; peak traced Python heap from `tracemalloc` |
 
 ---
 
 ## Benchmark Results
 
-### Summary Table
+### Current results: 2026-08-15
 
-| Dataset Size | Parquet Size | Total Rows | DuckPD Time | pandas Time | Speedup | DuckPD Peak RAM | pandas Peak RAM | RAM Reduction | Output Verification |
-|---|---|---|---|---|---|---|---|---|---|
-| **Smoke** | 4.99 MB | 323,618 | **0.032 s** | 0.060 s | **1.85x** | **357 KB** | 6.77 MB | **19.0x less** | Identical |
-| **100 MB** | 99.72 MB | 6,472,357 | **0.070 s** | 0.217 s | **3.10x** | **358 KB** | 99.83 MB | **279.1x less** | Identical |
-| **1 GB** | 997.18 MB | 64,723,568 | **0.465 s** | 1.436 s | **3.09x** | **357 KB** | 981.48 MB | **2,746.8x less** | Identical |
-| **5 GB** | 4.99 GB | 323,617,840 | **2.233 s** | 6.829 s | **3.06x** | **357 KB** | 4.90 GB | **13,715.2x less** | Identical |
+| Dataset | Parquet Size | Rows | DuckPD Median (Range) | pandas Median (Range) | Median Speedup | DuckPD Traced Heap | pandas Traced Heap | Verification |
+|---|---|---|---|---|---|---|---|---|
+| **Smoke** | 4.99 MB | 323,618 | **0.0334 s** (0.0294-0.0340) | 0.0601 s (0.0560-0.0603) | **1.80x** | **357.45 KB** | 6.77 MB | 3/3 identical |
+| **100 MB** | 99.72 MB | 6,472,353 | **0.0787 s** (0.0765-0.0997) | 0.1994 s (0.1991-0.2059) | **2.53x** | **357.78 KB** | 99.84 MB | 3/3 identical |
+| **1 GB** | 997.18 MB | 64,723,528 | **0.4784 s** (0.4714-0.4845) | 1.4342 s (1.4270-1.4626) | **3.00x** | **357.70 KB** | 981.48 MB | 3/3 identical |
+| **5 GB** | 4.99 GB | 323,617,641 | **2.3277 s** (2.2823-2.3672) | 6.8508 s (6.7869-6.8691) | **2.94x** | **357.88 KB** | 4.90 GB | 3/3 identical |
+
+`tracemalloc` does not observe DuckDB or Arrow native allocations. The heap
+columns must not be interpreted as total RAM usage or larger-than-memory proof.
+Peak RSS, spill bytes, and bytes read remain future benchmark metrics.
+
+### Regression review
+
+The previous table contained one observation per engine. Compared with those
+historical values, the current DuckPD medians changed by:
+
+| Dataset | Previous DuckPD | Current Median | Change | pandas Change |
+|---|---:|---:|---:|---:|
+| Smoke | 0.032 s | 0.0334 s | +4.4% | +0.2% |
+| 100 MB | 0.070 s | 0.0787 s | +12.4% | -8.1% |
+| 1 GB | 0.465 s | 0.4784 s | +2.9% | -0.1% |
+| 5 GB | 2.233 s | 2.3277 s | +4.2% | +0.3% |
+
+The 100 MB result is a regression signal worth tracking; the larger scans show
+only a 3-4% shift. This workload reads Parquet and does not exercise the new
+hidden row identity used by pandas/Arrow snapshots, so there is no evidence
+that row identity caused a scaling regression. The old single observations and
+new medians are not statistically equivalent baselines, and no claim below
+10% should be treated as conclusive until a persistent benchmark history with
+more repetitions and controlled cache state exists.
+
+### Dataset provenance
+
+| Dataset | SHA-256 |
+|---|---|
+| Smoke | `c2e035ee0051fa692c6ae68b1c804f993f26a2d6e74e3a9dc935648322b096b8` |
+| 100 MB | `810ed2244bff0088f6170cd89b7224f8b1373253eb74aa0d09f960c7e98feff9` |
+| 1 GB | `35a26bf158fcbb8a1aae1f33ce06e43f7c497abcdf6b8e1636c4b18ea3d7106a` |
+| 5 GB | `d20db6194f2399231343016ff9977ccc88d937bba628cee07e7a0b96122c5f8f` |
 
 ---
 
@@ -87,6 +125,9 @@ uv run python demo/market_data_demo.py 5gb
 uv run python demo/market_data_demo.py all
 ```
 
+The default is three repetitions per engine. Every repetition runs in a fresh
+subprocess, engine order alternates, and any semantic mismatch fails the run.
+
 ### 3. Optional Benchmark Options
 
 ```bash
@@ -96,9 +137,18 @@ uv run python demo/market_data_demo.py 1gb --ticker AAPL
 # Specify custom worker thread count for DuckPD
 uv run python demo/market_data_demo.py 1gb --threads 8
 
+# Increase repetitions for a more stable local comparison
+uv run python demo/market_data_demo.py 1gb --repetitions 7
+
 # Skip pandas run (e.g. if memory is constrained on large files)
 uv run python demo/market_data_demo.py 5gb --skip-pandas
 ```
+
+DuckPD's thread count is controlled by `--threads`; pandas/PyArrow uses its
+runtime default. Results are therefore representative of the default user
+experience, not a matched-thread microbenchmark. Filesystem cache state and CPU
+frequency are also uncontrolled. Use the observed ranges and repeat on the
+target deployment hardware before drawing operational conclusions.
 
 ---
 
