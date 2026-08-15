@@ -207,7 +207,9 @@ class DataFrameGroupBy:
             )
         )
 
-        index_ids = tuple(col.id for col in output_columns if col.hidden)
+        index_ids = tuple(
+            col.id for col in output_columns[: len(self._key_columns)] if col.hidden
+        )
         ordering_keys = (
             tuple(
                 OrderColumn(col.id, SortDirection.ASCENDING, NullPlacement.LAST)
@@ -216,6 +218,37 @@ class DataFrameGroupBy:
             if self._sort
             else ()
         )
+        if not self._sort:
+            row_identity = next(
+                (
+                    column
+                    for column in self._frame._plan.metadata.columns
+                    if column.row_identity
+                ),
+                None,
+            )
+            if row_identity is not None:
+                first_seen = Column(
+                    ColumnId.create(),
+                    "__duckpd_group_first_seen__",
+                    row_identity.duckdb_type,
+                    hidden=True,
+                    row_identity=True,
+                )
+                output_columns.append(first_seen)
+                aggregates.append(
+                    AggregateExpression(
+                        first_seen,
+                        operator=AggregateOperator.MIN,
+                        expression=ColumnRef(row_identity.id),
+                        input_duckdb_type=row_identity.duckdb_type,
+                    )
+                )
+                ordering_keys = (
+                    OrderColumn(
+                        first_seen.id, SortDirection.ASCENDING, NullPlacement.LAST
+                    ),
+                )
 
         metadata = after_aggregate(
             tuple(output_columns),
@@ -375,7 +408,9 @@ class DataFrameGroupBy:
             )
 
         # Build metadata
-        index_ids = tuple(col.id for col in output_columns if col.hidden)
+        index_ids = tuple(
+            col.id for col in output_columns[: len(self._key_columns)] if col.hidden
+        )
         ordering_keys = (
             tuple(
                 OrderColumn(col.id, SortDirection.ASCENDING, NullPlacement.LAST)
@@ -384,6 +419,37 @@ class DataFrameGroupBy:
             if self._sort
             else ()
         )
+        if not self._sort:
+            row_identity = next(
+                (
+                    column
+                    for column in self._frame._plan.metadata.columns
+                    if column.row_identity
+                ),
+                None,
+            )
+            if row_identity is not None:
+                first_seen = Column(
+                    ColumnId.create(),
+                    "__duckpd_group_first_seen__",
+                    row_identity.duckdb_type,
+                    hidden=True,
+                    row_identity=True,
+                )
+                output_columns.append(first_seen)
+                aggregates.append(
+                    AggregateExpression(
+                        first_seen,
+                        operator=AggregateOperator.MIN,
+                        expression=ColumnRef(row_identity.id),
+                        input_duckdb_type=row_identity.duckdb_type,
+                    )
+                )
+                ordering_keys = (
+                    OrderColumn(
+                        first_seen.id, SortDirection.ASCENDING, NullPlacement.LAST
+                    ),
+                )
 
         metadata = after_aggregate(
             tuple(output_columns),

@@ -18,8 +18,8 @@ This document provides a comprehensive overview of the public API implemented in
 | `duckpd.connect(...)` | `memory_limit`, `threads`, `temp_directory`, `max_temp_directory_size`, `read_only` | `Session` | Configures isolated DuckDB connection & limits. |
 | `duckpd.read_parquet(path, ...)` | `path`, `session`, `hive_partitioning`, `union_by_name`, `index`, `order_by` | `DataFrame` | Lazy Parquet scan over local/remote files. |
 | `duckpd.read_csv(path, ...)` | `path`, `session`, `header`, `delimiter`, `auto_detect`, `index`, `order_by` | `DataFrame` | Lazy CSV scan via DuckDB reader. |
-| `duckpd.from_pandas(df, ...)` | `value`, `session`, `index`, `order_by` | `DataFrame` | Registers pandas dataframe zero-copy in session. |
-| `duckpd.from_arrow(table, ...)` | `value`, `session`, `index`, `order_by` | `DataFrame` | Registers Arrow table/batch in session. |
+| `duckpd.from_pandas(df, ...)` | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a stable snapshot and tracks hidden source row identity. |
+| `duckpd.from_arrow(table, ...)` | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with hidden stable row identity. |
 | `duckpd.concat(objs, ...)` | `objs`, `axis=0`, `join='outer'` | `DataFrame` | Row-wise union with schema reconciliation and null-padding. |
 
 ---
@@ -33,8 +33,8 @@ This document provides a comprehensive overview of the public API implemented in
 | `df[col] = value` | Label & scalar/Series/DataFrame | Lazy column assignment mutating handle state. |
 | `df.assign(**kwargs)` | Callables or expressions | Sequential lazy column assignment. |
 | `df.loc[mask, col] = val` | Boolean mask and column | Masked assignment compiled to `CASE WHEN`. |
-| `df.loc[key]` | Index label, list of labels, or mask | Label-based filtering matching explicit index. |
-| `df.iloc[start:stop]` | Slice notation | Positional slicing (requires guaranteed `order_by`). |
+| `df.loc[key]` | Scalar, MultiIndex tuple/prefix, list of labels, or mask | Lazy label filtering. Row selections return lazy frames; label-list request order is not yet guaranteed. |
+| `df.iloc[start:stop, columns]` | Row slice plus integer/slice/list column selector | Lazy positional slicing. Stable pandas/Arrow snapshots qualify; external scans require `order_by`. |
 | `df.rename(columns=...)` | `columns`, `errors='raise'|'ignore'` | Renames columns lazily, preserving metadata. |
 | `df.drop(columns=...)` | `labels`, `columns`, `errors` | Drops columns lazily, preserving index/order keys. |
 | `df.astype(dtype)` | Scalar dtype or dict mapping | Casts columns lazily across DuckDB/pandas types. |
@@ -100,3 +100,19 @@ Available on both `DataFrame` and `Series`:
 * `year`, `month`, `day`, `hour`, `minute`, `second`, `date`
 * `strftime(date_format)`
 * `to_period(freq='Y'|'M'|'D')`
+
+---
+
+## Ordering and resource contract
+
+- Pandas and Arrow sources carry a hidden stable row identity. It is never
+	exposed in columns, indexes, Arrow output, or file sinks.
+- User sorts append row identity only as a final tie-breaker. External scans do
+	not acquire an artificial order.
+- `drop_duplicates`, `rank(method="first")`, top-N ties, and
+	`groupby(sort=False)` use stable identity where available.
+- Join and concat row identity propagation is not yet complete; code requiring
+	pandas-exact output order after those operations should add `sort_values`.
+- Module-level helpers share a weak context-local implicit session. Explicit
+	sessions remain isolated and are preferred for configured or long-lived
+	workloads.

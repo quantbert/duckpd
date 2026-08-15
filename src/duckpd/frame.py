@@ -95,6 +95,7 @@ class DataFrame:
         return tuple(
             self._column_by_id(key.column_id).label
             for key in self._plan.metadata.ordering.keys
+            if not self._column_by_id(key.column_id).row_identity
         )
 
     @property
@@ -1031,6 +1032,18 @@ class DataFrame:
             )
             for label, direction in zip(labels, directions, strict=True)
         )
+        selected_ids = {
+            key.expression.column_id
+            for key in keys
+            if isinstance(key.expression, ColumnRef)
+        }
+        stable_keys = tuple(
+            SortKey(ColumnRef(key.column_id), key.direction, key.null_placement)
+            for key in self._plan.metadata.ordering.keys
+            if key.column_id not in selected_ids
+            and self._column_by_id(key.column_id).row_identity
+        )
+        keys = (*keys, *stable_keys)
         return DataFrame(
             self._session,
             SortPlan(self._plan, keys, after_sort(self._plan.metadata, keys)),
@@ -1789,14 +1802,43 @@ class DataFrame:
             raise UnsupportedOperationError(
                 "DuckPD does not yet support keep='all' in nlargest/nsmallest"
             )
-        sorted_frame = self.sort_values(columns, ascending=not largest)
-        if keep == "last":
-            # Reverse the sort, limit, then the result is in reverse order.
-            # For simplicity, sort in opposite direction and limit.
-            sorted_frame = self.sort_values(columns, ascending=largest)
-            result = sorted_frame.limit(n)
-            # Re-sort in the requested direction
-            return result.sort_values(columns, ascending=not largest)
+        labels = (columns,) if isinstance(columns, str) else tuple(columns)
+        value_direction = (
+            SortDirection.DESCENDING if largest else SortDirection.ASCENDING
+        )
+        keys = tuple(
+            SortKey(
+                ColumnRef(self._column(label).id),
+                value_direction,
+                NullPlacement.LAST,
+            )
+            for label in labels
+        )
+        value_ids = {self._column(label).id for label in labels}
+        for ordering_key in self._plan.metadata.ordering.keys:
+            if ordering_key.column_id in value_ids:
+                continue
+            direction = ordering_key.direction
+            null_placement = ordering_key.null_placement
+            if keep == "last":
+                direction = (
+                    SortDirection.DESCENDING
+                    if direction is SortDirection.ASCENDING
+                    else SortDirection.ASCENDING
+                )
+                null_placement = (
+                    NullPlacement.LAST
+                    if null_placement is NullPlacement.FIRST
+                    else NullPlacement.FIRST
+                )
+            keys = (
+                *keys,
+                SortKey(ColumnRef(ordering_key.column_id), direction, null_placement),
+            )
+        sorted_frame = DataFrame(
+            self._session,
+            SortPlan(self._plan, keys, after_sort(self._plan.metadata, keys)),
+        )
         return sorted_frame.limit(n)
 
     def __repr__(self) -> str:

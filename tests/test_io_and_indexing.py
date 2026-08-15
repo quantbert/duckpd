@@ -145,17 +145,79 @@ def test_iloc_slicing_differential() -> None:
     df = dp.from_pandas(pdf, order_by="id")
 
     # .iloc slices
-    res_slice = df.iloc[1:4].collect()
+    res_slice = cast("dp.DataFrame", df.iloc[1:4]).collect()
     exp_slice = pdf.iloc[1:4].reset_index(drop=True)
     pd.testing.assert_frame_equal(res_slice.reset_index(drop=True), exp_slice)
 
     # .iloc with start only
-    res_slice_start = df.iloc[2:].collect()
+    res_slice_start = cast("dp.DataFrame", df.iloc[2:]).collect()
     pd.testing.assert_frame_equal(
         res_slice_start.reset_index(drop=True), pdf.iloc[2:].reset_index(drop=True)
     )
 
-    # .iloc without ordering raises UnorderedOperationError
+    # Snapshot-backed pandas sources have a stable implicit source order.
     df_unordered = dp.from_pandas(pdf)
+    pd.testing.assert_frame_equal(
+        cast("dp.DataFrame", df_unordered.iloc[1:3]).collect().reset_index(drop=True),
+        pdf.iloc[1:3].reset_index(drop=True),
+    )
+
+
+def test_iloc_rejects_external_scan_without_declared_order(tmp_path: Path) -> None:
+    path = tmp_path / "unordered.csv"
+    pd.DataFrame({"value": [3, 1, 2]}).to_csv(path, index=False)
+    frame = dp.read_csv(path)
+
     with pytest.raises(UnorderedOperationError):
-        df_unordered.iloc[1:3]
+        frame.iloc[1:3]
+
+
+def test_loc_multiindex_exact_partial_and_null_keys_are_lazy() -> None:
+    pdf = pd.DataFrame(
+        {
+            "group": ["a", "a", "b", None],
+            "item": [1, 2, 1, 1],
+            "value": [10, 20, 30, 40],
+        }
+    )
+    session = dp.connect()
+    frame = session.from_pandas(pdf).set_index(["group", "item"])
+
+    exact = cast("dp.DataFrame", frame.loc[("a", 2)])
+    partial = cast("dp.DataFrame", frame.loc[("a",)])
+    null_key = cast("dp.DataFrame", frame.loc[(None, 1)])
+
+    assert session.execution_count == 0
+    indexed = pdf.set_index(["group", "item"])
+    pd.testing.assert_frame_equal(exact.collect(), indexed.loc[[("a", 2)]])
+    pd.testing.assert_frame_equal(partial.collect(), indexed.loc[["a"]])
+    assert null_key.collect()["value"].tolist() == [40]
+
+
+def test_loc_multiindex_column_projection_and_protected_assignment() -> None:
+    pdf = pd.DataFrame({"group": ["a", "b"], "item": [1, 2], "value": [10, 20]})
+    frame = dp.from_pandas(pdf).set_index(["group", "item"], drop=False)
+
+    result = cast("dp.Series", frame.loc[("a", 1), "value"])
+    indexed = pdf.set_index(["group", "item"], drop=False)
+    expected = indexed.loc[indexed.index.isin([("a", 1)]), "value"]
+    pd.testing.assert_series_equal(result.collect(), expected)
+
+    with pytest.raises(ValueError, match="index or ordering"):
+        frame.loc[frame["value"] > 0, "group"] = "changed"
+
+
+def test_iloc_two_dimensional_column_selection_is_lazy() -> None:
+    pdf = pd.DataFrame({"id": [1, 2, 3], "a": [10, 20, 30], "b": [40, 50, 60]})
+    session = dp.connect()
+    frame = session.from_pandas(pdf, order_by="id")
+
+    sliced = cast("dp.DataFrame", frame.iloc[1:, [2, 0]])
+    column = cast("dp.Series", frame.iloc[:, 1])
+
+    assert session.execution_count == 0
+    pd.testing.assert_frame_equal(
+        sliced.collect().reset_index(drop=True),
+        pdf.iloc[1:, [2, 0]].reset_index(drop=True),
+    )
+    pd.testing.assert_series_equal(column.collect(), pdf.iloc[:, 1])

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -14,10 +16,17 @@ from duckpd._compiler import DuckDBCompiler
 from duckpd._executor import Executor
 from duckpd._logical import (
     ArrowSource,
+    ColumnRef,
     CsvSource,
+    FrameMetadata,
+    NullPlacement,
+    OrderColumn,
+    OrderSpec,
     PandasSource,
     ParquetSource,
     ScanPlan,
+    SortDirection,
+    SortKey,
     SortPlan,
     SqlSource,
     TableSource,
@@ -95,9 +104,17 @@ class Session:
             raise TypeError(msg)
 
         key = uuid4().hex
-        self._registered_sources[key] = value.copy()
+        ordinal_label = f"__duckpd_row_ordinal_{key}__"
+        snapshot = value.copy()
+        snapshot[ordinal_label] = range(len(snapshot))
+        self._registered_sources[key] = snapshot
         source = PandasSource(key)
-        plan = self._source_plan(source, index=index, order_by=order_by)
+        plan = self._source_plan(
+            source,
+            index=index,
+            order_by=order_by,
+            stable_order_label=ordinal_label,
+        )
         return DataFrame(self, plan)
 
     def from_arrow(
@@ -112,9 +129,18 @@ class Session:
 
         self._ensure_open()
         key = uuid4().hex
-        self._registered_sources[key] = value
+        ordinal_label = f"__duckpd_row_ordinal_{key}__"
+        ordered_value = value.append_column(
+            ordinal_label, pa.array(range(value.num_rows), type=pa.int64())
+        )
+        self._registered_sources[key] = ordered_value
         source = ArrowSource(key)
-        plan = self._source_plan(source, index=index, order_by=order_by)
+        plan = self._source_plan(
+            source,
+            index=index,
+            order_by=order_by,
+            stable_order_label=ordinal_label,
+        )
         return DataFrame(self, plan)
 
     def read_parquet(
@@ -226,6 +252,10 @@ class Session:
     def __exit__(self, *_args: object) -> None:
         self.close()
 
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()
+
     def _ensure_open(self) -> None:
         if self._closed:
             msg = "DuckPD session is closed"
@@ -252,15 +282,47 @@ class Session:
         *,
         index: str | Sequence[str] | None,
         order_by: str | Sequence[str] | None,
+        stable_order_label: str | None = None,
     ) -> ScanPlan | SortPlan:
         columns = self._compiler.inspect_source(source)
         index_labels = self._normalize_labels(index)
         metadata = source_metadata(columns, index_labels=index_labels)
+        stable_order_key: OrderColumn | None = None
+        if stable_order_label is not None:
+            stable_column = next(
+                column
+                for column in metadata.columns
+                if column.label == stable_order_label
+            )
+            stable_order_key = OrderColumn(
+                stable_column.id,
+                SortDirection.ASCENDING,
+                NullPlacement.LAST,
+            )
+            metadata = FrameMetadata(
+                tuple(
+                    replace(column, hidden=True, row_identity=True)
+                    if column.id == stable_column.id
+                    else column
+                    for column in metadata.columns
+                ),
+                metadata.index,
+                OrderSpec((stable_order_key,)),
+            )
         scan = ScanPlan(source, metadata)
         order_labels = self._normalize_labels(order_by)
         if not order_labels:
             return scan
         keys = sort_keys_for_labels(metadata, order_labels)
+        if stable_order_key is not None:
+            keys = (
+                *keys,
+                SortKey(
+                    ColumnRef(stable_order_key.column_id),
+                    stable_order_key.direction,
+                    stable_order_key.null_placement,
+                ),
+            )
         return SortPlan(scan, keys, after_sort(metadata, keys))
 
     @staticmethod

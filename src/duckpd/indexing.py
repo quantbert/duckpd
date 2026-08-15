@@ -14,14 +14,15 @@ from duckpd._logical import (
     ColumnRef,
     Expression,
     FilterPlan,
+    FunctionCall,
     LimitPlan,
     LiteralValue,
     NamedExpression,
     ProjectPlan,
 )
-from duckpd._metadata import after_projection
+from duckpd._metadata import after_projection, protected_column_ids
 from duckpd._reductions import expression_type
-from duckpd._typing import ScalarValue
+from duckpd._typing import ScalarValue, is_scalar_value
 from duckpd.errors import (
     UnorderedOperationError,
     UnsupportedOperationError,
@@ -41,19 +42,7 @@ class LocIndexer:
     def __getitem__(self, key: object) -> DataFrame | Series:
         from duckpd.series import Series
 
-        # Case 1: tuple like (mask, columns) or (index_val, columns)
-        row_key: object
-        col_key: object = None
-        if isinstance(key, tuple):
-            tup_key = cast("tuple[object, ...]", key)
-            if len(tup_key) == 2:
-                row_key, col_key = tup_key[0], tup_key[1]
-            else:
-                raise UnsupportedOperationError(
-                    "DuckPD .loc supports up to 2 dimensions [row, col]"
-                )
-        else:
-            row_key = key
+        row_key, col_key = self._split_key(key)
 
         # Resolve rows
         filtered_df: DataFrame
@@ -71,23 +60,14 @@ class LocIndexer:
         elif isinstance(row_key, Series):
             self._frame._require_same_plan(row_key)
             filtered_df = self._frame[row_key]
-        elif isinstance(row_key, list | tuple | set):
-            # Check for explicit index matching
-            index_ids = self._frame._plan.metadata.index.columns
-            if not index_ids:
-                raise UnsupportedOperationError(
-                    "DataFrame has no explicit index to match labels"
-                )
-            # If 1 index column, match value in row_key
-            idx_col_id = index_ids[0]
+        elif isinstance(row_key, list | set):
             pred: Expression = LiteralValue(False)
             for item in cast("Sequence[object]", row_key):
-                val_pred = BinaryExpression(
-                    ColumnRef(idx_col_id),
-                    BinaryOperator.EQUAL,
-                    LiteralValue(cast("ScalarValue", item)),
+                pred = BinaryExpression(
+                    pred,
+                    BinaryOperator.OR,
+                    self._index_predicate(item),
                 )
-                pred = BinaryExpression(pred, BinaryOperator.OR, val_pred)
             from duckpd.frame import DataFrame as DataFrameClass
 
             filtered_df = DataFrameClass(
@@ -95,18 +75,7 @@ class LocIndexer:
                 FilterPlan(self._frame._plan, pred, self._frame._plan.metadata),
             )
         else:
-            # Single label scalar on explicit index
-            index_ids = self._frame._plan.metadata.index.columns
-            if not index_ids:
-                raise UnsupportedOperationError(
-                    "DataFrame has no explicit index to match labels"
-                )
-            idx_col_id = index_ids[0]
-            pred = BinaryExpression(
-                ColumnRef(idx_col_id),
-                BinaryOperator.EQUAL,
-                LiteralValue(cast("ScalarValue", row_key)),
-            )
+            pred = self._index_predicate(row_key)
             from duckpd.frame import DataFrame as DataFrameClass
 
             filtered_df = DataFrameClass(
@@ -115,13 +84,59 @@ class LocIndexer:
             )
 
         # Resolve columns
-        if col_key is None:
+        if col_key is None or self._is_full_slice(col_key):
             return filtered_df
         if isinstance(col_key, str):
             return filtered_df[col_key]
         if isinstance(col_key, Sequence):
             return filtered_df[list(cast("Sequence[str]", col_key))]
         raise UnsupportedOperationError(f"Unsupported column key in .loc: {col_key!r}")
+
+    def _split_key(self, key: object) -> tuple[object, object | None]:
+        if not isinstance(key, tuple):
+            return key, None
+        tuple_key = cast("tuple[object, ...]", key)
+        index_depth = len(self._frame._plan.metadata.index.columns)
+        if len(tuple_key) == 2 and (
+            isinstance(tuple_key[0], (tuple, list)) or self._is_full_slice(tuple_key[0])
+        ):
+            return cast("object", tuple_key[0]), tuple_key[1]
+        if index_depth > 1 and len(tuple_key) <= index_depth:
+            return tuple_key, None
+        if index_depth == 1 and len(tuple_key) == 2:
+            return tuple_key[0], tuple_key[1]
+        raise UnsupportedOperationError("Ambiguous or invalid .loc key")
+
+    def _index_predicate(self, key: object) -> Expression:
+        index_ids = self._frame._plan.metadata.index.columns
+        if not index_ids:
+            raise UnsupportedOperationError(
+                "DataFrame has no explicit index to match labels"
+            )
+        values: tuple[object, ...] = (
+            cast("tuple[object, ...]", key) if isinstance(key, tuple) else (key,)
+        )
+        if not values or len(values) > len(index_ids):
+            raise KeyError("Index key has the wrong number of levels")
+        predicate: Expression = LiteralValue(True)
+        for column_id, value in zip(index_ids, values, strict=False):
+            if not is_scalar_value(value):
+                raise TypeError(".loc index labels must be scalar values")
+            comparison: Expression
+            if value is None:
+                comparison = FunctionCall("isnull", (ColumnRef(column_id),))
+            else:
+                comparison = BinaryExpression(
+                    ColumnRef(column_id),
+                    BinaryOperator.EQUAL,
+                    LiteralValue(cast("ScalarValue", value)),
+                )
+            predicate = BinaryExpression(predicate, BinaryOperator.AND, comparison)
+        return predicate
+
+    @staticmethod
+    def _is_full_slice(key: object) -> bool:
+        return isinstance(key, slice) and key == slice(None)
 
     def __setitem__(self, key: object, value: object) -> None:
         """Masked assignment: df.loc[mask, col] = val."""
@@ -160,6 +175,11 @@ class LocIndexer:
                 f"Unsupported column target in .loc: {col_key!r}"
             )
 
+        targets = [self._frame._column(label) for label in target_cols]
+        protected = protected_column_ids(self._frame._plan.metadata)
+        if any(column.id in protected for column in targets):
+            raise ValueError("Cannot assign to an index or ordering column")
+
         # For each target column, create a CaseWhen(mask, value, existing_col)
         val_expr = self._frame._coerce_expression(value)
         new_projections: list[NamedExpression] = []
@@ -194,17 +214,57 @@ class ILocIndexer:
     def __init__(self, frame: DataFrame) -> None:
         self._frame = frame
 
-    def __getitem__(self, key: object) -> DataFrame:
+    def __getitem__(self, key: object) -> DataFrame | Series:
+        row_key: object = key
+        column_key: object | None = None
+        if isinstance(key, tuple):
+            tuple_key = cast("tuple[object, ...]", key)
+            if len(tuple_key) != 2:
+                raise UnsupportedOperationError(
+                    "DuckPD .iloc supports up to 2 dimensions [row, col]"
+                )
+            row_key, column_key = tuple_key
+
+        result = self._select_rows(row_key)
+        if column_key is None or (
+            isinstance(column_key, slice) and column_key == slice(None)
+        ):
+            return result
+        visible = result._plan.metadata.visible_columns
+        if isinstance(column_key, int):
+            try:
+                return result[visible[column_key].label]
+            except IndexError as error:
+                raise IndexError(
+                    "single positional indexer is out-of-bounds"
+                ) from error
+        if isinstance(column_key, slice):
+            labels = [column.label for column in visible[column_key]]
+            return result[labels]
+        if isinstance(column_key, Sequence) and not isinstance(column_key, str):
+            positions = cast("Sequence[int]", column_key)
+            try:
+                labels = [visible[position].label for position in positions]
+            except IndexError as error:
+                raise IndexError("positional indexers are out-of-bounds") from error
+            return result[labels]
+        raise UnsupportedOperationError(
+            f"Unsupported column key in .iloc: {column_key!r}"
+        )
+
+    def _select_rows(self, key: object) -> DataFrame:
         if isinstance(key, slice):
+            if key == slice(None):
+                return self._frame
             ordering = self._frame._plan.metadata.ordering
             if not ordering.keys:
                 raise UnorderedOperationError(
                     "Positional .iloc slicing requires a guaranteed row order"
                 )
-            slice_key = cast("slice", key)
-            start_val = cast("int | None", slice_key.start)
-            stop_val = cast("int | None", slice_key.stop)
-            step_val = cast("int | None", slice_key.step)
+            slice_key = cast("slice[int | None, int | None, int | None]", key)
+            start_val = slice_key.start
+            stop_val = slice_key.stop
+            step_val = slice_key.step
 
             start = start_val if start_val is not None else 0
             if step_val is not None and step_val != 1:

@@ -29,6 +29,7 @@ class Column:
     label: str
     duckdb_type: str
     hidden: bool = False
+    row_identity: bool = False
 
 
 @dataclass(frozen=True)

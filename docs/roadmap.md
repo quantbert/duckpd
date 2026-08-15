@@ -176,7 +176,9 @@ optimizer need proves otherwise.
       uniqueness state, and names.
 - [x] `OrderSpec`: unknown or guaranteed ordered keys, directions, null
       placement, and stability.
-- [ ] `RowIdentity`: lineage token and optional stable key columns.
+- [ ] `RowIdentity`: stable hidden ordinals are implemented for pandas and
+      Arrow snapshots; propagation through joins, unions, persistence, and
+      externally keyed sources remains incomplete.
 - [ ] `SourceProvenance`: source kind, location, fingerprint, write capability,
       and transformations that preserve source rows.
 - [x] `FrameState`: plan, schema, index, order, row identity, provenance, and

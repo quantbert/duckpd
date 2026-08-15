@@ -116,9 +116,13 @@ def test_groupby_sort_false_preserves_order() -> None:
     )
     frame = duckpd.from_pandas(df)
 
-    res_sort = frame.groupby("group", sort=True, as_index=False).agg(s=("val", "sum"))
-    exp_sort = df.groupby("group", sort=True, as_index=False).agg(s=("val", "sum"))
-    assert_frame_equal(res_sort.collect(), exp_sort)
+    result = frame.groupby("group", sort=False, as_index=False).agg(s=("val", "sum"))
+    expected = df.groupby("group", sort=False, as_index=False).agg(s=("val", "sum"))
+    assert_frame_equal(result.collect(), expected)
+
+    size_result = frame.groupby("group", sort=False).size().collect()
+    size_expected = df.groupby("group", sort=False).size().to_frame("size")
+    assert_frame_equal(size_result, size_expected)
 
 
 def test_groupby_pipeline_with_filter_assign_sort_limit(

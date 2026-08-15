@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal, assert_series_equal
@@ -191,6 +193,21 @@ def test_dataframe_drop_duplicates_subset_single_string(
     )
 
 
+@pytest.mark.parametrize("keep", ["first", "last", False])
+def test_dataframe_drop_duplicates_preserves_pandas_source_order(
+    keep: Literal["first", "last", False],
+) -> None:
+    source = pd.DataFrame(
+        {"key": ["a", "b", "a", "c", "b"], "payload": [1, 2, 3, 4, 5]}
+    )
+    frame = duckpd.from_pandas(source)
+
+    result = frame.drop_duplicates(subset="key", keep=keep).collect()
+    expected = source.drop_duplicates(subset="key", keep=keep).reset_index(drop=True)
+
+    assert_frame_equal(result.reset_index(drop=True), expected)
+
+
 def test_dataframe_drop_duplicates_is_lazy(dup_source: pd.DataFrame) -> None:
     session = duckpd.connect()
     frame = session.from_pandas(dup_source)
@@ -256,6 +273,26 @@ def test_dataframe_nlargest_multiple_columns() -> None:
     result = frame.nlargest(2, ["a", "b"])
     expected = source.nlargest(2, ["a", "b"]).reset_index(drop=True)
     assert_frame_equal(result.collect().reset_index(drop=True), expected)
+
+
+@pytest.mark.parametrize("keep", ["first", "last"])
+def test_top_n_ties_match_pandas(keep: Literal["first", "last"]) -> None:
+    source = pd.DataFrame(
+        {"value": [3, 3, 2, 2, 1], "payload": ["a", "b", "c", "d", "e"]}
+    )
+    frame = duckpd.from_pandas(source)
+
+    largest = frame.nlargest(1, "value", keep=keep).collect()
+    smallest = frame.nsmallest(2, "value", keep=keep).collect()
+
+    assert_frame_equal(
+        largest.reset_index(drop=True),
+        source.nlargest(1, "value", keep=keep).reset_index(drop=True),
+    )
+    assert_frame_equal(
+        smallest.reset_index(drop=True),
+        source.nsmallest(2, "value", keep=keep).reset_index(drop=True),
+    )
 
 
 def test_dataframe_nlargest_is_lazy(numeric_source: pd.DataFrame) -> None:

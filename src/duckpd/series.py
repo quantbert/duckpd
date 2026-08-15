@@ -579,10 +579,7 @@ class Series:
         col_label = self.name or "__duckpd_topn__"
         if self.name is None:
             frame = frame.assign(__duckpd_topn__=self)
-        result = frame.sort_values(
-            col_label,
-            ascending=not largest,
-        ).limit(n)
+        result = frame._top_n(n, col_label, largest=largest, keep=keep)
         return Series(
             self._session,
             result._plan,

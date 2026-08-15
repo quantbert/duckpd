@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -89,15 +90,21 @@ def test_dataframe_cum_transforms_differential() -> None:
     pd.testing.assert_frame_equal(res_df_cumprod, exp_df_cumprod)
 
 
-def test_cumulative_requires_order() -> None:
+def test_cumulative_uses_stable_pandas_snapshot_order() -> None:
     pdf = pd.DataFrame({"a": [1, 2, 3]})
-    df = dp.from_pandas(pdf)  # no order_by
+    df = dp.from_pandas(pdf)
+
+    pd.testing.assert_series_equal(df["a"].cumsum().collect(), pdf["a"].cumsum())
+    pd.testing.assert_frame_equal(df.cumsum().collect(), pdf.cumsum())
+
+
+def test_cumulative_requires_order_for_external_scan(tmp_path: Path) -> None:
+    path = tmp_path / "unordered.csv"
+    pd.DataFrame({"a": [1, 2, 3]}).to_csv(path, index=False)
+    df = dp.read_csv(path)
 
     with pytest.raises(UnorderedOperationError):
         df["a"].cumsum()
-
-    with pytest.raises(UnorderedOperationError):
-        df.cumsum()
 
 
 def test_shift_diff_pct_change_differential() -> None:

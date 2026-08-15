@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
+from weakref import ReferenceType, ref
 
 import pandas as pd
 import pyarrow as pa
@@ -24,6 +26,20 @@ if TYPE_CHECKING:
     from duckpd.frame import DataFrame
 
 
+_implicit_session: ContextVar[ReferenceType[Session] | None] = ContextVar(
+    "duckpd_implicit_session", default=None
+)
+
+
+def _get_implicit_session() -> Session:
+    reference = _implicit_session.get()
+    session = reference() if reference is not None else None
+    if session is None or session.closed:
+        session = Session()
+        _implicit_session.set(ref(session))
+    return session
+
+
 def from_pandas(
     value: pd.DataFrame,
     *,
@@ -32,7 +48,7 @@ def from_pandas(
     order_by: str | Sequence[str] | None = None,
 ) -> DataFrame:
     """Create a lazy DuckPD frame from a pandas DataFrame."""
-    owner = session if session is not None else Session()
+    owner = session if session is not None else _get_implicit_session()
     return owner.from_pandas(value, index=index, order_by=order_by)
 
 
@@ -44,7 +60,7 @@ def from_arrow(
     order_by: str | Sequence[str] | None = None,
 ) -> DataFrame:
     """Create a lazy DuckPD frame from an Arrow table or record batch."""
-    owner = session if session is not None else Session()
+    owner = session if session is not None else _get_implicit_session()
     return owner.from_arrow(value, index=index, order_by=order_by)
 
 
@@ -58,7 +74,7 @@ def read_parquet(
     order_by: str | Sequence[str] | None = None,
 ) -> DataFrame:
     """Create a lazy DuckPD frame from one or more Parquet files."""
-    owner = session if session is not None else Session()
+    owner = session if session is not None else _get_implicit_session()
     return owner.read_parquet(
         path,
         hive_partitioning=hive_partitioning,
@@ -79,7 +95,7 @@ def read_csv(
     order_by: str | Sequence[str] | None = None,
 ) -> DataFrame:
     """Create a lazy DuckPD frame from one or more CSV files."""
-    owner = session if session is not None else Session()
+    owner = session if session is not None else _get_implicit_session()
     return owner.read_csv(
         path,
         header=header,

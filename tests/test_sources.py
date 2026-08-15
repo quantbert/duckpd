@@ -62,6 +62,26 @@ def test_module_helper_owns_an_implicit_session() -> None:
     assert_frame_equal(frame.to_pandas(), source)
 
 
+def test_module_helpers_share_a_context_local_session() -> None:
+    left = duckpd.from_pandas(pd.DataFrame({"value": [1]}))
+    right = duckpd.from_pandas(pd.DataFrame({"value": [2]}))
+
+    result = duckpd.concat([left, right])
+
+    assert left._session is right._session
+    assert_frame_equal(result.collect(), pd.DataFrame({"value": [1, 2]}))
+
+
+def test_explicit_session_override_remains_isolated() -> None:
+    implicit = duckpd.from_pandas(pd.DataFrame({"value": [1]}))
+    explicit_session = duckpd.connect()
+    explicit = duckpd.from_pandas(
+        pd.DataFrame({"value": [2]}), session=explicit_session
+    )
+
+    assert implicit._session is not explicit._session
+
+
 def test_closed_session_fails_clearly() -> None:
     session = duckpd.connect()
     frame = session.from_pandas(pd.DataFrame({"value": [1]}))

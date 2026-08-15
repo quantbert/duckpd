@@ -1,14 +1,3 @@
-<p align="center">
-  <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
-</p>
-
-# DuckPD 🦆❤️🐼
-
-DuckPD is DuckDB dressed as a Pandas DataFrame. 
-
-DuckPD is an experimental lazy DataFrame library with a pandas-shaped frontend
-and DuckDB as its execution engine.
-
 > [!WARNING]
 > **DuckPD is a work in progress and is not yet recommended for
 > production-critical workloads.** The API and supported pandas semantics may
@@ -16,9 +5,47 @@ and DuckDB as its execution engine.
 > unsupported. Validate results and resource behavior for each intended
 > workload before adopting it.
 
-DuckPD intentionally supports a small, explicit subset of pandas rather than
-silently falling back to materializing a complete pandas DataFrame. See the
-[release policy](docs/RELEASES.md) for the pre-`1.0` stability policy.
+<p align="center">
+  <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
+</p>
+
+# DuckPD 🦆❤️🐼
+
+**DuckPD is DuckDB dressed as a pandas DataFrame.**
+
+DuckPD is a lazy DataFrame library with a pandas-shaped API and DuckDB as its execution engine. The goal is to make working with DuckDB feel familiar to pandas users while preserving the performance, scalability, and query-optimization advantages of DuckDB.
+
+Where practical, DuckPD aims to match pandas APIs and semantics closely enough that existing pandas knowledge — and eventually a large amount of pandas-oriented code — transfers naturally. It does **not**, however, aim to reproduce pandas by sacrificing the properties that make DuckDB valuable.
+
+## Project directives
+
+These principles define the direction of DuckPD and should guide API and implementation decisions:
+
+1. **Pandas-shaped, DuckDB-native.**
+   The public API should feel like pandas, but operations should map naturally onto DuckDB's relational and vectorized execution model.
+
+2. **Stay lazy by default.**
+   Transformations should build a query plan rather than execute immediately. Execution should happen only at clear and intentional boundaries such as `collect()`, `head()`, Arrow conversion, or file output.
+
+3. **Never silently fall back to pandas.**
+   Unsupported operations should fail explicitly rather than unexpectedly materializing an entire dataset into memory. Users should always be able to reason about where computation happens.
+
+4. **Push work into DuckDB.**
+   Filtering, projection, joins, aggregation, sorting, expressions, and other supported operations should be translated into DuckDB operations whenever possible so DuckDB can optimize the complete query.
+
+5. **Preserve pandas semantics where we claim compatibility.**
+   API similarity alone is not enough. Supported operations should match pandas behavior as closely as practical, including edge cases around nulls, indexes, dtypes, grouping, and column behavior.
+
+6. **Correctness before coverage.**
+   It is better to support a smaller pandas surface correctly than to advertise broad compatibility backed by incomplete semantics, hidden fallbacks, or surprising execution behavior.
+
+7. **Make execution visible and predictable.**
+   Users should be able to understand when data is scanned, materialized, transferred, or written. Laziness must be a useful property, not hidden magic.
+
+8. **Exploit the ecosystem boundaries.**
+   DuckPD should interoperate cleanly with pandas, Arrow, Parquet, SQL, and DuckDB itself. Crossing those boundaries should be explicit and inexpensive wherever the underlying systems allow it.
+
+The long-term ambition is broad pandas API coverage **where those APIs can be implemented without violating these directives**. Compatibility is the interface; DuckDB-native execution is the foundation.
 
 ## Current capabilities
 
@@ -38,7 +65,12 @@ silently falling back to materializing a complete pandas DataFrame. See the
   `max`, `std`, `var`, `median`, `quantile`, `any`, and `all` over numeric and
   boolean data, including `skipna`, `min_count`, and DataFrame `numeric_only` support.
 - Explicit lazy indexes with `set_index()`/`reset_index()` and source
-	`index=`/`order_by=` declarations.
+   `index=`/`order_by=` declarations, including exact and partial MultiIndex
+   `.loc` selection.
+- Stable snapshot order for pandas and Arrow inputs, used for deterministic
+   positional operations, duplicate retention, ranking, and top-N ties.
+- Context-local implicit sessions, allowing frames created by separate
+   module-level helpers to participate in the same lazy plan.
 - Explicit pandas collection, bounded `head`, Arrow tables and record batches,
   physical plan inspection (`explain`), and direct zero-copy Parquet writes.
 ## Supported pandas API Coverage
@@ -80,6 +112,28 @@ pandas_result = result.collect()
 Transformations above are lazy. `explain()`, `head()`, `collect()`, Arrow output,
 and file output are explicit execution boundaries. `limit()` stays lazy while
 `head()` returns a bounded pandas preview.
+
+## Ordering, indexing, and sessions
+
+Pandas and Arrow inputs are snapshots with a stable source row order. DuckPD
+tracks that order with hidden relational metadata so operations such as
+`.iloc`, `drop_duplicates(keep=...)`, `rank(method="first")`, and top-N tie
+selection remain deterministic without exposing a synthetic pandas index.
+
+Parquet, CSV, SQL, and DuckDB table scans remain unordered unless `order_by=`
+is provided. Ordering-sensitive operations fail with
+`UnorderedOperationError` rather than relying on accidental scan order.
+
+Label selections remain lazy and therefore return DuckPD `DataFrame` or
+`Series` handles. Exact pandas return-type switching for `df.loc[label]`
+depends on runtime index uniqueness and is intentionally deferred to a bounded
+eager scalar/row API. MultiIndex exact and prefix keys are supported; ordered
+label-list reindexing and cross-frame assignment alignment remain unsupported.
+
+Module-level readers reuse a context-local implicit session, so independently
+created helper frames can be combined. Explicit `Session` context managers are
+still recommended when resource limits, database lifetime, or deterministic
+cleanup matter.
 
 ## Demos
 
