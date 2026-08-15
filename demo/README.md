@@ -32,8 +32,14 @@ uv run python demo/market_data_demo.py
   Books dataset.
 - `DuckPD_Features_Walkthrough.ipynb` is a comprehensive interactive walkthrough
   showcasing recent additions (remote cloud parquet, relational joins, `.str` and
-  `.dt` accessors, `duckpd.concat`, statistical/quantile reductions, and
-  multi-column groupbys) using the AlphaDojo stock news dataset (~3.9M rows).
+  `.dt` accessors, `duckpd.concat`, statistical/quantile reductions,
+  multi-column groupbys, rolling/expanding windows, shifts, and persistence)
+  using the AlphaDojo stock news dataset (~3.9M rows).
+- `DuckPD_Order_Index_Window_Workflows.ipynb` is a self-contained offline
+  tutorial covering stable snapshot order, deterministic duplicate/top-N ties,
+  MultiIndex `.loc`, two-dimensional `.iloc`, cumulative and row windows,
+  external ordering requirements, masked assignment, persistence, and direct
+  CSV/Parquet output with pandas differential assertions.
 
 Run market data benchmarks:
 

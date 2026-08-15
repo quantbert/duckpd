@@ -1,9 +1,8 @@
 > [!WARNING]
 > **DuckPD is a work in progress and is not yet recommended for
 > production-critical workloads.** The API and supported pandas semantics may
-> change between `0.x` releases, and many pandas operations are intentionally
-> unsupported. Validate results and resource behavior for each intended
-> workload before adopting it.
+> change between `0.x` releases. Validate results and resource behavior for
+> each intended workload before adopting it.
 
 <p align="center">
   <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
@@ -141,6 +140,10 @@ Interactive notebooks and small runnable programs are available in [demo/](demo/
 
 - `demo/DuckPD_Quickstart.ipynb` — 5-minute quickstart on the Goodreads Books dataset.
 - `demo/DuckPD_Features_Walkthrough.ipynb` — Deep dive into recent additions (remote cloud parquet, multi-table joins, `.str`/`.dt` accessors, `duckpd.concat`, statistical reductions, and multi-column groupbys) using the AlphaDojo stock news dataset (~3.9M rows).
+- `demo/DuckPD_Order_Index_Window_Workflows.ipynb` — Offline, differential
+   walkthrough of stable row order, deterministic ties, MultiIndex `.loc`, 2D
+   `.iloc`, cumulative/rolling/expanding windows, masked assignment,
+   persistence, and direct outputs.
 
 ```bash
 uv run python demo/basic_pipeline.py
