@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, cast
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -17,6 +19,7 @@ from duckpd._logical import (
     SortKey,
     UnionPlan,
 )
+from duckpd._quoting import quote_identifier
 from duckpd._typing import ParquetCompression
 from duckpd.errors import MaterializationError
 
@@ -24,6 +27,22 @@ if TYPE_CHECKING:
     from duckpd._compiler import DuckDBCompiler
     from duckpd._logical import LogicalPlan
     from duckpd.session import Session
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    return Decimal(str(value))
+
+
+def _bytes_or_none(value: object) -> bytes | None:
+    if value is None or value is pd.NA:
+        return None
+    if not isinstance(value, (bytes, bytearray)):
+        raise TypeError(f"Expected a binary value, got {type(value).__name__}")
+    return bytes(value)
 
 
 class Executor:
@@ -52,7 +71,42 @@ class Executor:
             ]
             if order_exprs:
                 rel = rel.sort(*order_exprs)
+        decimal_labels = {
+            compiled.bindings[column.id]
+            for column in plan.metadata.columns
+            if column.duckdb_type.startswith("DECIMAL(")
+            and column.id in compiled.bindings
+        }
+        if decimal_labels:
+            rel = rel.project(
+                *(
+                    duckdb.SQLExpression(quote_identifier(label))
+                    .cast("VARCHAR")
+                    .alias(label)
+                    if label in decimal_labels
+                    else duckdb.SQLExpression(quote_identifier(label))
+                    for label in compiled.bindings.values()
+                )
+            )
         result = rel.to_df()
+        type_by_label = {
+            compiled.bindings[column.id]: column.duckdb_type
+            for column in plan.metadata.columns
+            if column.id in compiled.bindings
+        }
+        for label, duckdb_type in type_by_label.items():
+            if duckdb_type.startswith("DECIMAL("):
+                result[label] = result[label].map(_decimal_or_none)
+            elif duckdb_type == "BLOB":
+                result[label] = result[label].map(_bytes_or_none)
+            elif duckdb_type == "DATE":
+                result[label] = result[label].map(
+                    lambda value: (
+                        None
+                        if value is None or value is pd.NaT
+                        else cast("pd.Timestamp", value).date()
+                    )
+                )
         preserved_ids = self._pandas_nullable_integer_ids(plan)
         preserved_labels = {
             compiled.bindings[column_id]
@@ -98,10 +152,30 @@ class Executor:
                 plan.left
             ) | self._pandas_nullable_integer_ids(plan.right)
         if isinstance(plan, UnionPlan):
-            preserved: set[ColumnId] = set()
+            nullable_labels: set[str] = set()
             for input_plan in plan.inputs:
-                preserved.update(self._pandas_nullable_integer_ids(input_plan))
-            return preserved
+                nullable_ids = self._pandas_nullable_integer_ids(input_plan)
+                nullable_labels.update(
+                    column.label
+                    for column in input_plan.metadata.columns
+                    if column.id in nullable_ids
+                )
+            pandas_nullable_types = {
+                "TINYINT",
+                "SMALLINT",
+                "INTEGER",
+                "BIGINT",
+                "UTINYINT",
+                "USMALLINT",
+                "UINTEGER",
+                "UBIGINT",
+            }
+            return {
+                column.id
+                for column in plan.metadata.columns
+                if column.label in nullable_labels
+                and column.duckdb_type in pandas_nullable_types
+            }
         return self._pandas_nullable_integer_ids(plan.input)
 
     def to_arrow(self, plan: LogicalPlan) -> pa.Table:
@@ -157,7 +231,7 @@ class Executor:
     ) -> None:
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
-        self._compiler.project_visible(compiled, plan).relation.create(name)
+        compiled.relation.create(name)
 
     def explain(
         self,

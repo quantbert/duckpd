@@ -123,6 +123,13 @@ Parquet, CSV, SQL, and DuckDB table scans remain unordered unless `order_by=`
 is provided. Ordering-sensitive operations fail with
 `UnorderedOperationError` rather than relying on accidental scan order.
 
+Row-wise `concat` preserves input sequence and each input's guaranteed order
+when every input is ordered; one unordered input makes the result unordered.
+Persistence retains explicit indexes and ordering metadata. SQL joins never
+claim a total order because duplicate join keys lack a stable relational
+tie-breaker, even when `merge(sort=True)` sorts by the merge keys; follow-up
+positional work must sort by enough columns to break ties.
+
 Label selections remain lazy and therefore return DuckPD `DataFrame` or
 `Series` handles. Exact pandas return-type switching for `df.loc[label]`
 depends on runtime index uniqueness and is intentionally deferred to a bounded

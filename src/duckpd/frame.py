@@ -29,9 +29,11 @@ from duckpd._logical import (
     NamedExpression,
     NullPlacement,
     ProjectPlan,
+    ScanPlan,
     SortDirection,
     SortKey,
     SortPlan,
+    TableSource,
     WindowExpression,
 )
 from duckpd._metadata import (
@@ -173,10 +175,13 @@ class DataFrame:
         self.write_csv(path, sep=sep, header=header)
 
     def persist(self, name: str | None = None) -> DataFrame:
-        """Persist intermediate plan into a DuckDB temporary table."""
+        """Persist the complete plan while retaining index and order metadata."""
         table_name = name if name is not None else f"__duckpd_persist_{uuid4().hex}__"
         self._session._executor.persist(self._plan, table_name)
-        return self._session.table(table_name)
+        return DataFrame(
+            self._session,
+            ScanPlan(TableSource(table_name), self._plan.metadata),
+        )
 
     def explain(
         self,

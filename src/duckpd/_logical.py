@@ -490,6 +490,8 @@ class UnionPlan(LogicalPlanBase):
 
     inputs: tuple[LogicalPlan, ...]
     metadata: FrameMetadata
+    source_order_id: ColumnId | None = None
+    source_row_id: ColumnId | None = None
 
 
 LogicalPlan: TypeAlias = (

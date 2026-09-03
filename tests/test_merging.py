@@ -7,7 +7,7 @@ import pytest
 from pandas.testing import assert_frame_equal
 
 import duckpd
-from duckpd.errors import AlignmentError
+from duckpd.errors import AlignmentError, UnorderedOperationError
 
 MergeHow = Literal["left", "right", "outer", "inner", "cross"]
 
@@ -63,6 +63,28 @@ def test_merge_how_matches_pandas(
         expected = left_df.merge(right_df, on="key", how=how, sort=True)
         assert_frame_equal(result.collect(), expected)
         assert session.execution_count == 1
+
+
+@pytest.mark.parametrize("sort", [False, True])
+def test_merge_does_not_claim_total_order_with_duplicate_keys(sort: bool) -> None:
+    left = pd.DataFrame({"key": [2, 1, 1], "left_value": [20, 10, 11]})
+    right = pd.DataFrame({"key": [1, 1, 2], "right_value": [100, 101, 200]})
+    session = duckpd.connect()
+    merged = session.from_pandas(left).merge(
+        session.from_pandas(right), on="key", sort=sort
+    )
+
+    assert merged.ordering == ()
+    with pytest.raises(UnorderedOperationError):
+        merged.iloc[1:]
+    with pytest.raises(UnorderedOperationError):
+        merged["left_value"].cumsum()
+
+    expected = left.merge(right, on="key", sort=sort)
+    assert_frame_equal(
+        merged.collect().sort_values(list(merged.columns)).reset_index(drop=True),
+        expected.sort_values(list(expected.columns)).reset_index(drop=True),
+    )
 
 
 def test_merge_with_left_on_right_on_different_names() -> None:

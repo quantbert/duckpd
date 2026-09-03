@@ -177,8 +177,9 @@ optimizer need proves otherwise.
 - [x] `OrderSpec`: unknown or guaranteed ordered keys, directions, null
       placement, and stability.
 - [ ] `RowIdentity`: stable hidden ordinals are implemented for pandas and
-      Arrow snapshots; propagation through joins, unions, persistence, and
-      externally keyed sources remains incomplete.
+      Arrow snapshots, row-wise unions synthesize stable source/row ordinals,
+      and persistence retains identity columns. Join identity and externally
+      keyed source identity remain incomplete.
 - [ ] `SourceProvenance`: source kind, location, fingerprint, write capability,
       and transformations that preserve source rows.
 - [x] `FrameState`: plan, schema, index, order, row identity, provenance, and
@@ -442,7 +443,7 @@ Goal: add positional and order-sensitive behavior only on sound foundations.
       `std`, and `var` for row-based windows first.
 - [ ] Add time-based rolling windows only after timezone and closed-boundary
       semantics are specified.
-- [ ] Track when joins, aggregates, unions, and materialization destroy or
+- [x] Track when joins, aggregates, unions, and materialization destroy or
       establish order guarantees.
 
 Exit gate:

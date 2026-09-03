@@ -30,6 +30,7 @@ from duckpd._logical import (
     LiteralValue,
     LogicalPlan,
     NullPlacement,
+    OrderColumn,
     PandasSource,
     ParquetSource,
     ProjectPlan,
@@ -424,6 +425,14 @@ class DuckDBCompiler:
             else result.nulls_last()
         )
 
+    @staticmethod
+    def _order_column_to_sql(key: OrderColumn, bindings: dict[ColumnId, str]) -> str:
+        direction = "ASC" if key.direction is SortDirection.ASCENDING else "DESC"
+        nulls = (
+            "NULLS FIRST" if key.null_placement is NullPlacement.FIRST else "NULLS LAST"
+        )
+        return f"{quote_identifier(bindings[key.column_id])} {direction} {nulls}"
+
     def _compile_aggregate(
         self,
         aggregate: AggregateExpression,
@@ -720,18 +729,16 @@ class DuckDBCompiler:
 
         result_rel = join_rel.project(*final_proj)
 
-        if plan.sort and plan.metadata.ordering.keys:
+        if plan.sort and plan.left_keys:
             sort_keys = [
-                duckdb.SQLExpression(quote_identifier(final_bindings[k.column_id]))
+                duckdb.SQLExpression(quote_identifier(final_bindings[column_id]))
                 .asc()
                 .nulls_last()
-                if k.direction is SortDirection.ASCENDING
-                else duckdb.SQLExpression(quote_identifier(final_bindings[k.column_id]))
-                .desc()
-                .nulls_last()
-                for k in plan.metadata.ordering.keys
+                for column_id in plan.left_keys
+                if column_id in final_bindings
             ]
-            result_rel = result_rel.sort(*sort_keys)
+            if sort_keys:
+                result_rel = result_rel.sort(*sort_keys)
 
         return CompiledFrame(result_rel, final_bindings)
 
@@ -743,13 +750,32 @@ class DuckDBCompiler:
         target_columns = plan.metadata.columns
 
         projected_relations: list[duckdb.DuckDBPyRelation] = []
-        for inp_plan, compiled in zip(plan.inputs, compiled_inputs, strict=True):
+        for input_index, (inp_plan, compiled) in enumerate(
+            zip(plan.inputs, compiled_inputs, strict=True)
+        ):
             input_col_map = {col.label: col for col in inp_plan.columns}
             projections: list[duckdb.Expression] = []
+            input_order_sql = ", ".join(
+                self._order_column_to_sql(key, compiled.bindings)
+                for key in inp_plan.metadata.ordering.keys
+            )
 
             for target_col in target_columns:
                 target_temp_name = f"c_{target_col.id.value.hex[:8]}"
-                if target_col.label in input_col_map:
+                if target_col.id == plan.source_order_id:
+                    expr = (
+                        duckdb.ConstantExpression(input_index)
+                        .cast("UBIGINT")
+                        .alias(target_temp_name)
+                    )
+                elif target_col.id == plan.source_row_id:
+                    row_sql = f"row_number() OVER (ORDER BY {input_order_sql}) - 1"
+                    expr = (
+                        duckdb.SQLExpression(row_sql)
+                        .cast("UBIGINT")
+                        .alias(target_temp_name)
+                    )
+                elif target_col.label in input_col_map:
                     matching_input_col = input_col_map[target_col.label]
                     source_label = quote_identifier(
                         compiled.bindings[matching_input_col.id]

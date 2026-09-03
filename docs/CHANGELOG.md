@@ -4,6 +4,18 @@ All notable changes to DuckPD will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- `duckpd.concat` now uses lossless numeric dtype reconciliation, preserves
+  nullable integer values through union collection, and rejects incompatible
+  heterogeneous columns before execution instead of coercing them to strings.
+- Pandas collection preserves exact decimal, binary, and date values rather
+  than accepting DuckDB's lossy/default pandas conversions.
+- Row-wise concat now preserves input sequence and ordered-input row identity;
+  persistence retains index and order metadata. Joins explicitly clear total
+  ordering guarantees so positional and window operations fail early until a
+  sort with sufficient tie-breakers is applied.
+
 ### Added
 
 - Window expressions (`WindowExpression`) and compiler translation to DuckDB `OVER (...)` window clauses.

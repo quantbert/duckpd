@@ -209,10 +209,11 @@ def after_union(
     columns: tuple[Column, ...],
     *,
     index_ids: tuple[ColumnId, ...] = (),
+    ordering_keys: tuple[OrderColumn, ...] = (),
 ) -> FrameMetadata:
     """Create metadata for a union (concat) plan."""
     index = IndexSpec(index_ids, drop=True) if index_ids else IndexSpec()
-    result = FrameMetadata(columns, index, OrderSpec())
+    result = FrameMetadata(columns, index, OrderSpec(ordering_keys))
     validate_metadata(result)
     return result
 

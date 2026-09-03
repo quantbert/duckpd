@@ -14,9 +14,13 @@ import pyarrow as pa
 from duckpd._logical import (
     Column,
     ColumnId,
+    NullPlacement,
+    OrderColumn,
+    SortDirection,
     UnionPlan,
 )
 from duckpd._metadata import after_union, find_column
+from duckpd._typing import common_union_type
 from duckpd.errors import AlignmentError, UnsupportedOperationError
 from duckpd.session import Session
 
@@ -146,30 +150,17 @@ def concat(
         if f._session is not first_session:
             raise AlignmentError("Cannot concat frames from different sessions")
 
-    # Reconcile visible columns
-    # Collect columns in appearance order
-    seen_labels: dict[str, str] = {}  # label -> duckdb_type
-    for f in frames:
-        for col in f._plan.metadata.visible_columns:
-            if col.label not in seen_labels:
-                seen_labels[col.label] = col.duckdb_type
-            else:
-                # Type promotion if needed (e.g. integer + float -> DOUBLE)
-                curr_type = seen_labels[col.label]
-                if curr_type != col.duckdb_type:
-                    numeric_set = {
-                        "TINYINT",
-                        "SMALLINT",
-                        "INTEGER",
-                        "BIGINT",
-                        "HUGEINT",
-                        "FLOAT",
-                        "DOUBLE",
-                    }
-                    if curr_type in numeric_set and col.duckdb_type in numeric_set:
-                        seen_labels[col.label] = "DOUBLE"
-                    else:
-                        seen_labels[col.label] = "VARCHAR"
+    types_by_label: dict[str, list[str]] = {}
+    for frame in frames:
+        for column in frame._plan.metadata.visible_columns:
+            types_by_label.setdefault(column.label, []).append(column.duckdb_type)
+
+    try:
+        reconciled_types = {
+            label: common_union_type(types) for label, types in types_by_label.items()
+        }
+    except TypeError as error:
+        raise UnsupportedOperationError(str(error)) from error
 
     # Check index preservation across all frames
     # If not ignore_index and all frames have matching index structure:
@@ -187,14 +178,51 @@ def concat(
                 hidden_index_cols.append(idx_col)
                 index_ids.append(idx_col.id)
 
-    # Build target output columns: visible columns + hidden index columns
     output_columns = [
         Column(ColumnId.create(), label, dtype, hidden=False)
-        for label, dtype in seen_labels.items()
+        for label, dtype in reconciled_types.items()
     ]
     output_columns.extend(hidden_index_cols)
 
     input_plans = tuple(f._plan for f in frames)
-    metadata = after_union(tuple(output_columns), index_ids=tuple(index_ids))
-    plan = UnionPlan(input_plans, metadata)
+    source_order_id: ColumnId | None = None
+    source_row_id: ColumnId | None = None
+    ordering_keys: tuple[OrderColumn, ...] = ()
+    if all(plan.metadata.ordering.keys for plan in input_plans):
+        source_order_id = ColumnId.create()
+        source_row_id = ColumnId.create()
+        output_columns.extend(
+            (
+                Column(
+                    source_order_id,
+                    f"__duckpd_union_source_{source_order_id.value.hex}__",
+                    "UBIGINT",
+                    hidden=True,
+                    row_identity=True,
+                ),
+                Column(
+                    source_row_id,
+                    f"__duckpd_union_row_{source_row_id.value.hex}__",
+                    "UBIGINT",
+                    hidden=True,
+                    row_identity=True,
+                ),
+            )
+        )
+        ordering_keys = (
+            OrderColumn(source_order_id, SortDirection.ASCENDING, NullPlacement.LAST),
+            OrderColumn(source_row_id, SortDirection.ASCENDING, NullPlacement.LAST),
+        )
+
+    metadata = after_union(
+        tuple(output_columns),
+        index_ids=tuple(index_ids),
+        ordering_keys=ordering_keys,
+    )
+    plan = UnionPlan(
+        input_plans,
+        metadata,
+        source_order_id=source_order_id,
+        source_row_id=source_row_id,
+    )
     return DataFrame(first_session, plan)

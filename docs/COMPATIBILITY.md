@@ -20,7 +20,7 @@ This document provides a comprehensive overview of the public API implemented in
 | `duckpd.read_csv(path, ...)` | `path`, `session`, `header`, `delimiter`, `auto_detect`, `index`, `order_by` | `DataFrame` | Lazy CSV scan via DuckDB reader. |
 | `duckpd.from_pandas(df, ...)` | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a stable snapshot and tracks hidden source row identity. |
 | `duckpd.from_arrow(table, ...)` | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with hidden stable row identity. |
-| `duckpd.concat(objs, ...)` | `objs`, `axis=0`, `join='outer'` | `DataFrame` | Row-wise union with schema reconciliation and null-padding. |
+| `duckpd.concat(objs, ...)` | `objs`, `axis=0`, `join='outer'` | `DataFrame` | Lazy row-wise union with null-padding and lossless numeric coercion. Matching nonnumeric types are retained; incompatible heterogeneous types fail before execution rather than coercing to strings. |
 
 ---
 
@@ -111,8 +111,11 @@ Available on both `DataFrame` and `Series`:
 	not acquire an artificial order.
 - `drop_duplicates`, `rank(method="first")`, top-N ties, and
 	`groupby(sort=False)` use stable identity where available.
-- Join and concat row identity propagation is not yet complete; code requiring
-	pandas-exact output order after those operations should add `sort_values`.
+- Row-wise concat preserves input sequence and each input's guaranteed order
+  when every input is ordered. Persistence retains index and ordering metadata.
+- Joins do not claim a total order, including with `sort=True`, because duplicate
+  merge keys lack a stable tie-breaker. Ordering-sensitive follow-up operations
+  must explicitly sort by enough columns to break ties.
 - Module-level helpers share a weak context-local implicit session. Explicit
 	sessions remain isolated and are preferred for configured or long-lived
 	workloads.

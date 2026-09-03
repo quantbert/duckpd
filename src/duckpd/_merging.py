@@ -11,9 +11,6 @@ from duckpd._logical import (
     ColumnId,
     JoinPlan,
     JoinType,
-    NullPlacement,
-    OrderColumn,
-    SortDirection,
 )
 from duckpd._metadata import after_join, find_column
 
@@ -222,19 +219,11 @@ def plan_merge(
     if duplicate_labels:
         raise ValueError(f"suffixes produce duplicate columns: {duplicate_labels!r}")
 
-    # 3. Determine output index and ordering
-    ordering_keys: list[OrderColumn] = []
-    if sort and left_keys:
-        ordering_keys = [
-            OrderColumn(col.id, SortDirection.ASCENDING, NullPlacement.LAST)
-            for col in left_keys
-            if col.id in {c.id for c in output_columns}
-        ]
-
+    # SQL joins do not preserve a total row order. Even sort=True only orders
+    # by merge keys, whose duplicates have no stable tie-breaker after a join.
     metadata = after_join(
         tuple(output_columns),
         index_ids=tuple(output_index_ids),
-        ordering_keys=tuple(ordering_keys),
     )
 
     return JoinPlan(

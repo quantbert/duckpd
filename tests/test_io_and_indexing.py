@@ -47,6 +47,31 @@ def test_persist_and_to_pandas() -> None:
     assert session.execution_count == 3
 
 
+def test_persist_preserves_index_order_and_window_semantics() -> None:
+    source = pd.DataFrame(
+        {
+            "row_id": [3, 1, 2, 4],
+            "key": [2.0, 1.0, 1.0, None],
+            "value": [30, 10, 20, 40],
+        }
+    )
+    session = dp.connect()
+    frame = session.from_pandas(source, index="row_id", order_by="key")
+
+    persisted = frame.persist("ordered_indexed_stage")
+
+    assert persisted.index_names == ("row_id",)
+    assert persisted.ordering == ("key",)
+    expected = source.sort_values("key", kind="stable").set_index("row_id")
+    pd.testing.assert_frame_equal(persisted.collect(), expected)
+    pd.testing.assert_series_equal(
+        persisted["value"].cumsum().collect(),
+        expected["value"].cumsum(),
+    )
+    sliced = cast("dp.DataFrame", persisted.iloc[1:3]).collect()
+    pd.testing.assert_frame_equal(sliced, expected.iloc[1:3])
+
+
 def test_dataframe_setitem_lazy() -> None:
     pdf = pd.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
     df = dp.from_pandas(pdf)
