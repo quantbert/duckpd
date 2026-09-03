@@ -4,12 +4,12 @@ Run these programs from the repository root after installing the development
 environment:
 
 ```bash
-uv sync --group dev
+uv sync --frozen --group dev
 uv run python demo/basic_pipeline.py
 uv run python demo/parquet_pipeline.py
 uv run python demo/reduction_pipeline.py
 uv run python demo/generate_market_data.py
-uv run python demo/market_data_demo.py
+uv run python demo/market_data_demo.py smoke
 ```
 
 - `basic_pipeline.py` builds a lazy frame from pandas, sets an explicit index,
@@ -25,21 +25,24 @@ uv run python demo/market_data_demo.py
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
 - `market_data_demo.py` benchmarks and compares execution time and memory usage
-  between DuckPD and standard pandas across OHLC market datasets.
+  between DuckPD and standard pandas across OHLC market datasets. Running with
+  `smoke` executes in ~3 seconds on a 4.99 MB file.
 - `DuckPD_Quickstart.ipynb` is a 5-minute interactive Jupyter Notebook
   demonstrating remote data loading, column reductions, string transformations,
   `groupby` aggregations, query plans, and Parquet exports on the Goodreads
   Books dataset.
 - `DuckPD_Features_Walkthrough.ipynb` is a comprehensive interactive walkthrough
-  showcasing recent additions (remote cloud parquet, relational joins, `.str` and
-  `.dt` accessors, `duckpd.concat`, statistical/quantile reductions,
-  multi-column groupbys, rolling/expanding windows, shifts, and persistence)
-  using the AlphaDojo stock news dataset (~3.9M rows).
+  showcasing recent additions (remote cloud parquet, relational joins with
+  cardinality validation, `.str` and `.dt` accessors, lossless `duckpd.concat`,
+  statistical/quantile reductions, multi-column groupbys, rolling/expanding
+  windows, shifts, and persistence) using the AlphaDojo stock news dataset
+  (~3.9M rows).
 - `DuckPD_Order_Index_Window_Workflows.ipynb` is a self-contained offline
   tutorial covering stable snapshot order, deterministic duplicate/top-N ties,
-  MultiIndex `.loc`, two-dimensional `.iloc`, cumulative and row windows,
-  external ordering requirements, masked assignment, persistence, and direct
-  CSV/Parquet output with pandas differential assertions.
+  MultiIndex and honest ordered label-list `.loc[[...]]`, two-dimensional `.iloc`,
+  cumulative and row windows, external ordering requirements, masked assignment,
+  persistence, and direct zero-pandas CSV/Parquet output with pandas differential
+  assertions.
 
 Run market data benchmarks:
 

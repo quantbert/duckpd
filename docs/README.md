@@ -21,6 +21,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 
 - [Core execution contract](decisions/0001-core-contract.md) — accepted decision
   covering laziness, execution boundaries, sessions, indexes, and fallback.
+- [Ordering, indexing, and session contract](decisions/0002-order-index-session-contract.md) — accepted decision
+  covering hidden row identity, honest ordering guarantees, lazy `.loc`, and session isolation.
 - [Early design exploration](design/early-ideation.md) — preserved feasibility
   analysis and initial architectural exploration; it is historical context, not
   the current implementation contract.
