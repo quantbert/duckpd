@@ -340,7 +340,7 @@ Exit gate:
 
 - [x] Metadata unit tests cover every plan node and cannot leave dangling
       index/order column IDs.
-- [ ] Differential tests match pandas for supported dtype/null/index cases.
+- [x] Differential tests match pandas for supported dtype/null/index cases.
 
 ### Phase 3: core single-frame pandas API
 
@@ -509,9 +509,9 @@ Goal: make execution boundaries safe and explainable.
 
 Exit gate:
 
-- [ ] A generated data test larger than the configured memory budget completes
+- [x] A generated data test larger than the configured memory budget completes
       with a configured spill directory and bounded process memory.
-- [ ] A test forbids pandas conversion methods during every direct sink.
+- [x] A test forbids pandas conversion methods during every direct sink.
 
 ### Phase 9: lazy mutation and safe local commit
 
@@ -683,7 +683,7 @@ planning before increment 6 proves metadata transitions are reliable.
 - [ ] DuckDB compiler tests cover identifiers, literals, and null behavior.
 - [ ] Differential tests compare against pandas on normal, empty, null, and
       duplicate cases.
-- [ ] Property tests are added when combinations are too broad for a small
+- [x] Property tests are added when combinations are too broad for a small
       parameter matrix.
 - [ ] Execution tests assert expected pushdown, blocking operators, and query
       count.

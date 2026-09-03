@@ -163,6 +163,63 @@ def test_write_parquet_does_not_use_pandas_conversion(
     assert result["total"].tolist() == [2, 4, 3, 5]
 
 
+def test_write_csv_does_not_use_pandas_conversion(
+    source: pd.DataFrame, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "result.csv"
+    frame = duckpd.from_pandas(source).assign(total=lambda item: item["value"] + 1)
+
+    def fail_pandas_csv(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pandas to_csv was used")
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", fail_pandas_csv)
+    frame.write_csv(path)
+
+    result = pd.read_csv(path)
+    assert result["total"].tolist() == [2, 4, 3, 5]
+
+
+def test_to_csv_does_not_use_pandas_conversion(
+    source: pd.DataFrame, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "result_alias.csv"
+    frame = duckpd.from_pandas(source).assign(total=lambda item: item["value"] + 1)
+
+    def fail_pandas_csv(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pandas to_csv was used")
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", fail_pandas_csv)
+    frame.to_csv(path)
+
+    result = pd.read_csv(path)
+    assert result["total"].tolist() == [2, 4, 3, 5]
+
+
+def test_to_arrow_batches_streams_incrementally_without_pandas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = duckpd.connect()
+    total_rows = 5000
+    frame = session.sql(f"SELECT i as id, (i * 2) as val FROM range({total_rows}) t(i)")
+
+    def fail_pandas_df(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pandas DataFrame was instantiated during Arrow streaming")
+
+    monkeypatch.setattr(pd.DataFrame, "__init__", fail_pandas_df)
+
+    reader = frame.to_arrow_batches(batch_size=1000)
+    assert isinstance(reader, pa.RecordBatchReader)
+
+    batches: list[pa.RecordBatch] = []
+    for batch in reader:
+        assert isinstance(batch, pa.RecordBatch)
+        assert len(batch) <= 1000
+        batches.append(batch)
+
+    assert len(batches) == 5
+    assert sum(len(b) for b in batches) == total_rows
+
+
 def test_explain_contains_all_plan_views(source: pd.DataFrame) -> None:
     session = duckpd.connect()
     frame = session.from_pandas(source).assign(total=lambda item: item["value"] + 1)

@@ -2,94 +2,64 @@
 
 All notable changes to DuckPD will be documented in this file.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+and [PEP 440](https://peps.python.org/pep-0440/).
+
 ## Unreleased
+
+### Added
+
+- Cardinality validation (`validate="1:1"`, `"1:m"`, `"m:1"`, `"m:m"`, and verbose aliases) for `DataFrame.merge` and `DataFrame.join`, executed as bounded pre-flight relational checks raising `MergeError` before result production.
+- Honest relational label-list selection for `df.loc[[...]]`: preserves exact requested key order, retains duplicate requested keys, raises `KeyError` on missing labels (at execution boundaries), rejects sets with `TypeError`, and establishes a guaranteed row order for subsequent positional and window operations.
+- Direct-sink invariant tests ensuring `DataFrame.write_csv` and `DataFrame.to_csv` avoid pandas materialization.
+- Streaming verification asserting `DataFrame.to_arrow_batches` streams chunks incrementally without accumulating pandas DataFrames.
+- Memory-constrained out-of-core sorting and aggregation test verifying DuckDB's `temp_directory` spill path under strict buffer limits without process OOM.
+- Hypothesis property-based differential test suite (`tests/test_property_dtypes.py`) verifying round-trip fidelity and reductions across numeric, boolean, string, missing-value, and concat transformations against pandas 3.0.
 
 ### Changed
 
-- `duckpd.concat` now uses lossless numeric dtype reconciliation, preserves
-  nullable integer values through union collection, and rejects incompatible
-  heterogeneous columns before execution instead of coercing them to strings.
-- Pandas collection preserves exact decimal, binary, and date values rather
-  than accepting DuckDB's lossy/default pandas conversions.
-- Row-wise concat now preserves input sequence and ordered-input row identity;
-  persistence retains index and order metadata. Joins explicitly clear total
-  ordering guarantees so positional and window operations fail early until a
-  sort with sufficient tie-breakers is applied.
+- `duckpd.concat` now uses lossless numeric dtype reconciliation, preserves nullable integer values through union collection, and rejects incompatible heterogeneous columns before execution instead of coercing them to strings.
+- Pandas collection preserves exact decimal, binary, and date values rather than accepting DuckDB's lossy/default pandas conversions.
+- Row-wise concat now preserves input sequence and ordered-input row identity; persistence retains index and order metadata. Joins explicitly clear total ordering guarantees so positional and window operations fail early until an explicit stable sort is applied.
+
+## [0.0.7] - 2026-08-15
 
 ### Added
-- Cardinality validation (`validate="1:1"`, `"1:m"`, `"m:1"`, `"m:m"`, and verbose aliases) for `DataFrame.merge` and `DataFrame.join`, executed as bounded pre-flight relational checks raising `MergeError` before result production.
-- Honest relational label-list selection for `df.loc[[...]]`: preserves exact requested key order, retains duplicate requested keys, raises `KeyError` on missing labels (at execution boundaries), rejects sets with `TypeError`, and establishes a guaranteed row order for subsequent positional and window operations.
 
 - Window expressions (`WindowExpression`) and compiler translation to DuckDB `OVER (...)` window clauses.
 - Lazy cumulative operations on `DataFrame` and `Series`: `cumsum`, `cummin`, `cummax`, and `cumprod` with `skipna` support and explicit `OrderSpec` validation.
 - Lazy positional shifts and differences: `Series.shift` and `DataFrame.shift` (with `fill_value`), `Series.diff` and `DataFrame.diff`, and `Series.pct_change` and `DataFrame.pct_change`.
 - Numerical ranking on `Series.rank` and `DataFrame.rank` supporting methods (`average`, `min`, `max`, `first`, `dense`), `na_option` (`keep`, `top`, `bottom`), `ascending`, and `pct`.
 - Extended `DataFrame.drop_duplicates` to support `keep='last'` and `keep=False` via window row numbers and count filtering.
-- Added `Series.to_frame()` and `Series.collect()` for lazy Series evaluation and materialization.
-- Extended `DataFrameGroupBy` supporting dictionary aggregations (`agg({"a": "sum", "b": "mean"})`),
-  string function aggregations (`agg("sum")`), convenience methods (`sum`, `mean`, `min`, `max`,
-  `count`, `size`), and column selection indexing (`g["col"]`, `g[["col1", "col2"]]`).
-- `Series.groupby` returning lazy `SeriesGroupBy` supporting `by` as column name string,
-  Series, or sequences, with `agg`, `sum`, `mean`, `min`, `max`, `count`, `size`,
-  `std`, `var`, and `median` aggregations.
-- `duckpd.concat` for lazy row-wise concatenation (`axis=0`) of multiple
-  `DataFrame` and `Series` objects with schema reconciliation, type promotion,
-  null padding for disjoint columns, and explicit index preservation.
-- `DataFrame.std`, `DataFrame.var`, `DataFrame.median`, `DataFrame.quantile`,
-  `DataFrame.any`, `DataFrame.all`, and their `Series` counterparts for eager
-  reductions matching pandas 3.0 semantics with `ddof`, `skipna`, `bool_only`,
-  and `numeric_only` support.
-- `DataFrame.nunique` and `Series.nunique` return the count of distinct non-null
-  values per column using DuckDB `COUNT(DISTINCT ...)`.
-- `Series.unique` returns distinct non-null values as a pandas Series via a
-  `DISTINCT` aggregate plan.
-- `Series.value_counts` returns counts of unique values with `sort`,
-  `ascending`, and `dropna` support, compiled as a grouped `SIZE` aggregate
-  with an optional `SortPlan`.
-- `DataFrame.drop_duplicates` removes duplicate rows using `subset` column
-  selection and `keep="first"` semantics via grouped `any_value()` aggregates.
-- `DataFrame.nlargest`, `DataFrame.nsmallest`, `Series.nlargest`, and
-  `Series.nsmallest` return the top/bottom `n` rows via `sort_values` + `limit`
-  composition.
-- `DataFrame.astype` and `Series.astype` for lazy type casts across standard
-  integer, float, boolean, string, date, timestamp, and decimal representations;
-  supports `errors="ignore"` and dictionary column-mapping specifications.
-- `DataFrame.fillna` and `Series.fillna` for lazy missing-value imputation via
-  DuckDB `COALESCE`, supporting scalar replacements and column-mapping dicts.
-- `DataFrame.dropna` and `Series.dropna` for lazy row filtering of missing values
-  with `how="any"`, `how="all"`, `subset`, and `thresh` threshold parameters.
-- `DataFrame.where`, `DataFrame.mask`, `Series.where`, and `Series.mask` for lazy
-  conditional replacement using typed SQL `CASE WHEN` expressions.
-- `DataFrame.isna`, `DataFrame.notna`, `Series.isna`, and `Series.notna`
-  (plus `isnull`/`notnull` aliases) build lazy boolean frames and series backed
-  by DuckDB `IS NULL` / `IS NOT NULL` predicates.
-- `DataFrame.rename` lazily renames column labels via a dict mapping, preserving
-  index and ordering metadata; `errors="ignore"`, `mapper`, and `axis` are
-  supported while `inplace`, `copy=False`, `level`, and index renaming are
-  rejected before execution.
-- `DataFrame.drop` lazily drops columns by label or via the `columns` keyword,
-  preserving index and ordering metadata; `errors="ignore"` is supported while
-  `inplace`, `level`, and row dropping are rejected before execution.
-- Initial `uv`-managed Python package and quality toolchain.
-- Lazy pandas, Arrow, Parquet, DuckDB table, and read-only SQL sources.
-- Typed scan, filter, project, sort, and limit logical plans.
-- Lazy Series arithmetic, comparisons, boolean expressions, filtering,
-  assignment, projection, sorting, and limiting.
-- Explicit pandas and Arrow materialization, bounded previews, plan inspection,
-  and direct Parquet output.
-- Session resource configuration, source retention, execution counting, and
-  clear closed-session errors.
-- Immutable schema/index/order metadata with hidden-column preservation across
-  projections and output boundaries.
-- Lazy `set_index()` and `reset_index()`, plus source `index=` and `order_by=`
-  declarations.
-- Expression metadata for scalar, elementwise, and length-preserving behavior.
-- Calibrated synthetic OHLC Parquet generator with smoke, 100 MB, 1 GB, and
-  5 GB target-size presets.
-- Self-documenting Make targets for development checks, builds, demo smoke
-  runs, release validation, and cleanup.
-- Package classifiers, project URLs, and PEP 561 typed-package metadata.
-- Central documentation index with roadmap, design, decision, benchmark,
-  changelog, and research sections.
-- Explicit work-in-progress warning and a documented pre-`1.0` release policy.
-- Make target for tested patch-version builds and manual PyPI publication.
+- MultiIndex exact and prefix selection via `df.loc[key]`.
+- Positional row slicing via `df.iloc[start:stop]`.
+- Intermediate materialization via `DataFrame.persist(name)`.
+- Write strategy inspection via `DataFrame.explain_write(path)`.
+- Calibrated synthetic OHLC Parquet benchmark generator and demo notebook.
+
+## [0.0.5] - 2026-08-14
+
+### Added
+
+- Relational DataFrame joins (`DataFrame.merge`) supporting `inner`, `left`, `right`, `outer`, and `cross` joins with column collision suffix management and pandas null-key semantics (`IS NOT DISTINCT FROM`).
+- Index-based join convenience method (`DataFrame.join`).
+- Multi-DataFrame row-wise concatenation (`duckpd.concat`) with schema alignment and null-padding.
+- Extended `DataFrameGroupBy` supporting dictionary aggregations (`agg({"a": "sum", "b": "mean"})`), string function aggregations (`agg("sum")`), and column selection indexing (`g["col"]`, `g[["col1", "col2"]]`).
+- `Series.groupby` returning lazy `SeriesGroupBy` supporting `agg`, `sum`, `mean`, `min`, `max`, `count`, `size`, `std`, `var`, and `median`.
+- Eager DataFrame and Series reductions: `sum`, `mean`, `min`, `max`, `count`, `size`, `std`, `var`, `median`, `quantile`, `any`, `all`, and `nunique`.
+- Vectorized string accessors (`Series.str`) and datetime accessors (`Series.dt`).
+- Missing-value transformations: `fillna`, `dropna`, `where`, `mask`, `isna`, and `notna`.
+
+## [0.0.1] - 2026-08-14
+
+### Added
+
+- Initial walking vertical slice: `Session`, `DataFrame`, and `Series` wrappers.
+- Lazy data sources: Parquet, CSV, pandas, Arrow, DuckDB table, and read-only SQL scans.
+- Immutable logical plan IR: `ScanPlan`, `ProjectPlan`, `FilterPlan`, `SortPlan`, and `LimitPlan`.
+- Recursive DuckDB compilation and typed expression translation.
+- Explicit execution boundaries: `collect()`, `head()`, `to_arrow()`, `to_arrow_batches()`, `explain()`, and direct `write_parquet()`.
+- Isolated session configuration: memory limit, temp directory, threads, and read-only mode.
+- Context-local implicit session for standalone module-level readers.
+- Initial development toolchain: `uv`, `pytest`, `ruff`, `pyright`, and Make targets.

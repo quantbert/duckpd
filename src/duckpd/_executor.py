@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import duckdb
 import numpy as np
@@ -115,12 +115,15 @@ class Executor:
                         else cast("pd.Timestamp", value).date()
                     )
                 )
-        preserved_ids = self._pandas_nullable_integer_ids(plan)
-        preserved_labels = {
-            compiled.bindings[column_id]
-            for column_id in preserved_ids
+        preserved_dtypes = self._pandas_nullable_integer_dtypes(plan)
+        preserved_labels: dict[str, str] = {
+            compiled.bindings[column_id]: dtype
+            for column_id, dtype in preserved_dtypes.items()
             if column_id in compiled.bindings
         }
+        for label, orig_dtype in preserved_labels.items():
+            if str(result[label].dtype) != orig_dtype:
+                result[label] = result[label].astype(cast("Any", orig_dtype))
         for label in result.columns:
             dtype_name = str(result[label].dtype)
             if (
@@ -143,31 +146,29 @@ class Executor:
             result = result.drop(columns=hidden_labels)
         return result
 
-    def _pandas_nullable_integer_ids(self, plan: LogicalPlan) -> set[ColumnId]:
+    def _pandas_nullable_integer_dtypes(self, plan: LogicalPlan) -> dict[ColumnId, str]:
         if isinstance(plan, ScanPlan):
             if not isinstance(plan.source, PandasSource):
-                return set()
+                return {}
             source = self._session._get_registered_source(plan.source.key)
             if not isinstance(source, pd.DataFrame):
                 raise TypeError("Registered pandas source must be a DataFrame")
             return {
-                column.id
+                column.id: str(source[column.label].dtype)
                 for column in plan.metadata.columns
                 if str(source[column.label].dtype).startswith(("Int", "UInt"))
             }
         if isinstance(plan, JoinPlan):
-            return self._pandas_nullable_integer_ids(
-                plan.left
-            ) | self._pandas_nullable_integer_ids(plan.right)
+            left_dtypes = self._pandas_nullable_integer_dtypes(plan.left)
+            right_dtypes = self._pandas_nullable_integer_dtypes(plan.right)
+            return {**left_dtypes, **right_dtypes}
         if isinstance(plan, UnionPlan):
-            nullable_labels: set[str] = set()
+            nullable_labels: dict[str, str] = {}
             for input_plan in plan.inputs:
-                nullable_ids = self._pandas_nullable_integer_ids(input_plan)
-                nullable_labels.update(
-                    column.label
-                    for column in input_plan.metadata.columns
-                    if column.id in nullable_ids
-                )
+                input_dtypes = self._pandas_nullable_integer_dtypes(input_plan)
+                for column in input_plan.metadata.columns:
+                    if column.id in input_dtypes:
+                        nullable_labels[column.label] = input_dtypes[column.id]
             pandas_nullable_types = {
                 "TINYINT",
                 "SMALLINT",
@@ -179,14 +180,14 @@ class Executor:
                 "UBIGINT",
             }
             return {
-                column.id
+                column.id: nullable_labels[column.label]
                 for column in plan.metadata.columns
                 if column.label in nullable_labels
                 and column.duckdb_type in pandas_nullable_types
             }
         if isinstance(plan, LocIndexPlan):
-            return self._pandas_nullable_integer_ids(plan.input)
-        return self._pandas_nullable_integer_ids(plan.input)
+            return self._pandas_nullable_integer_dtypes(plan.input)
+        return self._pandas_nullable_integer_dtypes(plan.input)
 
     def to_arrow(self, plan: LogicalPlan) -> pa.Table:
         self._validate_execution(plan)

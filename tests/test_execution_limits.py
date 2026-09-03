@@ -52,6 +52,48 @@ def test_resource_limits_and_spill_directory_execution() -> None:
             assert session.execution_count == 2
 
 
+def test_constrained_memory_spill_stress_without_oom() -> None:
+    """A generated data workload exceeding memory_limit completes with spill."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        spill_dir = Path(tmpdir) / "spill_strict"
+        spill_dir.mkdir(parents=True, exist_ok=True)
+
+        with duckpd.connect(
+            memory_limit="32MB",
+            temp_directory=spill_dir,
+            max_temp_directory_size="500MB",
+            threads=1,
+        ) as session:
+            frame = session.sql(
+                """
+                SELECT
+                    (i % 50)::BIGINT as grp,
+                    (i * 3.14159)::DOUBLE as val1,
+                    (i * 2.71828)::DOUBLE as val2,
+                    ('prefix_' || (i % 1000)::VARCHAR) as label
+                FROM range(500000) t(i)
+                """
+            )
+
+            sorted_out = Path(tmpdir) / "stress_sorted.parquet"
+            frame.sort_values(["val1", "val2"], ascending=[False, True]).write_parquet(
+                sorted_out
+            )
+            assert sorted_out.exists()
+            assert sorted_out.stat().st_size > 0
+
+            reduced = (
+                frame.groupby("grp", as_index=False)
+                .agg(
+                    s1=("val1", "sum"),
+                    m2=("val2", "mean"),
+                    cnt=("label", "count"),
+                )
+                .collect()
+            )
+            assert len(reduced) == 50
+
+
 def test_explain_modes() -> None:
     frame = duckpd.from_pandas(pd.DataFrame({"x": [1, 2, 3]}))
 
