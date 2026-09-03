@@ -28,6 +28,7 @@ from duckpd._logical import (
     JoinPlan,
     JoinType,
     LiteralValue,
+    LocIndexPlan,
     LogicalPlan,
     NullPlacement,
     OrderColumn,
@@ -116,6 +117,9 @@ class DuckDBCompiler:
 
         if isinstance(plan, UnionPlan):
             return self._compile_union(plan)
+
+        if isinstance(plan, LocIndexPlan):
+            return self._compile_loc_index(plan)
 
         compiled_input = self.compile(plan.input)
         if isinstance(plan, FilterPlan):
@@ -808,3 +812,62 @@ class DuckDBCompiler:
         ]
         final_bindings = {col.id: col.label for col in target_columns}
         return CompiledFrame(result_rel.project(*final_proj), final_bindings)
+
+    def _compile_loc_index(self, plan: LocIndexPlan) -> CompiledFrame:
+        compiled_input = self.compile(plan.input)
+        index_ids = plan.input.metadata.index.columns
+        index_cols = [compiled_input.bindings[cid] for cid in index_ids]
+
+        keys_df = cast(
+            "pd.DataFrame", self._session._get_registered_source(plan.source_key)
+        )
+        keys_col_map = {col: f"_loc_k_{i}" for i, col in enumerate(index_cols)}
+        keys_df_renamed = keys_df.rename(columns=keys_col_map)
+        keys_rel = self._session._connection.from_df(keys_df_renamed).set_alias(
+            "__duckpd_loc_keys__"
+        )
+
+        input_alias = "__duckpd_loc_inp__"
+        flagged_input = compiled_input.relation.project(
+            "*, 1 AS __duckpd_matched__"
+        ).set_alias(input_alias)
+
+        cond_parts = [
+            f"__duckpd_loc_keys__._loc_k_{i} IS NOT DISTINCT FROM "
+            f"{input_alias}.{quote_identifier(col)}"
+            for i, col in enumerate(index_cols)
+        ]
+        joined = keys_rel.join(flagged_input, " AND ".join(cond_parts), how="left")
+
+        final_proj: list[duckdb.Expression] = []
+        final_bindings: dict[ColumnId, str] = {}
+        for col in plan.input.columns:
+            bound_label = compiled_input.bindings[col.id]
+            final_proj.append(
+                duckdb.SQLExpression(quote_identifier(bound_label)).alias(col.label)
+            )
+            final_bindings[col.id] = col.label
+
+        order_col = next(
+            c for c in plan.metadata.columns if c.id == plan.order_column_id
+        )
+        final_proj.append(duckdb.SQLExpression("_loc_order_").alias(order_col.label))
+        final_bindings[plan.order_column_id] = order_col.label
+
+        sort_keys: list[duckdb.Expression] = [
+            duckdb.SQLExpression(quote_identifier(order_col.label)).asc().nulls_last()
+        ]
+        for key in plan.input.metadata.ordering.keys:
+            if key.column_id in final_bindings:
+                sort_keys.append(
+                    self._compile_sort_key(
+                        SortKey(
+                            ColumnRef(key.column_id),
+                            key.direction,
+                            key.null_placement,
+                        ),
+                        final_bindings,
+                    )
+                )
+        result_rel = joined.project(*final_proj).sort(*sort_keys)
+        return CompiledFrame(result_rel, final_bindings)

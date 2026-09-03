@@ -132,7 +132,7 @@ def test_loc_reads_and_masked_assignment() -> None:
     assert res_loc.iloc[0]["val"] == 20
 
     res_loc_list = cast("dp.DataFrame", df.loc[[1, 3]]).collect()
-    assert len(res_loc_list) == 2
+    pd.testing.assert_frame_equal(res_loc_list, pdf.set_index("id").loc[[1, 3]])
 
     # .loc with column selection (single column and list of columns)
     res_loc_col = cast("dp.Series", df.loc[:, "val"]).collect()
@@ -246,3 +246,123 @@ def test_iloc_two_dimensional_column_selection_is_lazy() -> None:
         pdf.iloc[1:, [2, 0]].reset_index(drop=True),
     )
     pd.testing.assert_series_equal(column.collect(), pdf.iloc[:, 1])
+
+
+def test_loc_list_order_and_duplicates_match_pandas() -> None:
+    pdf = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "name": ["a", "b", "c", "d"],
+            "val": [10, 20, 30, 40],
+        }
+    )
+    session = dp.connect()
+    df = session.from_pandas(pdf, index="id")
+
+    # 1. Reordered list of keys [3, 1, 4]
+    res_reordered = cast("dp.DataFrame", df.loc[[3, 1, 4]])
+    assert session.execution_count == 0  # Lazy
+    expected_reordered = pdf.set_index("id").loc[[3, 1, 4]]
+    pd.testing.assert_frame_equal(res_reordered.collect(), expected_reordered)
+
+    # 2. Duplicate keys in requested list [2, 1, 2]
+    res_dups = cast("dp.DataFrame", df.loc[[2, 1, 2]])
+    expected_dups = pdf.set_index("id").loc[[2, 1, 2]]
+    pd.testing.assert_frame_equal(res_dups.collect(), expected_dups)
+
+
+def test_loc_list_source_with_duplicate_index_matches_pandas() -> None:
+    pdf = pd.DataFrame(
+        {
+            "id": [1, 1, 2],
+            "val": [10, 20, 30],
+        }
+    )
+    df = dp.from_pandas(pdf, index="id")
+
+    # Requesting [1] should return both rows where id == 1
+    res = cast("dp.DataFrame", df.loc[[1]]).collect()
+    expected = pdf.set_index("id").loc[[1]]
+    pd.testing.assert_frame_equal(res, expected)
+
+    # Requesting [2, 1] should return row for 2, then both rows for 1
+    res_multi = cast("dp.DataFrame", df.loc[[2, 1]]).collect()
+    expected_multi = pdf.set_index("id").loc[[2, 1]]
+    pd.testing.assert_frame_equal(res_multi, expected_multi)
+
+
+def test_loc_list_empty_matches_pandas() -> None:
+    pdf = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+    df = dp.from_pandas(pdf, index="id")
+
+    res = cast("dp.DataFrame", df.loc[[]]).collect()
+    expected = pdf.set_index("id").loc[[]]
+    pd.testing.assert_frame_equal(res, expected)
+
+
+def test_loc_set_raises_type_error() -> None:
+    pdf = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+    df = dp.from_pandas(pdf, index="id")
+
+    with pytest.raises(TypeError, match="Passing a set as an indexer is not supported"):
+        df.loc[{1, 2}]
+
+
+def test_loc_list_missing_key_raises_key_error() -> None:
+    pdf = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+    session = dp.connect()
+    df = session.from_pandas(pdf, index="id")
+
+    missing_lazy = cast("dp.DataFrame", df.loc[[1, 99]])
+    assert session.execution_count == 0  # Lazy until execution
+
+    with pytest.raises(KeyError, match="not in index"):
+        missing_lazy.collect()
+
+
+def test_loc_list_multiindex_matches_pandas() -> None:
+    pdf = pd.DataFrame(
+        {
+            "g": ["a", "a", "b", "c"],
+            "i": [1, 2, 1, 1],
+            "val": [10, 20, 30, 40],
+        }
+    )
+    df = dp.from_pandas(pdf, index=["g", "i"])
+
+    # MultiIndex list of tuples in custom order with duplicates
+    keys = [("b", 1), ("a", 2), ("b", 1)]
+    res = cast("dp.DataFrame", df.loc[keys]).collect()
+    expected = pdf.set_index(["g", "i"]).loc[keys]
+    pd.testing.assert_frame_equal(res, expected)
+
+    # Missing tuple key raises KeyError
+    with pytest.raises(KeyError, match="not in index"):
+        df.loc[[("a", 1), ("z", 99)]].collect()
+
+
+def test_loc_list_enables_deterministic_positional_and_window_operations() -> None:
+    pdf = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "val": [10, 20, 30, 40],
+        }
+    )
+    df = dp.from_pandas(pdf, index="id")
+
+    # Because loc with a list establishes an explicit request ordering,
+    # positional and window operations work deterministically
+    reordered = cast("dp.DataFrame", df.loc[[4, 2, 1]])
+    assert (
+        reordered.ordering == ()
+    )  # hidden order column is not exposed in public ordering
+
+    # .iloc slicing
+    sliced = cast("dp.DataFrame", reordered.iloc[0:2]).collect()
+    expected_sliced = pdf.set_index("id").loc[[4, 2, 1]].iloc[0:2]
+    pd.testing.assert_frame_equal(sliced, expected_sliced)
+
+    # cumulative sum
+    cumsum = reordered["val"].cumsum().collect()
+    expected_cumsum = pdf.set_index("id").loc[[4, 2, 1]]["val"].cumsum()
+    pd.testing.assert_series_equal(cumsum, expected_cumsum)

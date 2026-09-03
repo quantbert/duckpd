@@ -17,6 +17,8 @@ All notable changes to DuckPD will be documented in this file.
   sort with sufficient tie-breakers is applied.
 
 ### Added
+- Cardinality validation (`validate="1:1"`, `"1:m"`, `"m:1"`, `"m:m"`, and verbose aliases) for `DataFrame.merge` and `DataFrame.join`, executed as bounded pre-flight relational checks raising `MergeError` before result production.
+- Honest relational label-list selection for `df.loc[[...]]`: preserves exact requested key order, retains duplicate requested keys, raises `KeyError` on missing labels (at execution boundaries), rejects sets with `TypeError`, and establishes a guaranteed row order for subsequent positional and window operations.
 
 - Window expressions (`WindowExpression`) and compiler translation to DuckDB `OVER (...)` window clauses.
 - Lazy cumulative operations on `DataFrame` and `Series`: `cumsum`, `cummin`, `cummax`, and `cumprod` with `skipna` support and explicit `OrderSpec` validation.

@@ -482,6 +482,7 @@ class JoinPlan(LogicalPlanBase):
     right_keys: tuple[ColumnId, ...]
     metadata: FrameMetadata
     sort: bool = False
+    validate: str | None = None
 
 
 @dataclass(frozen=True)
@@ -494,6 +495,17 @@ class UnionPlan(LogicalPlanBase):
     source_row_id: ColumnId | None = None
 
 
+@dataclass(frozen=True)
+class LocIndexPlan(LogicalPlanBase):
+    """Reindex an input plan by an explicit sequence of index keys."""
+
+    input: LogicalPlan
+    keys: tuple[object, ...]
+    metadata: FrameMetadata
+    order_column_id: ColumnId
+    source_key: str
+
+
 LogicalPlan: TypeAlias = (
     ScanPlan
     | FilterPlan
@@ -503,4 +515,5 @@ LogicalPlan: TypeAlias = (
     | AggregatePlan
     | JoinPlan
     | UnionPlan
+    | LocIndexPlan
 )

@@ -27,3 +27,7 @@ class MaterializationError(DuckPDError):
 
 class ConcurrentModificationError(DuckPDError):
     """Raised when a source changes during a commit."""
+
+
+class MergeError(DuckPDError, ValueError):
+    """Raised when merge cardinality validation fails."""

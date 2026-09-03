@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
@@ -7,7 +8,7 @@ import pytest
 from pandas.testing import assert_frame_equal
 
 import duckpd
-from duckpd.errors import AlignmentError, UnorderedOperationError
+from duckpd.errors import AlignmentError, MergeError, UnorderedOperationError
 
 MergeHow = Literal["left", "right", "outer", "inner", "cross"]
 
@@ -208,3 +209,249 @@ def test_merge_suffixes_reject_ambiguous_output() -> None:
     expected = pd.DataFrame({"key": [1], "value": [2], "value_x": [3], "value_r": [4]})
     result = left.merge(right, on="key", suffixes=(None, "_r"))
     assert_frame_equal(result.collect(), expected)
+
+
+def test_merge_invalid_validate_raises_early() -> None:
+    session = duckpd.connect()
+    left = session.from_pandas(pd.DataFrame({"key": [1, 2]}))
+    right = session.from_pandas(pd.DataFrame({"key": [1, 2]}))
+
+    with pytest.raises(ValueError, match="is not a valid argument"):
+        left.merge(right, on="key", validate="invalid_mode")
+
+    assert session.execution_count == 0
+
+
+@pytest.mark.parametrize(
+    "val_param",
+    ["1:1", "one_to_one"],
+)
+def test_merge_validate_one_to_one(val_param: str) -> None:
+    session = duckpd.connect()
+    left_unique = session.from_pandas(
+        pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"]})
+    )
+    right_unique = session.from_pandas(
+        pd.DataFrame({"key": [1, 2], "val_r": ["x", "y"]})
+    )
+    left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
+    right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
+
+    # Passing 1:1
+    merged = left_unique.merge(right_unique, on="key", validate=val_param)
+    assert session.execution_count == 0  # Lazy until collect
+    expected = pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"], "val_r": ["x", "y"]})
+    assert_frame_equal(merged.collect(), expected)
+
+    # Left duplicates fail 1:1 (lazy creation does not execute)
+    bad_left = left_dup.merge(right_unique, on="key", validate=val_param)
+    assert session.execution_count == 3  # 2 validation checks + 1 collect
+    with pytest.raises(
+        MergeError,
+        match="Merge keys are not unique in left dataset; not a one-to-one merge",
+    ) as exc_info:
+        bad_left.collect()
+    assert isinstance(exc_info.value, ValueError)
+
+    # Right duplicates fail 1:1
+    bad_right = left_unique.merge(right_dup, on="key", validate=val_param)
+    with pytest.raises(
+        MergeError,
+        match="Merge keys are not unique in right dataset; not a one-to-one merge",
+    ):
+        bad_right.collect()
+
+
+@pytest.mark.parametrize(
+    "val_param",
+    ["1:m", "one_to_many"],
+)
+def test_merge_validate_one_to_many(val_param: str) -> None:
+    session = duckpd.connect()
+    left_unique = session.from_pandas(
+        pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"]})
+    )
+    right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
+    left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
+
+    # Passing 1:m
+    merged = left_unique.merge(right_dup, on="key", validate=val_param)
+    expected = pd.DataFrame({"key": [1, 1], "val_l": ["a", "a"], "val_r": ["x", "y"]})
+    assert_frame_equal(
+        merged.collect().sort_values(["val_r"]).reset_index(drop=True),
+        expected.sort_values(["val_r"]).reset_index(drop=True),
+    )
+    bad = left_dup.merge(right_dup, on="key", validate=val_param)
+    with pytest.raises(
+        MergeError,
+        match="Merge keys are not unique in left dataset; not a one-to-many merge",
+    ):
+        bad.collect()
+
+
+@pytest.mark.parametrize(
+    "val_param",
+    ["m:1", "many_to_one"],
+)
+def test_merge_validate_many_to_one(val_param: str) -> None:
+    session = duckpd.connect()
+    left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
+    right_unique = session.from_pandas(
+        pd.DataFrame({"key": [1, 2], "val_r": ["x", "y"]})
+    )
+    right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
+
+    # Passing m:1
+    merged = left_dup.merge(right_unique, on="key", validate=val_param)
+    assert_frame_equal(
+        merged.collect(),
+        pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"], "val_r": ["x", "x"]}),
+    )
+
+    # Failing m:1 (right has duplicates)
+    bad = left_dup.merge(right_dup, on="key", validate=val_param)
+    with pytest.raises(
+        MergeError,
+        match="Merge keys are not unique in right dataset; not a many-to-one merge",
+    ):
+        bad.collect()
+
+
+@pytest.mark.parametrize(
+    "val_param",
+    ["m:m", "many_to_many"],
+)
+def test_merge_validate_many_to_many(val_param: str) -> None:
+    session = duckpd.connect()
+    left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
+    right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
+
+    merged = left_dup.merge(right_dup, on="key", validate=val_param)
+    assert len(merged.collect()) == 4
+
+
+def test_merge_validate_with_null_keys() -> None:
+    session = duckpd.connect()
+    # Duplicate nulls in left dataset
+    left_dup_null = session.from_pandas(
+        pd.DataFrame({"key": [1.0, None, None], "val_l": ["a", "b", "c"]})
+    )
+    right = session.from_pandas(pd.DataFrame({"key": [1.0, 2.0], "val_r": ["x", "y"]}))
+
+    with pytest.raises(
+        MergeError,
+        match="Merge keys are not unique in left dataset; not a one-to-one merge",
+    ):
+        left_dup_null.merge(right, on="key", validate="1:1").collect()
+
+    # Single null in left and right dataset (unique!)
+    left_single_null = session.from_pandas(
+        pd.DataFrame({"key": [1.0, None], "val_l": ["a", "b"]})
+    )
+    right_single_null = session.from_pandas(
+        pd.DataFrame({"key": [1.0, 2.0], "val_r": ["x", "y"]})
+    )
+    merged = left_single_null.merge(right_single_null, on="key", validate="1:1")
+    assert len(merged.collect()) == 1
+
+
+def test_merge_validate_composite_keys() -> None:
+    session = duckpd.connect()
+    left_unique_comp = session.from_pandas(
+        pd.DataFrame({"k1": [1, 1], "k2": ["a", "b"], "v": [10, 20]})
+    )
+    right_unique_comp = session.from_pandas(
+        pd.DataFrame({"k1": [1, 2], "k2": ["a", "b"], "w": [100, 200]})
+    )
+    left_dup_comp = session.from_pandas(
+        pd.DataFrame({"k1": [1, 1], "k2": ["a", "a"], "v": [10, 20]})
+    )
+
+    # Composite unique succeeds
+    merged = left_unique_comp.merge(right_unique_comp, on=["k1", "k2"], validate="1:1")
+    assert len(merged.collect()) == 1
+
+    # Composite duplicate fails
+    bad = left_dup_comp.merge(right_unique_comp, on=["k1", "k2"], validate="1:1")
+    with pytest.raises(
+        MergeError,
+        match="Merge keys are not unique in left dataset; not a one-to-one merge",
+    ):
+        bad.collect()
+
+
+def test_merge_validate_cross_join() -> None:
+    session = duckpd.connect()
+    one_row_1 = session.from_pandas(pd.DataFrame({"a": [1]}))
+    one_row_2 = session.from_pandas(pd.DataFrame({"b": [2]}))
+    multi_row = session.from_pandas(pd.DataFrame({"a": [1, 2]}))
+
+    # 1x1 cross join with 1:1 succeeds
+    assert len(one_row_1.merge(one_row_2, how="cross", validate="1:1").collect()) == 1
+
+    # multi-row cross join with 1:1 fails
+    with pytest.raises(MergeError, match="Merge keys are not unique in left dataset"):
+        multi_row.merge(one_row_2, how="cross", validate="1:1").collect()
+
+    # multi-row with m:m succeeds
+    assert len(multi_row.merge(multi_row, how="cross", validate="m:m").collect()) == 4
+
+
+def test_join_shorthand_with_validate() -> None:
+    session = duckpd.connect()
+    left = session.from_pandas(
+        pd.DataFrame({"idx": [1, 2], "val": [10, 20]}), index="idx"
+    )
+    right = session.from_pandas(
+        pd.DataFrame({"idx": [1, 2], "val": [100, 200]}), index="idx"
+    )
+    bad_right = session.from_pandas(
+        pd.DataFrame({"idx": [1, 1], "val": [100, 200]}), index="idx"
+    )
+
+    # Valid join
+    res = left.join(right, lsuffix="_l", rsuffix="_r", validate="1:1").collect()
+    assert len(res) == 2
+
+    # Invalid join
+    with pytest.raises(MergeError, match="Merge keys are not unique in right dataset"):
+        left.join(bad_right, lsuffix="_l", rsuffix="_r", validate="1:1").collect()
+
+
+def test_merge_validate_on_all_execution_boundaries(tmp_path: Path) -> None:
+    session = duckpd.connect()
+    left = session.from_pandas(pd.DataFrame({"key": [1, 1], "val": [1, 2]}))
+    right = session.from_pandas(pd.DataFrame({"key": [1, 2], "val": [3, 4]}))
+    merged = left.merge(right, on="key", suffixes=("_l", "_r"), validate="1:1")
+
+    # explain() does not execute validation (remains a zero-scan plan inspect)
+    plan_text = merged.explain()
+    assert "Join" in plan_text or "HASH_JOIN" in plan_text
+
+    # to_arrow fails
+    with pytest.raises(MergeError):
+        merged.to_arrow()
+
+    # to_arrow_batches fails
+    with pytest.raises(MergeError):
+        merged.to_arrow_batches(batch_size=100)
+
+    # write_parquet fails and does not produce a file
+    parquet_out = tmp_path / "invalid.parquet"
+    with pytest.raises(MergeError):
+        merged.write_parquet(parquet_out)
+    assert not parquet_out.exists()
+
+    # write_csv fails
+    csv_out = tmp_path / "invalid.csv"
+    with pytest.raises(MergeError):
+        merged.write_csv(csv_out)
+    assert not csv_out.exists()
+
+    # persist fails
+    with pytest.raises(MergeError):
+        merged.persist("invalid_stage")
+
+    # reductions fail
+    with pytest.raises(MergeError):
+        merged["key"].count()

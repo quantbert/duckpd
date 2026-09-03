@@ -33,7 +33,7 @@ This document provides a comprehensive overview of the public API implemented in
 | `df[col] = value` | Label & scalar/Series/DataFrame | Lazy column assignment mutating handle state. |
 | `df.assign(**kwargs)` | Callables or expressions | Sequential lazy column assignment. |
 | `df.loc[mask, col] = val` | Boolean mask and column | Masked assignment compiled to `CASE WHEN`. |
-| `df.loc[key]` | Scalar, MultiIndex tuple/prefix, list of labels, or mask | Lazy label filtering. Row selections return lazy frames; label-list request order is not yet guaranteed. |
+| `df.loc[key]` | Scalar, MultiIndex tuple/prefix, list of labels, or mask | Lazy label filtering and relational reindexing. List selections preserve duplicate requested keys and requested label order, raise KeyError on missing labels, and reject sets with TypeError. |
 | `df.iloc[start:stop, columns]` | Row slice plus integer/slice/list column selector | Lazy positional slicing. Stable pandas/Arrow snapshots qualify; external scans require `order_by`. |
 | `df.rename(columns=...)` | `columns`, `errors='raise'|'ignore'` | Renames columns lazily, preserving metadata. |
 | `df.drop(columns=...)` | `labels`, `columns`, `errors` | Drops columns lazily, preserving index/order keys. |
@@ -57,8 +57,8 @@ This document provides a comprehensive overview of the public API implemented in
 | `df.rolling(window, ...)` | `window`, `min_periods`, `center=False` | Rolling window object (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`). |
 | `df.expanding(...)` | `min_periods` | Expanding window object (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`). |
 | `df.groupby(by, ...)` | `by`, `as_index`, `sort`, `dropna` | Creates `DataFrameGroupBy` builder. |
-| `df.merge(right, ...)` | `how`, `on`, `left_on`, `right_on`, `left_index`, `right_index`, `suffixes`, `sort` | Relational join with pandas null-key semantics (`IS NOT DISTINCT FROM`). |
-| `df.join(other, ...)` | `how`, `lsuffix`, `rsuffix`, `sort` | Index-based join convenience method. |
+| `df.merge(right, ...)` | `how`, `on`, `left_on`, `right_on`, `left_index`, `right_index`, `suffixes`, `sort`, `validate` | Relational join with pandas null-key semantics (`IS NOT DISTINCT FROM`) and lazy cardinality validation. |
+| `df.join(other, ...)` | `how`, `lsuffix`, `rsuffix`, `sort`, `validate` | Index-based join convenience method supporting cardinality validation. |
 | `df.collect()` / `df.to_pandas()` | None | Executes plan and returns pandas DataFrame. |
 | `df.to_arrow()` | None | Executes plan and returns Arrow Table. |
 | `df.to_arrow_batches(batch_size)` | `batch_size` | Streams execution results as Arrow RecordBatches. |

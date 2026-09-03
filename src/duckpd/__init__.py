@@ -2,6 +2,7 @@
 
 from importlib.metadata import version
 
+from duckpd.errors import MergeError
 from duckpd.frame import DataFrame
 from duckpd.groupby import DataFrameGroupBy, SeriesGroupBy
 from duckpd.io import concat, from_arrow, from_pandas, read_csv, read_parquet
@@ -13,6 +14,7 @@ __version__ = version("duckpd")
 __all__ = [
     "DataFrame",
     "DataFrameGroupBy",
+    "MergeError",
     "Series",
     "SeriesGroupBy",
     "Session",

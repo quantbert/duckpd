@@ -133,8 +133,10 @@ positional work must sort by enough columns to break ties.
 Label selections remain lazy and therefore return DuckPD `DataFrame` or
 `Series` handles. Exact pandas return-type switching for `df.loc[label]`
 depends on runtime index uniqueness and is intentionally deferred to a bounded
-eager scalar/row API. MultiIndex exact and prefix keys are supported; ordered
-label-list reindexing and cross-frame assignment alignment remain unsupported.
+eager scalar/row API. MultiIndex exact and prefix keys and honest ordered
+label-list selections are supported (preserving duplicates and requested order,
+raising KeyError on missing labels); cross-frame assignment alignment remains
+unsupported.
 
 Module-level readers reuse a context-local implicit session, so independently
 created helper frames can be combined. Explicit `Session` context managers are

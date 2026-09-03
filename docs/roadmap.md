@@ -413,7 +413,7 @@ alignment.
 - [x] Match pandas null-key behavior explicitly (`IS NOT DISTINCT FROM` in SQL
       joins so null matches null as in pandas).
 - [x] Implement `join()` on top of the same semantic merge operation.
-- [ ] Implement `validate=` cardinality checks as explicit validation queries.
+- [x] Implement `validate=` cardinality checks as explicit validation queries.
 - [x] Implement `concat(axis=0)` with schema reconciliation and stable source
       order.
 - [ ] Implement `concat(axis=1)` as index alignment, not `UNION`.

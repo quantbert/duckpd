@@ -11,17 +11,24 @@ import pandas as pd
 import pyarrow as pa
 
 from duckpd._logical import (
+    AggregatePlan,
     ColumnId,
     ColumnRef,
+    FilterPlan,
     JoinPlan,
+    JoinType,
+    LimitPlan,
+    LocIndexPlan,
     PandasSource,
+    ProjectPlan,
     ScanPlan,
     SortKey,
+    SortPlan,
     UnionPlan,
 )
 from duckpd._quoting import quote_identifier
 from duckpd._typing import ParquetCompression
-from duckpd.errors import MaterializationError
+from duckpd.errors import MaterializationError, MergeError
 
 if TYPE_CHECKING:
     from duckpd._compiler import DuckDBCompiler
@@ -53,6 +60,7 @@ class Executor:
         self._compiler = compiler
 
     def collect(self, plan: LogicalPlan) -> pd.DataFrame:
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         rel = compiled.relation
@@ -176,9 +184,12 @@ class Executor:
                 if column.label in nullable_labels
                 and column.duckdb_type in pandas_nullable_types
             }
+        if isinstance(plan, LocIndexPlan):
+            return self._pandas_nullable_integer_ids(plan.input)
         return self._pandas_nullable_integer_ids(plan.input)
 
     def to_arrow(self, plan: LogicalPlan) -> pa.Table:
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         return self._compiler.project_visible(compiled, plan).relation.to_arrow_table()
@@ -186,6 +197,7 @@ class Executor:
     def to_arrow_batches(
         self, plan: LogicalPlan, *, batch_size: int
     ) -> pa.RecordBatchReader:
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         return self._compiler.project_visible(compiled, plan).relation.to_arrow_reader(
@@ -200,6 +212,7 @@ class Executor:
         compression: ParquetCompression,
         overwrite: bool,
     ) -> None:
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         self._compiler.project_visible(compiled, plan).relation.write_parquet(
@@ -216,6 +229,7 @@ class Executor:
         sep: str = ",",
         header: bool = True,
     ) -> None:
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         self._compiler.project_visible(compiled, plan).relation.write_csv(
@@ -229,6 +243,7 @@ class Executor:
         plan: LogicalPlan,
         name: str,
     ) -> None:
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         compiled.relation.create(name)
@@ -280,6 +295,7 @@ class Executor:
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:
         """Execute a one-column, one-row aggregate plan."""
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         if len(plan.metadata.visible_columns) != 1:
             raise MaterializationError("Scalar reduction requires one output column")
@@ -292,6 +308,7 @@ class Executor:
 
     def reduce_columns(self, plan: LogicalPlan) -> pd.Series:
         """Execute a one-row aggregate plan as a label-indexed pandas Series."""
+        self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
         result = compiled.relation.to_df()
@@ -305,3 +322,158 @@ class Executor:
         if reduced.isna().any():
             reduced = reduced.map(lambda value: np.nan if value is None else value)
         return reduced.infer_objects()
+
+    def _validate_execution(self, plan: LogicalPlan) -> None:
+        self._validate_cardinalities(plan)
+        self._validate_loc_indices(plan)
+
+    def _validate_cardinalities(self, plan: LogicalPlan) -> None:
+        joins = self._find_join_plans(plan)
+        for join in joins:
+            if join.validate and join.validate not in {"m:m", "many_to_many"}:
+                self._validate_join(join)
+
+    def _validate_loc_indices(self, plan: LogicalPlan) -> None:
+        locs = self._find_loc_plans(plan)
+        for loc in locs:
+            self._validate_loc_plan(loc)
+
+    def _find_join_plans(self, plan: LogicalPlan) -> list[JoinPlan]:
+        joins: list[JoinPlan] = []
+        if isinstance(plan, JoinPlan):
+            joins.extend(self._find_join_plans(plan.left))
+            joins.extend(self._find_join_plans(plan.right))
+            joins.append(plan)
+        elif isinstance(plan, UnionPlan):
+            for input_plan in plan.inputs:
+                joins.extend(self._find_join_plans(input_plan))
+        elif isinstance(
+            plan,
+            (
+                FilterPlan,
+                ProjectPlan,
+                SortPlan,
+                LimitPlan,
+                AggregatePlan,
+                LocIndexPlan,
+            ),
+        ):
+            joins.extend(self._find_join_plans(plan.input))
+        return joins
+
+    def _find_loc_plans(self, plan: LogicalPlan) -> list[LocIndexPlan]:
+        locs: list[LocIndexPlan] = []
+        if isinstance(plan, LocIndexPlan):
+            locs.extend(self._find_loc_plans(plan.input))
+            locs.append(plan)
+        elif isinstance(plan, JoinPlan):
+            locs.extend(self._find_loc_plans(plan.left))
+            locs.extend(self._find_loc_plans(plan.right))
+        elif isinstance(plan, UnionPlan):
+            for input_plan in plan.inputs:
+                locs.extend(self._find_loc_plans(input_plan))
+        elif isinstance(
+            plan, (FilterPlan, ProjectPlan, SortPlan, LimitPlan, AggregatePlan)
+        ):
+            locs.extend(self._find_loc_plans(plan.input))
+        return locs
+
+    def _validate_loc_plan(self, plan: LocIndexPlan) -> None:
+        compiled_input = self._compiler.compile(plan.input)
+        index_ids = plan.input.metadata.index.columns
+        index_cols = [compiled_input.bindings[cid] for cid in index_ids]
+
+        keys_df = cast(
+            "pd.DataFrame", self._session._get_registered_source(plan.source_key)
+        )
+        keys_col_map = {col: f"_loc_k_{i}" for i, col in enumerate(index_cols)}
+        keys_df_renamed = keys_df.rename(columns=keys_col_map)
+        keys_rel = self._session._connection.from_df(keys_df_renamed).set_alias(
+            "__duckpd_loc_keys__"
+        )
+
+        input_alias = "__duckpd_loc_inp__"
+        flagged_input = compiled_input.relation.project(
+            "*, 1 AS __duckpd_matched__"
+        ).set_alias(input_alias)
+
+        cond_parts = [
+            f"__duckpd_loc_keys__._loc_k_{i} IS NOT DISTINCT FROM "
+            f"{input_alias}.{quote_identifier(col)}"
+            for i, col in enumerate(index_cols)
+        ]
+        joined = keys_rel.join(flagged_input, " AND ".join(cond_parts), how="left")
+        self._session._begin_execution()
+
+        key_proj = ", ".join(f"_loc_k_{i}" for i in range(len(index_ids)))
+        missing_rows = (
+            joined.filter("__duckpd_matched__ IS NULL")
+            .project(key_proj)
+            .limit(1)
+            .fetchall()
+        )
+        if missing_rows:
+            row = missing_rows[0]
+            missing_val = row[0] if len(row) == 1 else row
+            raise KeyError(f"[{missing_val!r}] not in index")
+
+    def _validate_join(self, join: JoinPlan) -> None:
+        check_left = join.validate in {"1:1", "1:m", "one_to_one", "one_to_many"}
+        check_right = join.validate in {"1:1", "m:1", "one_to_one", "many_to_one"}
+        relationship = (
+            "one-to-one"
+            if join.validate in {"1:1", "one_to_one"}
+            else "one-to-many"
+            if join.validate in {"1:m", "one_to_many"}
+            else "many-to-one"
+        )
+
+        if check_left:
+            self._check_uniqueness(
+                join.left,
+                join.left_keys,
+                side="left",
+                relationship=relationship,
+                is_cross=join.how is JoinType.CROSS,
+            )
+        if check_right:
+            self._check_uniqueness(
+                join.right,
+                join.right_keys,
+                side="right",
+                relationship=relationship,
+                is_cross=join.how is JoinType.CROSS,
+            )
+
+    def _check_uniqueness(
+        self,
+        input_plan: LogicalPlan,
+        key_ids: tuple[ColumnId, ...],
+        *,
+        side: str,
+        relationship: str,
+        is_cross: bool,
+    ) -> None:
+        compiled = self._compiler.compile(input_plan)
+        self._session._begin_execution()
+        if is_cross:
+            limit_rel = compiled.relation.limit(2)
+            if len(limit_rel.fetchall()) > 1:
+                raise MergeError(
+                    f"Merge keys are not unique in {side} dataset; "
+                    f"not a {relationship} merge"
+                )
+            return
+
+        key_cols = [quote_identifier(compiled.bindings[k_id]) for k_id in key_ids]
+        group_keys = ", ".join(key_cols)
+        dup_check = (
+            compiled.relation.aggregate("COUNT(*) AS __duckpd_dup_cnt__", group_keys)
+            .filter("__duckpd_dup_cnt__ > 1")
+            .limit(1)
+        )
+        if len(dup_check.fetchall()) > 0:
+            raise MergeError(
+                f"Merge keys are not unique in {side} dataset; "
+                f"not a {relationship} merge"
+            )

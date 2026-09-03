@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
+
+import pandas as pd
 
 from duckpd._logical import (
     BinaryExpression,
@@ -14,11 +17,17 @@ from duckpd._logical import (
     ColumnRef,
     Expression,
     FilterPlan,
+    FrameMetadata,
     FunctionCall,
     LimitPlan,
     LiteralValue,
+    LocIndexPlan,
     NamedExpression,
+    NullPlacement,
+    OrderColumn,
+    OrderSpec,
     ProjectPlan,
+    SortDirection,
 )
 from duckpd._metadata import after_projection, protected_column_ids
 from duckpd._reductions import expression_type
@@ -60,20 +69,22 @@ class LocIndexer:
         elif isinstance(row_key, Series):
             self._frame._require_same_plan(row_key)
             filtered_df = self._frame[row_key]
-        elif isinstance(row_key, list | set):
-            pred: Expression = LiteralValue(False)
-            for item in cast("Sequence[object]", row_key):
-                pred = BinaryExpression(
-                    pred,
-                    BinaryOperator.OR,
-                    self._index_predicate(item),
-                )
-            from duckpd.frame import DataFrame as DataFrameClass
-
-            filtered_df = DataFrameClass(
-                self._frame._session,
-                FilterPlan(self._frame._plan, pred, self._frame._plan.metadata),
+        elif isinstance(row_key, set):
+            raise TypeError(
+                "Passing a set as an indexer is not supported. Use a list instead."
             )
+        elif isinstance(row_key, list):
+            if not row_key:
+                filtered_df = self._frame.limit(0)
+            else:
+                index_ids = self._frame._plan.metadata.index.columns
+                if not index_ids:
+                    raise UnsupportedOperationError(
+                        "DataFrame has no explicit index to match labels"
+                    )
+                filtered_df = self._build_loc_index_frame(
+                    cast("Sequence[object]", row_key)
+                )
         else:
             pred = self._index_predicate(row_key)
             from duckpd.frame import DataFrame as DataFrameClass
@@ -91,6 +102,53 @@ class LocIndexer:
         if isinstance(col_key, Sequence):
             return filtered_df[list(cast("Sequence[str]", col_key))]
         raise UnsupportedOperationError(f"Unsupported column key in .loc: {col_key!r}")
+
+    def _build_loc_index_frame(self, keys: Sequence[object]) -> DataFrame:
+        from duckpd.frame import DataFrame as DataFrameClass
+
+        index_ids = self._frame._plan.metadata.index.columns
+        order_col_id = ColumnId.create()
+        order_label = f"__duckpd_loc_order_{order_col_id.value.hex[:8]}__"
+        order_col = Column(
+            order_col_id,
+            order_label,
+            "BIGINT",
+            hidden=True,
+            row_identity=True,
+        )
+
+        index_cols = [self._frame._column_by_id(cid).label for cid in index_ids]
+        if len(index_ids) == 1:
+            records: list[dict[str, object]] = [
+                {index_cols[0]: k, "_loc_order_": i} for i, k in enumerate(keys)
+            ]
+        else:
+            records: list[dict[str, object]] = []
+            for i, k in enumerate(keys):
+                tup = cast("tuple[object, ...]", k) if isinstance(k, tuple) else (k,)
+                if len(tup) != len(index_ids):
+                    raise KeyError("Index key has the wrong number of levels")
+                rec = {col: val for col, val in zip(index_cols, tup, strict=True)}
+                rec["_loc_order_"] = i
+                records.append(rec)
+
+        keys_df = pd.DataFrame(records)
+        source_key = uuid4().hex
+        self._frame._session._registered_sources[source_key] = keys_df
+
+        columns = (*self._frame._plan.metadata.columns, order_col)
+        ordering = OrderSpec(
+            (OrderColumn(order_col_id, SortDirection.ASCENDING, NullPlacement.LAST),)
+        )
+        metadata = FrameMetadata(columns, self._frame._plan.metadata.index, ordering)
+        plan = LocIndexPlan(
+            input=self._frame._plan,
+            keys=tuple(keys),
+            metadata=metadata,
+            order_column_id=order_col_id,
+            source_key=source_key,
+        )
+        return DataFrameClass(self._frame._session, plan)
 
     def _split_key(self, key: object) -> tuple[object, object | None]:
         if not isinstance(key, tuple):

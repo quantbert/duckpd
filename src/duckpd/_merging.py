@@ -32,6 +32,7 @@ def plan_merge(
     right_index: bool = False,
     sort: bool = False,
     suffixes: tuple[str | None, str | None] = ("_x", "_y"),
+    validate: str | None = None,
 ) -> JoinPlan:
     """Build a typed JoinPlan following pandas merge semantics."""
     if how not in {"inner", "left", "right", "outer", "cross"}:
@@ -54,6 +55,29 @@ def plan_merge(
     ):
         raise ValueError("suffixes must contain two strings or None")
     lsuffix, rsuffix = suffixes
+
+    _valid_validate_values = {
+        "1:1",
+        "1:m",
+        "m:1",
+        "m:m",
+        "one_to_one",
+        "one_to_many",
+        "many_to_one",
+        "many_to_many",
+    }
+    if validate is not None and validate not in _valid_validate_values:
+        raise ValueError(
+            f'"{validate}" is not a valid argument. Valid arguments are:\n'
+            '- "1:1"\n'
+            '- "1:m"\n'
+            '- "m:1"\n'
+            '- "m:m"\n'
+            '- "one_to_one"\n'
+            '- "one_to_many"\n'
+            '- "many_to_one"\n'
+            '- "many_to_many"'
+        )
 
     # 1. Resolve key columns
     left_keys: list[Column] = []
@@ -234,4 +258,5 @@ def plan_merge(
         right_keys=tuple(k.id for k in right_keys),
         metadata=metadata,
         sort=sort,
+        validate=validate,
     )

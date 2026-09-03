@@ -1086,6 +1086,7 @@ class DataFrame:
         right_index: bool = False,
         sort: bool = False,
         suffixes: tuple[str | None, str | None] = ("_x", "_y"),
+        validate: str | None = None,
     ) -> DataFrame:
         """Merge DataFrame or named Series objects with a database-style join."""
         from duckpd._merging import plan_merge
@@ -1104,6 +1105,7 @@ class DataFrame:
             right_index=right_index,
             sort=sort,
             suffixes=suffixes,
+            validate=validate,
         )
         return DataFrame(self._session, plan)
 
@@ -1115,6 +1117,7 @@ class DataFrame:
         lsuffix: str = "",
         rsuffix: str = "",
         sort: bool = False,
+        validate: str | None = None,
     ) -> DataFrame:
         """Join columns of another DataFrame using index or a key column."""
         return self.merge(
@@ -1125,6 +1128,7 @@ class DataFrame:
             left_index=(on is None),
             sort=sort,
             suffixes=(lsuffix, rsuffix),
+            validate=validate,
         )
 
     def limit(self, count: int, *, offset: int = 0) -> DataFrame:
