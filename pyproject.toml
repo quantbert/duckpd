@@ -38,10 +38,14 @@ Repository = "https://github.com/quantbert/duckpd"
 Issues = "https://github.com/quantbert/duckpd/issues"
 Changelog = "https://github.com/quantbert/duckpd/blob/main/docs/CHANGELOG.md"
 
+[project.entry-points."narwhals.plugins"]
+duckpd = "duckpd._narwhals_plugin"
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.100",
     "pandas-stubs>=3.0",
+    "narwhals>=2.17,<3",
     "pre-commit>=4.0",
     "pyarrow-stubs>=20.0.0.20260625",
     "pyright>=1.1.400",

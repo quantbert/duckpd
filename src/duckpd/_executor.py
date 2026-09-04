@@ -78,6 +78,17 @@ def _replace_file_preserving_metadata(source: Path, staging: Path) -> None:
     os.replace(staging, source)
 
 
+CommitFailurePoint = Literal[
+    "before_staging",
+    "during_write",
+    "after_staging_write",
+    "during_validation",
+    "before_backup",
+    "after_backup",
+    "before_replace",
+]
+
+
 @dataclass(frozen=True)
 class CommitReport:
     """Structured report returned by DataFrame.commit()."""
@@ -456,7 +467,10 @@ class Executor:
         *,
         compression: ParquetCompression = "snappy",
         retain_previous: bool = False,
-        _before_replace: Callable[[], None] | None = None,
+        _failure_injector: Callable[[CommitFailurePoint], None] | None = None,
+        _replace_file: Callable[[Path, Path], None] = (
+            _replace_file_preserving_metadata
+        ),
     ) -> CommitReport:
         import time
 
@@ -580,10 +594,14 @@ class Executor:
             )
             raise UnsupportedOperationError(msg)
 
-        # 6. Create unique staging file in the same directory
+        # 6. Create a unique staging file in the same directory.
+        if _failure_injector is not None:
+            _failure_injector("before_staging")
         dest_dir = source_path.parent
         staging_name = f".duckpd_staging_{source_path.stem}_{uuid4().hex}.parquet"
         staging_path = dest_dir / staging_name
+        backup_file: Path | None = None
+        replaced = False
 
         try:
             # 7. Stream Arrow batches while retaining Parquet/Arrow metadata.
@@ -594,8 +612,15 @@ class Executor:
                 source_arrow_schema,
                 compression=cast("Any", arrow_compression),
             ) as writer:
+                if _failure_injector is not None:
+                    _failure_injector("during_write")
                 for batch in reader:
                     writer.write_batch(batch.cast(source_arrow_schema))
+            if _failure_injector is not None:
+                _failure_injector("after_staging_write")
+
+            if _failure_injector is not None:
+                _failure_injector("during_validation")
 
             # 8. Validate output readability, row-preservation, and schema
             staging_rel = con.read_parquet(str(staging_path))
@@ -627,9 +652,6 @@ class Executor:
                     "Committed Parquet schema metadata does not match source"
                 )
 
-            if _before_replace is not None:
-                _before_replace()
-
             # 9. Concurrency guard: verify source has not been modified
             current_stat = source_path.stat()
             if (
@@ -645,11 +667,15 @@ class Executor:
             # 10. Optional retention of previous version
             backup_path: str | None = None
             if retain_previous:
+                if _failure_injector is not None:
+                    _failure_injector("before_backup")
                 backup_file = (
                     dest_dir / f"{source_path.stem}_backup_{uuid4().hex[:8]}.parquet"
                 )
                 shutil.copy2(source_path, backup_file)
                 backup_path = str(backup_file)
+                if _failure_injector is not None:
+                    _failure_injector("after_backup")
 
             # Recheck after backup creation, then atomically preserve metadata.
             post_backup_stat = source_path.stat()
@@ -660,7 +686,10 @@ class Executor:
                 raise ConcurrentModificationError(
                     f"Source file '{source_path}' changed while retaining backup"
                 )
-            _replace_file_preserving_metadata(source_path, staging_path)
+            if _failure_injector is not None:
+                _failure_injector("before_replace")
+            _replace_file(source_path, staging_path)
+            replaced = True
             bytes_written = source_path.stat().st_size
             t1 = time.perf_counter()
 
@@ -675,6 +704,8 @@ class Executor:
         finally:
             if staging_path.exists():
                 staging_path.unlink(missing_ok=True)
+            if not replaced and backup_file is not None and backup_file.exists():
+                backup_file.unlink(missing_ok=True)
 
     def explain(
         self,

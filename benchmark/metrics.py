@@ -10,7 +10,7 @@ import time
 import tracemalloc
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd_orig
 
@@ -71,9 +71,11 @@ def get_peak_rss_bytes() -> int:
         pass
 
     try:
-        import psutil
+        from importlib import import_module
 
-        return int(psutil.Process().memory_info().rss)
+        psutil = import_module("psutil")
+        process = cast("Any", psutil).Process()
+        return int(process.memory_info().rss)
     except ImportError:
         pass
 

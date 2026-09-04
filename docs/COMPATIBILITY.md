@@ -193,9 +193,22 @@ Methods operate lazily on plan-backed Series, compiling directly into DuckDB str
 * `strftime(date_format)`
 * `to_period(freq='Y'\|'M'\|'D')`
 
+## 9. Narwhals Interoperability
+
+DuckPD ships an experimental Narwhals plugin. It wraps a `duckpd.DataFrame` as
+a Narwhals `LazyFrame` without collecting and keeps supported transformations
+in DuckPD/DuckDB. The machine-readable contract and generated method table are
+in [`narwhals-compatibility.json`](narwhals-compatibility.json) and
+[`NARWHALS_COMPATIBILITY.md`](NARWHALS_COMPATIBILITY.md).
+
+The prototype intentionally supports only the operations marked supported in
+that generated table. Expression-based Narwhals transformations are not yet
+part of the contract.
+
+
 ---
 
-## 9. Ordering and Resource Contract
+## 10. Ordering and Resource Contract
 
 * **Hidden Row Identity**: Pandas and Arrow snapshots carry a hidden stable row identity. It is never exposed in columns, indexes, Arrow output, or file sinks.
 * **Deterministic Tie-Breaking**: User sorts append row identity only as a final tie-breaker. External scans do not acquire an artificial order.

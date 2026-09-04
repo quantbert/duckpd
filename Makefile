@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test lint format format-check typecheck check build demos-smoke benchmark benchmark-all release-check clean publish
+.PHONY: help install test lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all release-check clean publish
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -23,11 +23,17 @@ format-check: ## Verify Ruff formatting without changing files
 typecheck: ## Run strict Pyright checks
 	uv run pyright
 
-check: lint format-check typecheck test ## Run the complete local quality gate
+compatibility-check: ## Verify generated compatibility documentation
+	uv run python scripts/generate_compatibility.py --check
+
+check: lint format-check typecheck compatibility-check test ## Run the complete local quality gate
 
 build: ## Build the wheel and source distribution
 	rm -rf dist
 	uv build
+
+package-smoke: build ## Inspect and install release artifacts in a clean environment
+	uv run python scripts/package_smoke.py dist
 
 demos-smoke: ## Run the inexpensive executable demos
 	uv run python demo/basic_pipeline.py
@@ -46,7 +52,7 @@ benchmark: ## Run benchmarks across file sizes and generate Markdown report
 benchmark-all: ## Run benchmarks across all preset sizes including 5GB and 50GB
 	uv run python -m benchmark --sizes 5mb 50mb 500m 5g 50g --repetitions $(REPETITIONS) --threads $(THREADS) --report $(REPORT)
 
-release-check: check build ## Validate source and build release artifacts
+release-check: check package-smoke ## Validate source and clean-installed artifacts
 
 publish: test ## Run tests, bump patch version, build, and publish to PyPI
 	uv version --bump patch

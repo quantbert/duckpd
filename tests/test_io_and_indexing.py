@@ -11,6 +11,7 @@ import pytest
 
 import duckpd as dp
 from duckpd import CommitReport, ConcurrentModificationError
+from duckpd._executor import CommitFailurePoint
 from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
 
 
@@ -116,6 +117,36 @@ def test_dataframe_setitem_lazy() -> None:
         df[[]] = 1
     with pytest.raises(ValueError):
         df[["x", "y"]] = [1]
+
+
+def test_assignment_builds_plans_without_compiling_or_reading_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "lazy_assignment.parquet"
+    pdf = pd.DataFrame({"value": [1, 2, 3], "flag": [True, False, True]})
+    pdf.to_parquet(source)
+
+    with dp.connect() as session:
+        frame = session.read_parquet(source)
+
+        def fail_compile(_plan: object) -> None:
+            raise AssertionError("assignment attempted to compile the source")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(session._compiler, "compile", fail_compile)
+            frame["added"] = frame["value"] * 10
+            frame.loc[frame["flag"], "value"] = 99
+            assigned = frame.assign(derived=frame["added"] + frame["value"])
+            filtered = assigned[assigned["derived"] > 0]
+            chained = filtered.assign(final=filtered["derived"] * 2)
+            assert session.execution_count == 0
+
+        expected = pdf.copy()
+        expected["added"] = expected["value"] * 10
+        expected.loc[expected["flag"], "value"] = 99
+        expected["derived"] = expected["added"] + expected["value"]
+        expected["final"] = expected["derived"] * 2
+        pd.testing.assert_frame_equal(chained.collect(), expected)
 
 
 def test_loc_reads_and_masked_assignment() -> None:
@@ -531,19 +562,21 @@ def test_parquet_atomic_commit_concurrency_and_failure_injection(
     df["val"] = df["val"] + 100
 
     # 1. Concurrent modification raises ConcurrentModificationError
-    def touch_concurrent() -> None:
-        time.sleep(0.01)
-        os.utime(src_file, None)
+    def touch_concurrent(point: CommitFailurePoint) -> None:
+        if point == "after_staging_write":
+            time.sleep(0.01)
+            os.utime(src_file, None)
 
     with pytest.raises(ConcurrentModificationError, match="modified concurrently"):
-        df._session._executor.commit(df._plan, _before_replace=touch_concurrent)
+        df._session._executor.commit(df._plan, _failure_injector=touch_concurrent)
 
     # 2. Failure injection leaves original file intact and staging cleaned up
-    def blow_up() -> None:
-        raise RuntimeError("Simulated failure")
+    def blow_up(point: CommitFailurePoint) -> None:
+        if point == "before_replace":
+            raise RuntimeError("Simulated failure")
 
     with pytest.raises(RuntimeError, match="Simulated failure"):
-        df._session._executor.commit(df._plan, _before_replace=blow_up)
+        df._session._executor.commit(df._plan, _failure_injector=blow_up)
 
     # Original file is intact and readable
     disk_pdf = pd.read_parquet(src_file)
@@ -553,6 +586,71 @@ def test_parquet_atomic_commit_concurrency_and_failure_injection(
     # Staging files are cleaned up
     staging_files = list(tmp_path.glob(".duckpd_staging_*"))
     assert len(staging_files) == 0
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "before_staging",
+        "during_write",
+        "after_staging_write",
+        "during_validation",
+        "before_backup",
+        "after_backup",
+        "before_replace",
+    ],
+)
+def test_parquet_commit_failure_matrix_preserves_original(
+    tmp_path: Path, failure_point: CommitFailurePoint
+) -> None:
+    source = tmp_path / "matrix.parquet"
+    original = pd.DataFrame({"value": [1, 2, 3]})
+    original.to_parquet(source)
+    original_bytes = source.read_bytes()
+    frame = dp.read_parquet(source)
+    frame["value"] = frame["value"] + 10
+    original_plan = frame._plan
+
+    def inject(point: CommitFailurePoint) -> None:
+        if point == failure_point:
+            raise RuntimeError(f"injected at {point}")
+
+    with pytest.raises(RuntimeError, match=f"injected at {failure_point}"):
+        frame._session._executor.commit(
+            frame._plan,
+            retain_previous=True,
+            _failure_injector=inject,
+        )
+
+    assert frame._plan is original_plan
+    assert source.read_bytes() == original_bytes
+    pd.testing.assert_frame_equal(pd.read_parquet(source), original)
+    assert not list(tmp_path.glob(".duckpd_staging_*"))
+    assert not list(tmp_path.glob("matrix_backup_*.parquet"))
+
+
+def test_parquet_commit_replace_failure_preserves_original(tmp_path: Path) -> None:
+    source = tmp_path / "replace.parquet"
+    original = pd.DataFrame({"value": [1, 2, 3]})
+    original.to_parquet(source)
+    original_bytes = source.read_bytes()
+    frame = dp.read_parquet(source)
+    frame["value"] = frame["value"] + 10
+
+    def fail_replace(_source: Path, _staging: Path) -> None:
+        raise OSError("injected replace failure")
+
+    with pytest.raises(OSError, match="injected replace failure"):
+        frame._session._executor.commit(
+            frame._plan,
+            retain_previous=True,
+            _replace_file=fail_replace,
+        )
+
+    assert source.read_bytes() == original_bytes
+    pd.testing.assert_frame_equal(pd.read_parquet(source), original)
+    assert not list(tmp_path.glob(".duckpd_staging_*"))
+    assert not list(tmp_path.glob("replace_backup_*.parquet"))
 
 
 def test_parquet_commit_resolves_relative_source_at_read_time(

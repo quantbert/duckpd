@@ -25,6 +25,8 @@ the [release policy](RELEASES.md).
 - Persistent table sinks (`DataFrame.save_as_table`): persists visible columns to DuckDB tables with `"error"`, `"overwrite"`, and schema-validated `"append"` modes, wrapped in transactional rollback to ensure table integrity on failure.
 - Local Parquet atomic commit (`DataFrame.commit` and `CommitReport`): canonicalizes local source paths at frame creation, streams lazy modifications through a sibling staging file, preserves hidden index columns and Arrow schema/pandas metadata, validates DuckDB logical types and row-count preservation, supports optional backup retention, and performs atomic replacement. POSIX mode and available extended attributes are copied; Windows replacement metadata is preserved by `ReplaceFileW`. Owner/group, Parquet encodings, and physical layout may change. The initial implementation is single-writer and does not lock unrelated processes.
 - Cross-platform process RSS sampling (`get_peak_rss_bytes` in `benchmark.metrics`): unifies Linux `/proc/self/status` VmHWM, macOS `getrusage`, and Windows `ctypes` peak working set sampling without unconditional `resource` imports.
+- Experimental Narwhals plugin: `nw.from_native()` wraps DuckPD DataFrames as lazy frames; column selection, head, drop, rename, sort, schema inspection, Arrow collection, and `to_native()` preserve the documented DuckPD execution boundary.
+- Release artifact verification: generated Narwhals compatibility documentation, wheel/sdist content checks, and clean-environment wheel installation smoke tests run across the CI Python 3.11–3.14 matrix.
 
 ### Changed
 

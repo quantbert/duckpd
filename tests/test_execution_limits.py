@@ -144,8 +144,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
     assert result["rows_returned"] == 500000
     assert result["peak_temp_dir_size"] > 0, "DuckDB must spill to disk"
     assert result["peak_buffer_memory"] > 0
-    if result["child_rss_bytes"] > 0:
-        assert result["child_rss_bytes"] < 350 * 1024 * 1024
+    assert result["child_rss_bytes"] > 0
+    assert result["child_rss_bytes"] < 350 * 1024 * 1024
 
 
 def test_explain_modes() -> None:

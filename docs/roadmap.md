@@ -514,9 +514,9 @@ Exit gate:
 - [x] Augment benchmark reporting and `test_execution_limits.py` to capture true
       process peak RSS (`getrusage`/`/proc/self/status`) and verify DuckDB temporary
       spill file generation during constrained-memory sorts and joins.
-- [ ] Confirm the Windows peak-working-set sampler returns non-zero RSS on
-      `windows-latest`; the implementation uses `GetProcessMemoryInfo`, but the
-      bounded-RSS assertion remains skipped if the platform sampler returns `0`.
+- [ ] Enforce non-zero Windows peak-working-set sampling on `windows-latest`;
+      the bounded-RSS test now fails rather than skips when sampling returns `0`,
+      but the updated job still requires a real Windows CI run.
 - [x] A test forbids pandas conversion methods during every direct sink.
 
 ### Phase 9: lazy mutation and safe local commit
@@ -609,9 +609,9 @@ Exit gate:
 
 Goal: publish a narrow, honest, measurable API.
 
-- [ ] Maintain a machine-readable compatibility matrix by method, arguments,
-      dtype coverage, ordering requirement, and release version.
-- [ ] Generate user-facing compatibility documentation from that matrix.
+- [x] Maintain a machine-readable Narwhals compatibility matrix by method,
+      arguments, dtype coverage, ordering requirement, and release version.
+- [x] Generate user-facing Narwhals compatibility documentation from that matrix.
 - [ ] Add API docs, tutorials, architecture docs, and unsupported-operation
       guidance.
 - [ ] Add benchmarks for compile time, execution time, peak RSS, spill bytes,
@@ -625,20 +625,21 @@ Goal: publish a narrow, honest, measurable API.
       observability, performance, portability, interoperability, and openness.
 - [x] Add small, medium, and larger-than-memory benchmark datasets generated
       deterministically rather than checked into Git.
-- [ ] Add package build/install smoke tests and verify wheels with the supported
+- [x] Add package build/install smoke tests and verify wheels with the supported
       Python matrix.
-- [ ] Add artifact-content checks for wheel/sdist metadata, required package
+- [x] Add artifact-content checks for wheel/sdist metadata, required package
       files such as `py.typed`, and exclusion of caches, generated data, and
       secrets.
-- [ ] Install the built wheel in a clean environment and run an import, version,
+- [x] Install the built wheel in a clean environment and run an import, version,
       and minimal in-memory DuckPD pipeline smoke test.
 - [ ] Require release tags, package metadata, and changelog versions to match
       before PyPI Trusted Publishing runs.
-- [ ] After index/order semantics and the public API stabilize, prototype an
-      optional Narwhals compliance layer or plugin so `nw.from_native()` can
-      wrap DuckPD as a `LazyFrame` without collecting.
-- [ ] Require Narwhals interoperability tests to prove `to_native()` returns a
-      DuckPD frame, transformations remain lazy, and execution stays in DuckDB.
+- [x] After index/order semantics and the public API stabilize, prototype an
+      optional Narwhals compliance plugin so `nw.from_native()` can wrap DuckPD
+      as a `LazyFrame` without collecting.
+- [x] Require Narwhals interoperability tests to prove `to_native()` returns a
+      DuckPD frame, supported transformations remain lazy, and execution stays
+      in DuckDB.
 - [ ] Publish a pre-release and collect real unsupported-operation traces only
       with explicit user consent and no query data.
 - [x] Define the pre-`1.0` versioning, deprecation, and immutable-release policy.
@@ -684,13 +685,13 @@ Implement in this order. Each increment should be independently testable.
 15. [x] Structured profiling (`df.profile()`) exposing DuckDB operator and I/O
        timings, plus native process RSS and DuckDB spill byte metrics in
        benchmarks and execution limits.
-   - [ ] Confirm the Windows `GetProcessMemoryInfo` sampler returns non-zero RSS
-         under `windows-latest` so the bounded-RSS assertion cannot skip.
+   - [ ] Run the updated bounded-RSS test under `windows-latest`; non-zero
+         `GetProcessMemoryInfo` sampling is enforced but not yet CI-confirmed.
 16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
-17. [ ] Narwhals lazy frame compliance plugin prototype, compatibility matrix
+17. [x] Narwhals lazy frame compliance plugin prototype, compatibility matrix
        documentation generation, and clean wheel build/install smoke test across
-       the Python 3.11–3.14 matrix.
+       the Python 3.11–3.14 CI matrix.
 
 ### Active workstreams and immediate next priorities
 
@@ -713,7 +714,7 @@ graph TD
 3. **Stream 3: Observability & Memory Profiling (Phase 8)**
    - `df.profile()` exposes DuckDB structured JSON profiling (operator timings, spill, I/O).
    - Benchmark and execution-limit tests capture isolated RSS and verify DuckDB spill bytes.
-   - Follow-up: confirm non-zero Windows peak-working-set sampling in Windows CI.
+   - Windows CI now enforces non-zero RSS; runtime confirmation remains pending.
 4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9) [Completed]**
    - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
    - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.

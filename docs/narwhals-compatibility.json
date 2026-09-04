@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "backend": "duckpd",
+  "release": "0.0.7",
+  "methods": [
+    {
+      "method": "nw.from_native",
+      "arguments": "duckpd.DataFrame",
+      "dtypes": "all DuckPD columns",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Returns a Narwhals LazyFrame without execution."
+    },
+    {
+      "method": "LazyFrame.to_native",
+      "arguments": "none",
+      "dtypes": "all",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Returns the underlying duckpd.DataFrame."
+    },
+    {
+      "method": "LazyFrame.select",
+      "arguments": "column-name strings",
+      "dtypes": "all",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Expression-based selection is not implemented by the prototype."
+    },
+    {
+      "method": "LazyFrame.head",
+      "arguments": "n",
+      "dtypes": "all",
+      "ordering": "requires source ordering for deterministic row identity",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Builds a lazy DuckPD LimitPlan."
+    },
+    {
+      "method": "LazyFrame.drop",
+      "arguments": "columns, strict",
+      "dtypes": "all",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Builds a lazy DuckPD projection."
+    },
+    {
+      "method": "LazyFrame.rename",
+      "arguments": "mapping",
+      "dtypes": "all",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Uses DuckPD metadata-only rename semantics."
+    },
+    {
+      "method": "LazyFrame.sort",
+      "arguments": "by, descending, nulls_last",
+      "dtypes": "DuckDB-orderable",
+      "ordering": "establishes explicit ordering",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Builds a lazy DuckPD SortPlan."
+    },
+    {
+      "method": "LazyFrame.collect_schema",
+      "arguments": "none",
+      "dtypes": "common scalar DuckDB types",
+      "ordering": "not applicable",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Unsupported nested and parameterized types report Narwhals Unknown."
+    },
+    {
+      "method": "LazyFrame.collect",
+      "arguments": "backend=None or pyarrow",
+      "dtypes": "Arrow-compatible",
+      "ordering": "preserved when defined by DuckPD metadata",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Executes in DuckDB and returns a Narwhals Arrow DataFrame."
+    }
+  ]
+}
