@@ -540,8 +540,9 @@ explicit sink is called.
       source fingerprint.
 - [x] Atomically replace the source with `os.replace()` only after validation.
 - [x] Support retaining the previous version and return a structured report.
-- [ ] Add failure injection at each commit step and prove the original remains
-      readable before atomic replacement.
+- [x] Inject failures before staging, during/after writes, during validation,
+      around backup creation, before replacement, and in replacement; tests prove
+      the original remains byte-identical/readable and temporary files are removed.
 - [x] Add a process-level lock or explicitly document single-writer behavior
       before claiming concurrency safety. The initial implementation documents
       single-writer operation and does not claim locking against unrelated writers.
@@ -549,7 +550,8 @@ explicit sink is called.
 
 Exit gate:
 
-- [ ] Assignment performs zero I/O until a sink.
+- [x] Assignment performs zero I/O until a sink; tests forbid compilation while
+      building `__setitem__`, masked `.loc`, `assign`, and chained plans.
 - [ ] A 100 GB-equivalent generated workload can be rewritten with memory tied
       to active batches/operator state rather than result size.
 - [x] Concurrent source modification raises `ConcurrentModificationError` and
