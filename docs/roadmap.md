@@ -307,16 +307,15 @@ Exit gate:
 
 Goal: make metadata trustworthy before implementing many methods.
 
-- [ ] Define the complete supported DuckDB-to-pandas dtype matrix. The initial
-      reduction matrix now covers DuckDB boolean, signed/unsigned integer,
-      floating, and decimal inputs; temporal, string, binary, nested, and
-      nullable-extension output policies remain open.
-- [ ] Initially cover booleans, signed/unsigned integers, floats, strings,
-      binary, decimal, date, timestamp, timezone-aware timestamp, and interval.
-- [ ] Decide nullable dtype output policy and test `pd.NA`, `NaN`, `NaT`, and
-      SQL `NULL` separately.
-- [ ] Treat nested DuckDB types as documented extension values or reject them
-      until their pandas representation is stable.
+- [x] Define the supported DuckDB-to-pandas collection matrix for boolean,
+      signed/unsigned integer, floating, string, binary, decimal, date,
+      timestamp, timezone-aware timestamp, and interval values.
+- [x] Preserve supported pandas nullable-extension and temporal source dtypes
+      through identity-preserving plans.
+- [x] Define and test separate collection policies for `pd.NA`, `NaN`, `NaT`,
+      and SQL `NULL`, including nulls introduced by outer joins.
+- [x] Reject nested DuckDB list, array, struct, map, union, and enum types at
+      source inspection until their pandas representation is stable.
 - [x] Implement displayed-label lookup through internal column IDs.
 - [x] Keep hidden index and ordering columns available through projections.
 - [x] Implement metadata transition functions for every existing plan node.
@@ -372,7 +371,8 @@ Goal: cover common analytical transformations that do not require alignment.
 - [x] `value_counts`, `nunique`, `unique`, `nlargest`, and `nsmallest`.
 - [x] `clip(lower, upper)` for Series and DataFrame via bounded `CASE WHEN` compilation.
 - [x] `replace(to_replace, value)` for Series and DataFrame scalar, list, and dictionary value replacements.
-- [ ] `sample` only after defining deterministic seed and ordering behavior.
+- [x] Implement `sample(n=..., frac=..., random_state=...)` with deterministic
+      seed behavior and explicit ordering metadata transitions.
 - [x] Reject unsupported axes, argument combinations, and reduction dtypes
       before execution for the implemented reduction subset.
 Exit gate:
@@ -419,9 +419,9 @@ alignment.
 - [x] Implement `concat(axis=0)` with schema reconciliation and stable source
       order.
 - [x] Implement `concat(axis=1)` as index-aligned full outer join with column collision suffix management.
-- [ ] Implement arithmetic between frames as index alignment joins only when
+- [x] Implement arithmetic between frames as index alignment joins only when
       both sides have compatible explicit indexes.
-- [ ] Reject ambiguous alignment rather than falling back to position.
+- [x] Reject ambiguous alignment rather than falling back to position.
 Exit gate:
 
 - [x] Differential tests cover duplicate keys, null keys, unmatched rows,
@@ -648,17 +648,20 @@ protocol wherever it maps to DuckPD without eager fallback, hidden collection,
 or invented ordering. Optional protocol operations that conflict with DuckPD's
 product contract must remain explicitly unsupported and fail before execution.
 
-- [ ] Implement a compliant expression object and namespace for `col`, `lit`,
-      aliases, broadcasting, arithmetic, comparisons, boolean logic, casts, and
-      null predicates.
-- [ ] Map supported string, datetime, numeric, aggregate, cumulative, ranking,
-      and rolling expression namespaces onto typed DuckPD expressions.
-- [ ] Implement expression-based `select`, `with_columns`, `filter`, and
-      `aggregate`, including Narwhals output-name and scalar-broadcast rules.
+- [x] Implement a compliant expression object and namespace for `col`, `lit`,
+      aliases, broadcasting, supported arithmetic, comparisons, boolean logic,
+      casts, and null predicates.
+- [x] Map the supported string and datetime expression namespaces onto typed
+      DuckPD expressions.
+- [ ] Map supported numeric, aggregate, cumulative, ranking, and rolling
+      expression namespaces onto typed DuckPD expressions.
+- [x] Implement expression-based `select`, `with_columns`, and `filter`,
+      including Narwhals output-name and scalar-broadcast rules.
+- [x] Implement expression-based aggregate dispatch.
 - [ ] Complete lazy-frame relational methods: `drop_nulls`, `unique`, `top_k`,
       `with_row_index`, supported `unpivot`, and `explode` where DuckDB/DuckPD
       type semantics are defined.
-- [ ] Add compliant lazy group-by objects and aggregation dispatch, preserving
+- [x] Add compliant lazy group-by objects and aggregation dispatch, preserving
       DuckPD's explicit ordering and `drop_null_keys` behavior.
 - [ ] Map supported equi-joins, cross joins, and as-of joins; reject unsupported
       strategies or ambiguous ordering before query execution.
@@ -668,15 +671,16 @@ product contract must remain explicitly unsupported and fail before execution.
       to DuckPD lazy scans, plus lazy `sink_parquet` without pandas conversion.
 - [ ] Define collection backends deliberately: Arrow first, then pandas/Polars
       only when explicitly requested and without changing `to_native()` behavior.
-- [ ] Normalize missing-column, duplicate-column, invalid-operation, and
-      multi-output-expression errors to Narwhals exception classes.
+- [x] Normalize missing-column, duplicate-column, invalid-operation, and
+      multi-output-expression errors to Narwhals exception classes for the
+      implemented adapter surface.
 - [ ] Run Narwhals' backend/compliance tests against the lowest and newest
       supported Narwhals 2.x versions, including empty, null, duplicate, nested
       dtype, and ordering-sensitive cases.
 - [ ] For every adapter operation, assert plan construction performs zero
       executions, `to_native()` returns DuckPD, and collection executes through
       DuckDB exactly once.
-- [ ] Expand the machine-readable matrix with each implemented protocol method
+- [x] Expand the machine-readable matrix with each implemented protocol method
       and keep generated documentation mandatory in CI.
 - [ ] Document intentional exclusions such as eager-only Series/DataFrame
       protocols, arbitrary Python `map_batches`, and operations whose semantics
@@ -733,7 +737,7 @@ Implement in this order. Each increment should be independently testable.
 12. [x] Direct-sink zero-materialization verification, streaming Arrow batches,
        and extended relational `.loc` label-list reindexing.
 13. [x] Column-wise concatenation (`concat(axis=1)`) via index-aligned full
-       outer joins and cross-frame arithmetic on compatible explicit indexes.
+       outer joins. Cross-frame arithmetic remains in Phase 5.
 14. [x] Single-frame analytical cleaning transforms: `clip(lower, upper)` and
        `replace(to_replace, value)` for Series and DataFrame.
 15. [x] Structured profiling (`df.profile()`) exposing DuckDB operator and I/O
@@ -741,9 +745,11 @@ Implement in this order. Each increment should be independently testable.
        benchmarks and execution limits.
 16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
-17. [ ] Narwhals lazy frame compliance plugin prototype and compatibility
-       generation are implemented; clean wheel installs pass locally on Linux
-       with Python 3.11–3.14, with the CI OS matrix confirmation pending.
+17. [ ] Finish Narwhals compliance and cross-platform release verification.
+    - [x] Prototype wrapping, generated compatibility documentation, expression
+          projection/filtering, and string/datetime expression namespaces.
+    - [x] Clean wheel installs pass locally on Linux with Python 3.11–3.14.
+    - [ ] Confirm the clean-install matrix across CI operating systems.
 
 ### Active workstreams and immediate next priorities
 
@@ -756,13 +762,15 @@ graph TD
     A --> F[Stream 5: Release Readiness & Narwhals Integration]
 ```
 
-1. **Stream 1: Cross-Frame Alignment & `concat(axis=1)` (Phase 5)**
-   - Implement `duckpd.concat(objs, axis=1)` via index-aligned full outer joins with column collision suffix management (`_x`, `_y` or caller-provided).
-   - Implement cross-frame arithmetic (`df1 + df2`, `s1 + s2`) aligning lazily on explicit compatible indexes (`IndexSpec`).
-2. **Stream 2: High-Value Analytical Transformations (Phase 3)**
-   - `clip(lower, upper)` for Series and DataFrame via bounded `CASE WHEN` expression compilation.
-   - `replace(to_replace, value)` for scalar, list, and dictionary value replacements.
-   - [x] `sample(n=..., frac=..., random_state=...)` row sampling with deterministic seed behavior.
+1. **Stream 1: Cross-Frame Alignment (Phase 5)**
+   - [x] Implement `duckpd.concat(objs, axis=1)` via index-aligned full outer
+     joins with column collision handling.
+   - [x] Implement cross-frame arithmetic (`df1 + df2`, `s1 + s2`) aligning
+     lazily on explicit compatible indexes (`IndexSpec`).
+2. **Stream 2: High-Value Analytical Transformations (Phase 3) [Completed]**
+   - [x] `clip(lower, upper)` for Series and DataFrame.
+   - [x] `replace(to_replace, value)` for Series and DataFrame.
+   - [x] `sample(n=..., frac=..., random_state=...)` with deterministic seeds.
 3. **Stream 3: Observability & Memory Profiling (Phase 8) [Completed]**
    - `df.profile()` exposes DuckDB structured JSON profiling (operator timings, spill, I/O).
    - Benchmark and execution-limit tests capture isolated RSS and verify DuckDB spill bytes.
@@ -771,8 +779,11 @@ graph TD
    - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
    - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.
 5. **Stream 5: Ecosystem & Release Readiness (Phase 12)**
-   - Prototype Narwhals compliance layer so `nw.from_native()` accepts DuckPD DataFrames without eager collection.
-   - Run clean wheel build & install smoke tests across Python 3.11–3.14 matrix for v0.1.0 release tagging.
+   - [x] Prototype Narwhals wrapping, core expressions, expression-based frame
+     transforms, and string/datetime expression namespaces without collection.
+   - [x] Add aggregate expressions and lazy-frame aggregate dispatch.
+   - [ ] Run clean wheel build/install smoke tests across the CI OS/Python
+     matrix for v0.1.0 release tagging.
 
 Do not begin broad accessor coverage, mutable assignment, or remote split
 planning before increment 6 proves metadata transitions are reliable.

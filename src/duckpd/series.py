@@ -890,6 +890,19 @@ class Series:
         )
 
     def _binary(self, other: object, operator: BinaryOperator) -> Series:
+        if (
+            isinstance(other, Series)
+            and other._plan is not self._plan
+            and operator
+            in {
+                BinaryOperator.ADD,
+                BinaryOperator.SUBTRACT,
+                BinaryOperator.MULTIPLY,
+                BinaryOperator.TRUE_DIVIDE,
+                BinaryOperator.MODULO,
+            }
+        ):
+            return self._aligned_binary(other, operator)
         right = self._coerce_other(other)
         return Series(
             self._session,
@@ -899,12 +912,54 @@ class Series:
         )
 
     def _rbinary(self, other: object, operator: BinaryOperator) -> Series:
+        if isinstance(other, Series) and other._plan is not self._plan:
+            return other._aligned_binary(self, operator)
         left = self._coerce_other(other)
         return Series(
             self._session,
             self._plan,
             BinaryExpression(left, operator, self._expression),
             self.name,
+        )
+
+    def _aligned_binary(
+        self,
+        other: Series,
+        operator: BinaryOperator,
+    ) -> Series:
+        from duckpd._merging import plan_merge, validate_explicit_index_alignment
+
+        left = self.to_frame(name="__duckpd_align_left__")
+        right = other.to_frame(name="__duckpd_align_right__")
+        validate_explicit_index_alignment(left, right)
+        left_column = left._plan.metadata.visible_columns[0]
+        right_column = right._plan.metadata.visible_columns[0]
+        if not is_numeric_type(left_column.duckdb_type) or not is_numeric_type(
+            right_column.duckdb_type
+        ):
+            raise UnsupportedOperationError(
+                "Cross-frame Series arithmetic currently supports only numeric data"
+            )
+        plan = plan_merge(
+            left,
+            right,
+            how="outer",
+            left_index=True,
+            right_index=True,
+            sort=True,
+            suffixes=("", ""),
+            validate="1:1",
+        )
+        name = self.name if self.name == other.name else None
+        return Series(
+            self._session,
+            plan,
+            BinaryExpression(
+                ColumnRef(left_column.id),
+                operator,
+                ColumnRef(right_column.id),
+            ),
+            name,
         )
 
     def _unary(self, operator: UnaryOperator) -> Series:

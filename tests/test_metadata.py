@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -23,6 +24,7 @@ from duckpd._logical import (
 )
 from duckpd._metadata import validate_metadata
 from duckpd._reductions import aggregate_plan
+from duckpd._typing import binary_numeric_type
 
 
 def test_source_index_and_order_are_lazy() -> None:
@@ -170,6 +172,82 @@ def test_expression_metadata_tracks_scalar_and_length_semantics() -> None:
     assert result_metadata.is_elementwise
     assert result_metadata.preserves_length
     assert not result_metadata.is_scalar_like
+
+
+def test_arithmetic_metadata_uses_duckdb_numeric_promotion() -> None:
+    source = pd.DataFrame(
+        {
+            "floating": pd.Series([1.0, 2.0], dtype="float32"),
+            "decimal": [Decimal("1.20"), Decimal("2.30")],
+        }
+    )
+    frame = duckpd.from_pandas(source)
+
+    result = frame.assign(
+        float_sum=frame["floating"] + frame["floating"],
+        decimal_sum=frame["decimal"] + frame["decimal"],
+        decimal_product=frame["decimal"] * frame["decimal"],
+    )
+
+    dtypes = {
+        column.label: column.duckdb_type
+        for column in result._plan.metadata.visible_columns
+    }
+    assert dtypes["float_sum"] == "FLOAT"
+    assert dtypes["decimal_sum"] == "DECIMAL(4,2)"
+    assert dtypes["decimal_product"] == "DECIMAL(6,4)"
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "operator", "expected"),
+    [
+        ("FLOAT", "FLOAT", "add", "FLOAT"),
+        ("DOUBLE", "FLOAT", "multiply", "DOUBLE"),
+        ("DECIMAL(10,2)", "DECIMAL(8,1)", "add", "DECIMAL(11,2)"),
+        ("DECIMAL(10,2)", "DECIMAL(8,1)", "multiply", "DECIMAL(18,3)"),
+        ("DECIMAL(10,2)", "DECIMAL(8,1)", "modulo", "DECIMAL(10,2)"),
+        ("DECIMAL(10,2)", "INTEGER", "add", "DECIMAL(13,2)"),
+        ("DECIMAL(10,2)", "INTEGER", "multiply", "DECIMAL(18,2)"),
+        ("DECIMAL(10,2)", "INTEGER", "true_divide", "DOUBLE"),
+        ("DECIMAL(18,18)", "DECIMAL(18,18)", "multiply", "DECIMAL(36,36)"),
+        ("DECIMAL(30,20)", "DECIMAL(30,20)", "multiply", "UNKNOWN"),
+        ("INTEGER", "INTEGER", "add", "INTEGER"),
+        ("TINYINT", "SMALLINT", "add", "SMALLINT"),
+        ("BIGINT", "UBIGINT", "add", "UNKNOWN"),
+        ("BOOLEAN", "BOOLEAN", "add", "UNKNOWN"),
+        ("DECIMAL(10,2)", "VARCHAR", "add", "UNKNOWN"),
+    ],
+)
+def test_binary_numeric_type_matches_duckdb_promotion(
+    left: str,
+    right: str,
+    operator: str,
+    expected: str,
+) -> None:
+    assert binary_numeric_type(left, right, operator) == expected
+
+
+def test_decimal_promotion_never_emits_invalid_precision_or_scale() -> None:
+    decimal_types = [
+        f"DECIMAL({precision},{scale})"
+        for precision in (1, 9, 18, 19, 30, 38)
+        for scale in {0, precision // 2, precision}
+    ]
+
+    for left in decimal_types:
+        for right in decimal_types:
+            for operator in ("add", "subtract", "multiply", "modulo"):
+                result = binary_numeric_type(left, right, operator)
+                if not result.startswith("DECIMAL("):
+                    assert result == "UNKNOWN"
+                    continue
+                precision, scale = (
+                    int(part)
+                    for part in result.removeprefix("DECIMAL(")
+                    .removesuffix(")")
+                    .split(",")
+                )
+                assert 0 <= scale <= precision <= 38
 
 
 def test_global_aggregate_clears_index_and_order_metadata() -> None:

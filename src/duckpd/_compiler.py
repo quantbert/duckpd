@@ -84,10 +84,18 @@ class DuckDBCompiler:
         if len(labels) != len(set(labels)):
             msg = "DuckPD does not yet support duplicate column labels"
             raise ValueError(msg)
-        return tuple(
-            Column(ColumnId.create(), label, str(duckdb_type))
-            for label, duckdb_type in zip(labels, relation.types, strict=True)
-        )
+        columns: list[Column] = []
+        for label, duckdb_type in zip(labels, relation.types, strict=True):
+            dtype = str(duckdb_type)
+            if dtype.endswith("[]") or dtype.startswith(
+                ("STRUCT(", "MAP(", "UNION(", "ENUM(")
+            ):
+                raise UnsupportedOperationError(
+                    f"DuckPD does not yet define pandas collection semantics for "
+                    f"nested DuckDB type {dtype} in column {label!r}"
+                )
+            columns.append(Column(ColumnId.create(), label, dtype))
+        return tuple(columns)
 
     def project_visible(
         self, compiled: CompiledFrame, plan: LogicalPlan

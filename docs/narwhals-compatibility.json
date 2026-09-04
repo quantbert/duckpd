@@ -13,6 +13,51 @@
       "notes": "Returns a Narwhals LazyFrame without execution."
     },
     {
+      "method": "nw.col / nw.lit",
+      "arguments": "column names or scalar literals; optional literal dtype",
+      "dtypes": "DuckPD scalar types",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Builds DuckPD expressions supporting aliases, arithmetic, comparisons, boolean composition, casts, and null predicates."
+    },
+    {
+      "method": "Expr.str",
+      "arguments": "to_uppercase, to_lowercase, strip_chars, len_chars, starts_with, ends_with, contains, replace(n=1), replace_all",
+      "dtypes": "VARCHAR",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Literal and regex matching/replacement compile to DuckDB scalar functions; unsupported replacement counts fail before execution."
+    },
+    {
+      "method": "Expr.dt",
+      "arguments": "year, month, day, hour, minute, second, date, to_string",
+      "dtypes": "DATE, TIME, TIMESTAMP variants as applicable",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Temporal fields, DATE casts, and formatting compile to DuckDB scalar functions."
+    },
+    {
+      "method": "Expr aggregation",
+      "arguments": "sum, min, max, mean, count, len, median, std(ddof=0|1), var(ddof=0|1)",
+      "dtypes": "numeric and boolean as supported by DuckPD reductions",
+      "ordering": "reduces to one row",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Builds DuckPD AggregateExpression nodes; unsupported dtypes and ddof values fail before execution."
+    },
+    {
+      "method": "LazyFrame.group_by",
+      "arguments": "string or expression keys, drop_null_keys; agg with supported aggregate expressions",
+      "dtypes": "DuckDB-groupable keys and supported aggregate inputs",
+      "ordering": "first-seen group order when source identity is available",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Builds one lazy DuckPD grouped AggregatePlan without pandas collection."
+    },
+    {
       "method": "LazyFrame.to_native",
       "arguments": "none",
       "dtypes": "all",
@@ -23,12 +68,30 @@
     },
     {
       "method": "LazyFrame.select",
-      "arguments": "column-name strings",
-      "dtypes": "all",
+      "arguments": "column names and supported expressions",
+      "dtypes": "DuckPD scalar types",
       "ordering": "preserved",
       "since": "0.0.7",
-      "status": "subset",
-      "notes": "Expression-based selection is not implemented by the prototype."
+      "status": "supported",
+      "notes": "Expression projection and scalar broadcasting build a lazy DuckPD ProjectPlan."
+    },
+    {
+      "method": "LazyFrame.with_columns",
+      "arguments": "supported expressions",
+      "dtypes": "DuckPD scalar types",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Adds or replaces expression outputs lazily with Narwhals alias rules."
+    },
+    {
+      "method": "LazyFrame.filter",
+      "arguments": "supported boolean expressions and constraints",
+      "dtypes": "boolean predicates",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Combines predicates through all_horizontal and builds a lazy DuckPD FilterPlan."
     },
     {
       "method": "LazyFrame.head",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -30,6 +32,77 @@ def test_from_pandas_preserves_nullable_unsigned_integers() -> None:
     result = duckpd.from_pandas(source).collect()
 
     assert_frame_equal(result, source)
+
+
+def test_from_pandas_preserves_supported_nullable_and_temporal_dtypes() -> None:
+    source = pd.DataFrame(
+        {
+            "integer": pd.Series([1, None], dtype="Int16"),
+            "unsigned": pd.Series([1, None], dtype="UInt32"),
+            "boolean": pd.Series([True, None], dtype="boolean"),
+            "string": pd.Series(["value", None], dtype="string"),
+            "timestamp": pd.Series(
+                [pd.Timestamp("2025-01-01"), pd.NaT], dtype="datetime64[ns]"
+            ),
+            "zoned": pd.Series([pd.Timestamp("2025-01-01", tz="UTC"), pd.NaT]),
+            "duration": pd.Series([pd.Timedelta(days=1), pd.NaT]),
+            "date": pd.Series([date(2025, 1, 1), None], dtype=object),
+            "decimal": pd.Series([Decimal("1.20"), None], dtype=object),
+            "binary": pd.Series([b"value", None], dtype=object),
+        }
+    )
+
+    result = duckpd.from_pandas(source).collect()
+
+    assert_frame_equal(result, source)
+
+
+def test_nested_source_types_fail_before_execution() -> None:
+    session = duckpd.connect()
+
+    with pytest.raises(
+        UnsupportedOperationError,
+        match=r"nested DuckDB type.*INTEGER\[\]",
+    ):
+        session.from_pandas(pd.DataFrame({"nested": [[1, 2], None]}))
+
+    assert session.execution_count == 0
+
+
+def test_sql_null_collection_policy_is_explicit_by_dtype_family() -> None:
+    result = (
+        duckpd.connect()
+        .sql(
+            """
+        SELECT
+            NULL::BOOLEAN AS boolean_value,
+            NULL::BIGINT AS integer_value,
+            NULL::DOUBLE AS float_value,
+            NULL::VARCHAR AS string_value,
+            NULL::TIMESTAMP AS timestamp_value,
+            NULL::TIMESTAMPTZ AS zoned_value,
+            NULL::INTERVAL AS duration_value,
+            NULL::BLOB AS binary_value,
+            NULL::DATE AS date_value,
+            NULL::DECIMAL(10, 2) AS decimal_value
+        """
+        )
+        .collect()
+    )
+
+    assert result.dtypes.astype(str).to_dict() == {
+        "boolean_value": "boolean",
+        "integer_value": "float64",
+        "float_value": "float64",
+        "string_value": "object",
+        "timestamp_value": "datetime64[us]",
+        "zoned_value": "datetime64[us, Etc/UTC]",
+        "duration_value": "timedelta64[us]",
+        "binary_value": "object",
+        "date_value": "object",
+        "decimal_value": "object",
+    }
+    assert result.isna().all().all()
 
 
 def test_repr_does_not_execute() -> None:

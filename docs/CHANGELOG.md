@@ -17,6 +17,7 @@ the [release policy](RELEASES.md).
 - A constrained-memory smoke test exercises sorting, aggregation, and Parquet output under strict DuckDB resource settings; it does not measure RSS or prove that spill occurred.
 - Hypothesis differential tests cover selected nullable-integer and float round trips, reductions, string accessors, missing-value transformations, and concatenation against pandas 3.0.
 - Column-wise concatenation (`duckpd.concat(..., axis=1)` or `axis='columns'`): optimizes same-lineage Series and DataFrames into a single lazy projection with zero joins, aligns multi-frame inputs via explicit index outer/inner joins, supports `ignore_index=True` renumbering, and rejects colliding column labels when `ignore_index=False`.
+- Explicit-index cross-frame arithmetic for DataFrames and Series: numeric operators align lazily through one-to-one outer joins, DataFrame columns use pandas-style union alignment, and absent, incompatible, or duplicate index contracts fail without Cartesian expansion.
 - Numerical boundary trimming (`Series.clip` and `DataFrame.clip`): compiles thresholds lazily to bounded `CASE WHEN` SQL expressions supporting scalar, Series, and per-column dictionary bounds with NULL preservation.
 - Value replacement (`Series.replace` and `DataFrame.replace`): compiles replacements lazily via typed `CASE WHEN` branches supporting scalars, lists, mappings, and column-specific dictionaries with type-compatibility filtering and NULL detection.
 - Series renaming (`Series.rename`): alters Series name metadata lazily without execution.
@@ -25,13 +26,14 @@ the [release policy](RELEASES.md).
 - Persistent table sinks (`DataFrame.save_as_table`): persists visible columns to DuckDB tables with `"error"`, `"overwrite"`, and schema-validated `"append"` modes, wrapped in transactional rollback to ensure table integrity on failure.
 - Local Parquet atomic commit (`DataFrame.commit` and `CommitReport`): canonicalizes local source paths at frame creation, streams lazy modifications through a sibling staging file, preserves hidden index columns and Arrow schema/pandas metadata, validates DuckDB logical types and row-count preservation, supports optional backup retention, and performs atomic replacement. POSIX mode and available extended attributes are copied; Windows replacement metadata is preserved by `ReplaceFileW`. Owner/group, Parquet encodings, and physical layout may change. The initial implementation is single-writer and does not lock unrelated processes.
 - Cross-platform process RSS sampling (`get_peak_rss_bytes` in `benchmark.metrics`): unifies Linux `/proc/self/status` VmHWM, macOS `getrusage`, and Windows `ctypes` peak working set sampling without unconditional `resource` imports.
-- Experimental Narwhals plugin: `nw.from_native()` wraps DuckPD DataFrames as lazy frames; column selection, head, drop, rename, sort, schema inspection, Arrow collection, and `to_native()` preserve the documented DuckPD execution boundary.
+- Experimental Narwhals plugin: `nw.from_native()` wraps DuckPD DataFrames as lazy frames; `nw.col`/`nw.lit` expressions support aliases, scalar broadcasting, arithmetic, comparisons, boolean composition, casts, null predicates, documented string/datetime accessors, global reductions, and lazy grouped aggregation. Supported transformations build DuckPD plans without collection.
 - Release artifact verification: generated Narwhals compatibility documentation, wheel/sdist content checks, and clean-environment wheel installation smoke tests are configured for the CI Python 3.11–3.14 matrix; local Linux verification passes on all four Python versions.
 
 ### Changed
 
 - `duckpd.concat` now uses defined numeric reconciliation, preserves nullable integer values through union collection, rejects decimal/float precision loss, and rejects incompatible heterogeneous columns instead of coercing them to strings.
 - Pandas collection preserves exact decimal, binary, and date values rather than accepting DuckDB's lossy/default pandas conversions.
+- Pandas collection now preserves nullable integer, boolean, string, datetime/time-zone, and duration source dtypes through identity-preserving plans; SQL null output policy is explicit, outer joins safely promote plain integer/boolean payloads, and nested DuckDB types are rejected before execution.
 - Row-wise concat now preserves input sequence and ordered-input row identity; persistence retains index and order metadata. Joins explicitly clear total ordering guarantees so positional and window operations fail early until an explicit stable sort is applied.
 
 ## Untagged development milestones

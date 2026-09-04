@@ -9,16 +9,63 @@ from typing import TYPE_CHECKING, Literal
 from duckpd._logical import (
     Column,
     ColumnId,
+    IndexUniqueness,
     JoinPlan,
     JoinType,
 )
 from duckpd._metadata import after_join, find_column
+from duckpd.errors import AlignmentError
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
 
 
 MergeHow = Literal["left", "right", "outer", "inner", "cross"]
+
+
+def validate_explicit_index_alignment(
+    left_frame: DataFrame,
+    right_frame: DataFrame,
+) -> None:
+    """Reject cross-frame alignment that lacks identical explicit index metadata."""
+    if left_frame._session is not right_frame._session:
+        raise AlignmentError("Cannot align frames from different sessions")
+
+    left_ids = left_frame._plan.metadata.index.columns
+    right_ids = right_frame._plan.metadata.index.columns
+    if not left_ids or not right_ids:
+        raise AlignmentError(
+            "Cross-frame arithmetic requires explicit index alignment on both "
+            "operands; use set_index() first"
+        )
+    if (
+        left_frame._plan.metadata.index.uniqueness is IndexUniqueness.NON_UNIQUE
+        or right_frame._plan.metadata.index.uniqueness is IndexUniqueness.NON_UNIQUE
+    ):
+        raise AlignmentError("Cross-frame arithmetic requires unique explicit indexes")
+    if len(left_ids) != len(right_ids):
+        raise AlignmentError(
+            "Cross-frame arithmetic requires indexes with the same number of levels"
+        )
+
+    left_columns = tuple(left_frame._column_by_id(column_id) for column_id in left_ids)
+    right_columns = tuple(
+        right_frame._column_by_id(column_id) for column_id in right_ids
+    )
+    left_names = tuple(column.label for column in left_columns)
+    right_names = tuple(column.label for column in right_columns)
+    if left_names != right_names:
+        raise AlignmentError(
+            "Cross-frame arithmetic requires matching index names; "
+            f"found {left_names!r} and {right_names!r}"
+        )
+    left_types = tuple(column.duckdb_type for column in left_columns)
+    right_types = tuple(column.duckdb_type for column in right_columns)
+    if left_types != right_types:
+        raise AlignmentError(
+            "Cross-frame arithmetic requires matching index dtypes; "
+            f"found {left_types!r} and {right_types!r}"
+        )
 
 
 def plan_merge(

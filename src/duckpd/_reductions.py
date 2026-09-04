@@ -22,6 +22,7 @@ from duckpd._logical import (
     WindowExpression,
 )
 from duckpd._metadata import after_aggregate
+from duckpd._typing import binary_numeric_type
 from duckpd.errors import UnsupportedOperationError
 
 _NUMERIC_TYPES = frozenset(
@@ -110,9 +111,7 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         return "BOOLEAN"
     left = expression_type(plan, expression.left)
     right = expression_type(plan, expression.right)
-    if is_numeric_type(left) and is_numeric_type(right):
-        return "DOUBLE" if "DOUBLE" in {left, right} else "BIGINT"
-    return "UNKNOWN"
+    return binary_numeric_type(left, right, expression.operator.value)
 
 
 def validate_axis(axis: int | str | None, *, series: bool) -> None:

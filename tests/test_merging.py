@@ -66,6 +66,24 @@ def test_merge_how_matches_pandas(
         assert session.execution_count == 1
 
 
+def test_outer_merge_promotes_plain_integer_and_boolean_nulls_like_pandas() -> None:
+    left = pd.DataFrame({"key": [1, 2], "count": [10, 20], "flag": [True, False]})
+    right = pd.DataFrame({"key": [2, 3], "value": [1, 2]})
+    session = duckpd.connect()
+
+    result = session.from_pandas(left).merge(
+        session.from_pandas(right),
+        on="key",
+        how="outer",
+        sort=True,
+    )
+
+    assert session.execution_count == 0
+    assert_frame_equal(
+        result.collect(), left.merge(right, on="key", how="outer", sort=True)
+    )
+
+
 @pytest.mark.parametrize("sort", [False, True])
 def test_merge_does_not_claim_total_order_with_duplicate_keys(sort: bool) -> None:
     left = pd.DataFrame({"key": [2, 1, 1], "left_value": [20, 10, 11]})

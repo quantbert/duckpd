@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import pyarrow as pa
 import pytest
-from pandas.testing import assert_frame_equal
+from pandas.testing import assert_frame_equal, assert_series_equal
 
 import duckpd
-from duckpd.errors import AlignmentError
+from duckpd.errors import AlignmentError, MergeError
 
 InvalidOperation = Callable[[duckpd.DataFrame], object]
 
@@ -241,6 +242,108 @@ def test_cross_frame_series_requires_alignment() -> None:
         _ = left["value"] + right["value"]
     with pytest.raises(AlignmentError, match="explicit index alignment"):
         _ = left[right["value"] > 0]
+
+
+def test_cross_frame_series_arithmetic_aligns_explicit_indexes_lazily() -> None:
+    left_source = pd.DataFrame({"idx": [1, 2], "value": [10, 20]})
+    right_source = pd.DataFrame({"idx": [2, 3], "value": [3, 4]})
+    with duckpd.connect() as session:
+        left = session.from_pandas(left_source).set_index("idx")
+        right = session.from_pandas(right_source).set_index("idx")
+
+        result = left["value"] + right["value"]
+
+        assert session.execution_count == 0
+        assert_series_equal(
+            result.collect(),
+            left_source.set_index("idx")["value"]
+            + right_source.set_index("idx")["value"],
+        )
+        assert session.execution_count == 3
+
+
+def test_cross_frame_dataframe_arithmetic_aligns_rows_and_columns() -> None:
+    left_source = pd.DataFrame({"idx": [1, 2], "a": [1.0, 2.0], "b": [3.0, 4.0]})
+    right_source = pd.DataFrame({"idx": [2, 3], "b": [10.0, 20.0], "c": [30.0, 40.0]})
+    with duckpd.connect() as session:
+        left = session.from_pandas(left_source).set_index("idx")
+        right = session.from_pandas(right_source).set_index("idx")
+
+        result = left + right
+
+        assert session.execution_count == 0
+        assert_frame_equal(
+            result.collect(),
+            left_source.set_index("idx") + right_source.set_index("idx"),
+        )
+        assert session.execution_count == 3
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "__add__",
+        "__radd__",
+        "__sub__",
+        "__rsub__",
+        "__mul__",
+        "__rmul__",
+        "__truediv__",
+        "__rtruediv__",
+        "__mod__",
+        "__rmod__",
+    ],
+)
+def test_dataframe_scalar_arithmetic_matches_pandas(method: str) -> None:
+    source = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    frame = duckpd.from_pandas(source)
+    result = cast("duckpd.DataFrame", getattr(frame, method)(2))
+    expected = cast("pd.DataFrame", getattr(source, method)(2))
+
+    assert_frame_equal(result.collect(), expected)
+
+
+def test_cross_frame_arithmetic_rejects_incompatible_indexes_before_execution() -> None:
+    with duckpd.connect() as session:
+        left = session.from_pandas(
+            pd.DataFrame({"left_idx": [1], "value": [1]})
+        ).set_index("left_idx")
+        right = session.from_pandas(
+            pd.DataFrame({"right_idx": [1], "value": [2]})
+        ).set_index("right_idx")
+
+        with pytest.raises(AlignmentError, match="matching index names"):
+            _ = left + right
+        with pytest.raises(AlignmentError, match="matching index names"):
+            _ = left["value"] + right["value"]
+        assert session.execution_count == 0
+
+
+@pytest.mark.parametrize(
+    ("right_index", "pandas_result_length"),
+    [([1, 1], 2), ([1, 1, 1], 6)],
+)
+def test_cross_frame_arithmetic_rejects_ambiguous_duplicate_indexes(
+    right_index: list[int],
+    pandas_result_length: int,
+) -> None:
+    left_source = pd.DataFrame({"idx": [1, 1], "value": [1, 2]})
+    right_source = pd.DataFrame(
+        {"idx": right_index, "value": list(range(10, 10 + len(right_index)))}
+    )
+    pandas_result = (
+        left_source.set_index("idx")["value"] + right_source.set_index("idx")["value"]
+    )
+    assert len(pandas_result) == pandas_result_length
+
+    with duckpd.connect() as session:
+        left = session.from_pandas(left_source).set_index("idx")
+        right = session.from_pandas(right_source).set_index("idx")
+        result = left["value"] + right["value"]
+
+        assert session.execution_count == 0
+        with pytest.raises(MergeError, match="not a one-to-one merge"):
+            result.collect()
 
 
 @pytest.mark.parametrize(

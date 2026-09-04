@@ -63,6 +63,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | **`head(count=5)`** | Eager in-memory slice of already-materialized rows. | **Eager execution boundary with bounded materialization**: compiles `LIMIT count` and calls `collect()`, returning at most `count` rows as an eager pandas DataFrame preview. | Bounded output prevents memory exhaustion during interactive notebook inspection. *(Note: plans containing upstream blocking operations such as `sort_values` or `groupby` may still scan upstream rows within DuckDB before truncating).* Use `df.limit(count)` for lazy truncation. |
 | **`repr(df)` / Display** | Eagerly scans and formats data rows into a text table. | **Plan-focused summary**: outputs visible column labels and the logical plan class name (e.g. `DuckPD DataFrame\nColumns: ['a', 'b']\nPlan: ScanPlan`). | Inspecting a lazy frame must never trigger an accidental multi-gigabyte table scan or network fetch. Use `df.explain()` for complete plan trees. |
 | **`concat(objs, axis=1)`** | Aligns on implicit `RangeIndex(0, n)` if unindexed. Permits duplicate column labels in output. | **Requires an explicit index** for multi-frame joins (`AlignmentError` if absent). Same-plan Series optimize into a **single projection** (no join). Rejects duplicate column labels when `ignore_index=False`. | Relational tables have no stable natural row numbers across files. Implicit positional alignment across separate frames is rejected to prevent silent data corruption. |
+| **Cross-frame arithmetic** (`df1 + df2`, `s1 + s2`, and analogous numeric operators) | Aligns both axes, including implicit and duplicate indexes. | **Requires matching, unique explicit indexes** on separate plans and rejects different sessions, index level counts, names, or DuckDB key types with `AlignmentError`. Unknown uniqueness is validated lazily as one-to-one before result production; duplicate indexes raise `MergeError` rather than Cartesian-expanding. DataFrame columns use pandas-style sorted union alignment. | Positional and duplicate-key alignment across lazy relations is ambiguous without materializing index sequences. Explicit unique-index contracts prevent silent row multiplication or mismatches. |
 | **`to_csv(path, ...)`** | Supports `path_or_buf=None` to return a CSV string in memory; accepts many formatting options. | **Direct file export only**: requires a destination `path`, executes via DuckDB `COPY`, and never constructs a pandas DataFrame. Does not support returning a CSV string. | Avoids materializing entire datasets in Python heap memory. For small string serialization, use `df.collect().to_csv()`. |
 | **`df.loc[key]`** | Returns a `Series` if key matches 1 row; `DataFrame` if duplicate keys exist. | **Always returns a lazy `DataFrame`**. Ordered label-list reindexing (`df.loc[[...]]`) requires guaranteed input order. | Keeps plan return types deterministic before execution. |
 | **`df.iloc[start:stop]`** | Slices by physical memory row offset on any frame. | **Requires a guaranteed `OrderSpec`** (`UnorderedOperationError` if unordered). External scans require `order_by=`. | DuckDB relations are unordered multiset tables; positional slicing is non-deterministic without an explicit sort key. |
@@ -70,6 +71,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | **`merge()` & `join()` Ordering** | Preserves left/right order arbitrarily; `sort=True` produces an ordered frame. | **Explicitly clears total ordering guarantees** (`OrderSpec()`). | SQL joins lack deterministic tie-breakers for duplicate join keys. Downstream order-dependent operations must explicitly sort. |
 | **`df.replace()` / `s.replace()`** | Allows global replacement dictionaries with arbitrary heterogeneous types across columns. | Validates **type compatibility per column** (`_is_replace_compatible`). Incompatible types (e.g. strings on numeric columns) are skipped. | DuckDB SQL requires uniform return types across branches in a `CASE WHEN` expression; avoids runtime binder type mismatches. |
 | **Null Joins** | In SQL `NULL = NULL` is unknown (does not match). Pandas matches null with null. | **Matches pandas**: joins compile with `IS NOT DISTINCT FROM` so null keys join with null keys as in pandas. | Preserves pandas relational semantics rather than SQL ternary logic. |
+| **Collection dtypes and nulls** | Dtypes originate from in-memory arrays and pandas extension metadata. | Preserves supported pandas nullable integer, boolean, string, datetime/time-zone, and duration dtypes through identity-preserving plans. SQL nullable integers collect as `float64`; nullable SQL booleans use pandas `boolean`; decimal, binary, date, and string values use exact Python-object representations. Nested DuckDB types fail at source inspection. | Makes `pd.NA`, `NaN`, `NaT`, and SQL `NULL` conversions explicit instead of relying on DuckDB conversion defaults. |
 
 ---
 
@@ -224,7 +226,17 @@ For example, every operation below is lazy:
 import narwhals as nw
 
 lazy = nw.from_native(duckpd_frame)
-result = lazy.select("order_id", "amount").sort("amount").head(100)
+result = (
+    lazy.with_columns(
+        (nw.col("amount") * 2).alias("gross"),
+        nw.col("customer").str.strip_chars().str.to_uppercase().alias("customer"),
+        nw.col("created_at").dt.year().alias("year"),
+    )
+    .filter((nw.col("gross") > nw.lit(100)) & nw.col("customer").str.starts_with("A"))
+    .select("order_id", "customer", "year", "gross")
+    .sort("gross")
+    .head(100)
+)
 native = result.to_native()  # duckpd.DataFrame; still not executed
 ```
 
@@ -232,8 +244,10 @@ Narwhals is an interoperability layer, not a new execution engine. It does not
 increase pandas compatibility, make unsupported DuckPD operations available,
 or guarantee that every Narwhals consumer works with the current prototype.
 The prototype intentionally supports only operations marked supported in the
-generated table. Expression-based transformations, grouping, and joins are not
-yet part of the contract.
+generated table. Its expression subset covers aliases, scalar broadcasting,
+arithmetic, comparisons, boolean composition, casts, null predicates, supported
+global and grouped aggregations, and the documented string and datetime accessor
+methods. Joins and other accessor methods are not yet part of the contract.
 
 
 ---

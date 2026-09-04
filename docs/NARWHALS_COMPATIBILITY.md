@@ -7,8 +7,15 @@ Backend: `duckpd` · Release: `0.0.7`
 | Method | Arguments | Dtypes | Ordering | Since | Status | Notes |
 |---|---|---|---|---|---|---|
 | nw.from_native | duckpd.DataFrame | all DuckPD columns | preserved | 0.0.7 | supported | Returns a Narwhals LazyFrame without execution. |
+| nw.col / nw.lit | column names or scalar literals; optional literal dtype | DuckPD scalar types | preserved | 0.0.7 | supported | Builds DuckPD expressions supporting aliases, arithmetic, comparisons, boolean composition, casts, and null predicates. |
+| Expr.str | to_uppercase, to_lowercase, strip_chars, len_chars, starts_with, ends_with, contains, replace(n=1), replace_all | VARCHAR | preserved | 0.0.7 | subset | Literal and regex matching/replacement compile to DuckDB scalar functions; unsupported replacement counts fail before execution. |
+| Expr.dt | year, month, day, hour, minute, second, date, to_string | DATE, TIME, TIMESTAMP variants as applicable | preserved | 0.0.7 | subset | Temporal fields, DATE casts, and formatting compile to DuckDB scalar functions. |
+| Expr aggregation | sum, min, max, mean, count, len, median, std(ddof=0\|1), var(ddof=0\|1) | numeric and boolean as supported by DuckPD reductions | reduces to one row | 0.0.7 | subset | Builds DuckPD AggregateExpression nodes; unsupported dtypes and ddof values fail before execution. |
+| LazyFrame.group_by | string or expression keys, drop_null_keys; agg with supported aggregate expressions | DuckDB-groupable keys and supported aggregate inputs | first-seen group order when source identity is available | 0.0.7 | subset | Builds one lazy DuckPD grouped AggregatePlan without pandas collection. |
 | LazyFrame.to_native | none | all | preserved | 0.0.7 | supported | Returns the underlying duckpd.DataFrame. |
-| LazyFrame.select | column-name strings | all | preserved | 0.0.7 | subset | Expression-based selection is not implemented by the prototype. |
+| LazyFrame.select | column names and supported expressions | DuckPD scalar types | preserved | 0.0.7 | supported | Expression projection and scalar broadcasting build a lazy DuckPD ProjectPlan. |
+| LazyFrame.with_columns | supported expressions | DuckPD scalar types | preserved | 0.0.7 | supported | Adds or replaces expression outputs lazily with Narwhals alias rules. |
+| LazyFrame.filter | supported boolean expressions and constraints | boolean predicates | preserved | 0.0.7 | supported | Combines predicates through all_horizontal and builds a lazy DuckPD FilterPlan. |
 | LazyFrame.head | n | all | requires source ordering for deterministic row identity | 0.0.7 | supported | Builds a lazy DuckPD LimitPlan. |
 | LazyFrame.drop | columns, strict | all | preserved | 0.0.7 | supported | Strict mode raises Narwhals ColumnNotFoundError; non-strict mode ignores absent columns. |
 | LazyFrame.rename | mapping | all | preserved | 0.0.7 | supported | Uses DuckPD metadata-only rename semantics and ignores absent mapping keys. |

@@ -267,6 +267,36 @@ class DataFrame:
         """Execute the plan with DuckDB profiling enabled and return metrics."""
         return self._session._executor.profile(self._plan)
 
+    def __add__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.ADD)
+
+    def __radd__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.ADD, reverse=True)
+
+    def __sub__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.SUBTRACT)
+
+    def __rsub__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.SUBTRACT, reverse=True)
+
+    def __mul__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.MULTIPLY)
+
+    def __rmul__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.MULTIPLY, reverse=True)
+
+    def __truediv__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.TRUE_DIVIDE)
+
+    def __rtruediv__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.TRUE_DIVIDE, reverse=True)
+
+    def __mod__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.MODULO)
+
+    def __rmod__(self, other: object) -> DataFrame:
+        return self._binary(other, BinaryOperator.MODULO, reverse=True)
+
     @property
     def size(self) -> int:
         """Return the number of visible elements in the frame."""
@@ -2196,6 +2226,119 @@ class DataFrame:
             SortPlan(self._plan, keys, after_sort(self._plan.metadata, keys)),
         )
         return sorted_frame.limit(n)
+
+    def _binary(
+        self,
+        other: object,
+        operator: BinaryOperator,
+        *,
+        reverse: bool = False,
+    ) -> DataFrame:
+        if isinstance(other, DataFrame):
+            return self._frame_binary(other, operator, reverse=reverse)
+        if not is_scalar_value(other):
+            raise TypeError(
+                "DuckPD DataFrame arithmetic requires a scalar or DataFrame operand"
+            )
+        scalar = LiteralValue(other)
+        outputs: list[tuple[Column, Expression]] = []
+        for source in self._plan.metadata.visible_columns:
+            if not is_numeric_type(source.duckdb_type):
+                raise UnsupportedOperationError(
+                    "DataFrame arithmetic currently supports only numeric columns"
+                )
+            expression = BinaryExpression(
+                scalar if reverse else ColumnRef(source.id),
+                operator,
+                ColumnRef(source.id) if reverse else scalar,
+            )
+            outputs.append(
+                (
+                    Column(
+                        ColumnId.create(),
+                        source.label,
+                        expression_type(self._plan, expression),
+                    ),
+                    expression,
+                )
+            )
+        return self._project_binary_outputs(self._plan, outputs)
+
+    def _frame_binary(
+        self,
+        other: DataFrame,
+        operator: BinaryOperator,
+        *,
+        reverse: bool,
+    ) -> DataFrame:
+        from duckpd._merging import plan_merge, validate_explicit_index_alignment
+
+        if other._session is not self._session:
+            raise AlignmentError("Cannot align frames from different sessions")
+        if other._plan is self._plan:
+            plan = self._plan
+        else:
+            validate_explicit_index_alignment(self, other)
+            plan = plan_merge(
+                self,
+                other,
+                how="outer",
+                left_index=True,
+                right_index=True,
+                sort=True,
+                validate="1:1",
+            )
+
+        left_columns = {
+            column.label: column for column in self._plan.metadata.visible_columns
+        }
+        right_columns = {
+            column.label: column for column in other._plan.metadata.visible_columns
+        }
+        outputs: list[tuple[Column, Expression]] = []
+        for label in sorted(left_columns.keys() | right_columns.keys()):
+            left = left_columns.get(label)
+            right = right_columns.get(label)
+            if left is None or right is None:
+                expression: Expression = CastExpression(LiteralValue(None), "DOUBLE")
+                output_type = "DOUBLE"
+            else:
+                if not is_numeric_type(left.duckdb_type) or not is_numeric_type(
+                    right.duckdb_type
+                ):
+                    raise UnsupportedOperationError(
+                        "Cross-frame DataFrame arithmetic currently supports only "
+                        "numeric columns shared by both operands"
+                    )
+                expression = BinaryExpression(
+                    ColumnRef(right.id if reverse else left.id),
+                    operator,
+                    ColumnRef(left.id if reverse else right.id),
+                )
+                output_type = expression_type(plan, expression)
+            outputs.append((Column(ColumnId.create(), label, output_type), expression))
+        return self._project_binary_outputs(plan, outputs)
+
+    def _project_binary_outputs(
+        self,
+        plan: LogicalPlan,
+        outputs: Sequence[tuple[Column, Expression]],
+    ) -> DataFrame:
+        visible = tuple(column for column, _ in outputs)
+        columns = projection_columns(plan.metadata, visible)
+        expressions = {column.id: expression for column, expression in outputs}
+        projections = tuple(
+            NamedExpression(
+                column,
+                expressions.get(column.id, ColumnRef(column.id)),
+            )
+            for column in columns
+        )
+        metadata = after_projection(plan.metadata, columns)
+        return DataFrame(
+            self._session,
+            ProjectPlan(plan, projections, metadata),
+        )
 
     def __repr__(self) -> str:
         labels = ", ".join(repr(label) for label in self.columns)

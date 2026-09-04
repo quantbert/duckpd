@@ -170,6 +170,13 @@ _NULLABLE_INTEGER_DTYPE_BY_DUCKDB = {
 }
 
 
+def _is_null_safe_pandas_dtype(dtype: str) -> bool:
+    """Return whether a source dtype can represent join-introduced missing values."""
+    return dtype in {"boolean", "string"} or dtype.startswith(
+        ("Int", "UInt", "datetime64[", "timedelta64[")
+    )
+
+
 class Executor:
     """Execute compiled plans and track observable execution boundaries."""
 
@@ -233,11 +240,16 @@ class Executor:
                         else cast("pd.Timestamp", value).date()
                     )
                 )
-        preserved_dtypes = self._pandas_nullable_integer_dtypes(plan)
-        preserved_labels: dict[str, str] = {
+        source_dtypes = self._pandas_dtypes(plan)
+        source_labels: dict[str, str] = {
             compiled.bindings[column_id]: dtype
-            for column_id, dtype in preserved_dtypes.items()
+            for column_id, dtype in source_dtypes.items()
             if column_id in compiled.bindings
+        }
+        preserved_labels = {
+            label: dtype
+            for label, dtype in source_labels.items()
+            if _is_null_safe_pandas_dtype(dtype)
         }
         for label, orig_dtype in preserved_labels.items():
             if str(result[label].dtype) != orig_dtype:
@@ -250,6 +262,14 @@ class Executor:
                 and result[label].isna().any()
             ):
                 result[label] = result[label].astype("float64")
+            elif (
+                source_labels.get(label) == "bool"
+                and dtype_name == "boolean"
+                and result[label].isna().any()
+            ):
+                result[label] = (
+                    result[label].astype(object).where(result[label].notna(), np.nan)
+                )
 
         index_ids = plan.metadata.index.columns
         if index_ids:
@@ -264,7 +284,8 @@ class Executor:
             result = result.drop(columns=hidden_labels)
         return result
 
-    def _pandas_nullable_integer_dtypes(self, plan: LogicalPlan) -> dict[ColumnId, str]:
+    def _pandas_dtypes(self, plan: LogicalPlan) -> dict[ColumnId, str]:
+        """Track pandas source dtypes through identity-preserving plans."""
         if isinstance(plan, ScanPlan):
             if not isinstance(plan.source, PandasSource):
                 return {}
@@ -274,20 +295,21 @@ class Executor:
             return {
                 column.id: str(source[column.label].dtype)
                 for column in plan.metadata.columns
-                if str(source[column.label].dtype).startswith(("Int", "UInt"))
+                if column.label in source.columns
             }
         if isinstance(plan, JoinPlan):
-            left_dtypes = self._pandas_nullable_integer_dtypes(plan.left)
-            right_dtypes = self._pandas_nullable_integer_dtypes(plan.right)
+            left_dtypes = self._pandas_dtypes(plan.left)
+            right_dtypes = self._pandas_dtypes(plan.right)
             return {**left_dtypes, **right_dtypes}
         if isinstance(plan, UnionPlan):
             nullable_labels: set[str] = set()
             for input_plan in plan.inputs:
-                input_dtypes = self._pandas_nullable_integer_dtypes(input_plan)
+                input_dtypes = self._pandas_dtypes(input_plan)
                 nullable_labels.update(
                     column.label
                     for column in input_plan.metadata.columns
                     if column.id in input_dtypes
+                    and input_dtypes[column.id].startswith(("Int", "UInt"))
                 )
             return {
                 column.id: _NULLABLE_INTEGER_DTYPE_BY_DUCKDB[column.duckdb_type]
@@ -296,8 +318,8 @@ class Executor:
                 and column.duckdb_type in _NULLABLE_INTEGER_DTYPE_BY_DUCKDB
             }
         if isinstance(plan, LocIndexPlan):
-            return self._pandas_nullable_integer_dtypes(plan.input)
-        return self._pandas_nullable_integer_dtypes(plan.input)
+            return self._pandas_dtypes(plan.input)
+        return self._pandas_dtypes(plan.input)
 
     def to_arrow(self, plan: LogicalPlan) -> pa.Table:
         self._validate_execution(plan)

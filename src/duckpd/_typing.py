@@ -149,6 +149,74 @@ def _common_decimal_type(
     return f"DECIMAL({precision},{scale})"
 
 
+def binary_numeric_type(left: str, right: str, operator: str) -> str:
+    """Infer DuckDB's result type for supported scalar numeric arithmetic."""
+    if "DOUBLE" in {left, right}:
+        return "DOUBLE"
+    if "FLOAT" in {left, right}:
+        return "FLOAT"
+
+    has_decimal = _decimal_parts(left) is not None or _decimal_parts(right) is not None
+    left_decimal = _arithmetic_decimal_parts(left)
+    right_decimal = _arithmetic_decimal_parts(right)
+    if has_decimal:
+        if left_decimal is None or right_decimal is None:
+            return "UNKNOWN"
+        if operator == "true_divide":
+            return "DOUBLE"
+        left_precision, left_scale = left_decimal
+        right_precision, right_scale = right_decimal
+        scale = (
+            left_scale + right_scale
+            if operator == "multiply"
+            else max(left_scale, right_scale)
+        )
+        if operator == "multiply":
+            raw_precision = left_precision + right_precision
+            if (
+                raw_precision > 18
+                and max(left_precision, right_precision) <= 18
+                and scale < 18
+            ):
+                precision = 18
+            else:
+                precision = min(38, raw_precision)
+        else:
+            integer_digits = max(
+                left_precision - left_scale,
+                right_precision - right_scale,
+            )
+            raw_precision = integer_digits + scale
+            if operator in {"add", "subtract"}:
+                raw_precision += 1
+            width_limit = 38 if max(left_precision, right_precision) > 18 else 18
+            precision = min(width_limit, raw_precision)
+        if not 0 <= scale <= precision <= 38:
+            return "UNKNOWN"
+        return f"DECIMAL({precision},{scale})"
+
+    if left not in _INTEGER_BOUNDS or right not in _INTEGER_BOUNDS:
+        return "UNKNOWN"
+    if operator == "true_divide":
+        return "DOUBLE"
+    if left == right:
+        return left
+    try:
+        return _common_integer_type((left, right))
+    except TypeError:
+        return "UNKNOWN"
+
+
+def _arithmetic_decimal_parts(dtype: str) -> tuple[int, int] | None:
+    decimal = _decimal_parts(dtype)
+    if decimal is not None:
+        return decimal
+    if dtype not in _INTEGER_BOUNDS:
+        return None
+    lower, upper = _INTEGER_BOUNDS[dtype]
+    return len(str(max(abs(lower), abs(upper)))), 0
+
+
 _SCALAR_TYPES = (
     int,
     float,
@@ -191,12 +259,19 @@ _PANDAS_TO_DUCKDB_DTYPES: dict[str, str] = {
     "datetime64[s]": "TIMESTAMP",
 }
 
+_DATETIME_TZ_PATTERN = re.compile(r"datetime64\[[^,]+,\s*[^]]+\]")
+_TIMEDELTA_PATTERN = re.compile(r"timedelta64\[[^]]+\]")
+
 
 def normalize_dtype(dtype: object) -> str:
     """Normalize a pandas / numpy / string dtype to DuckDB type string."""
     dtype_str = str(dtype).lower()
     if dtype_str in _PANDAS_TO_DUCKDB_DTYPES:
         return _PANDAS_TO_DUCKDB_DTYPES[dtype_str]
+    if _DATETIME_TZ_PATTERN.fullmatch(dtype_str):
+        return "TIMESTAMP WITH TIME ZONE"
+    if _TIMEDELTA_PATTERN.fullmatch(dtype_str):
+        return "INTERVAL"
     # Check upper case DuckDB types directly
     upper = str(dtype).upper()
     known_duckdb = {
@@ -214,8 +289,11 @@ def normalize_dtype(dtype: object) -> str:
         "DOUBLE",
         "BOOLEAN",
         "VARCHAR",
+        "BLOB",
         "DATE",
         "TIMESTAMP",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIMESTAMPTZ",
         "TIME",
         "INTERVAL",
     }
