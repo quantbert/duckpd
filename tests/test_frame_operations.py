@@ -219,6 +219,7 @@ def test_to_arrow_batches_streams_incrementally_without_pandas(
 
     assert len(batches) == 5
     assert sum(len(b) for b in batches) == total_rows
+    assert session.execution_count == 1
 
 
 def test_explain_contains_all_plan_views(source: pd.DataFrame) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -388,4 +389,78 @@ def test_dataframe_rolling_and_expanding_differential() -> None:
     pd.testing.assert_frame_equal(
         cast("dp.DataFrame", df[["a", "b"]].expanding(2).var()).collect(),
         pdf[["a", "b"]].expanding(2).var(),
+    )
+
+
+SERIES_ORDER_OPERATIONS: tuple[Callable[[dp.Series], object], ...] = (
+    lambda series: series.cumsum(),
+    lambda series: series.cummin(),
+    lambda series: series.cummax(),
+    lambda series: series.cumprod(),
+    lambda series: series.shift(),
+    lambda series: series.diff(),
+    lambda series: series.pct_change(),
+    lambda series: series.rank(method="first"),
+    lambda series: series.rolling(2).sum(),
+    lambda series: series.expanding(2).sum(),
+    lambda series: series.drop_duplicates(keep="first"),
+    lambda series: series.drop_duplicates(keep="last"),
+    lambda series: series.nlargest(2),
+    lambda series: series.nsmallest(2),
+)
+
+
+@pytest.mark.parametrize("operation", SERIES_ORDER_OPERATIONS)
+def test_every_series_order_dependent_operation_rejects_unordered_input(
+    tmp_path: Path,
+    operation: Callable[[dp.Series], object],
+) -> None:
+    path = tmp_path / "unordered-series.csv"
+    pd.DataFrame({"value": [3, 1, 2]}).to_csv(path, index=False)
+    series = dp.read_csv(path)["value"]
+
+    with pytest.raises(UnorderedOperationError):
+        operation(series)
+
+
+DATAFRAME_ORDER_OPERATIONS: tuple[Callable[[dp.DataFrame], object], ...] = (
+    lambda frame: frame.cumsum(),
+    lambda frame: frame.cummin(),
+    lambda frame: frame.cummax(),
+    lambda frame: frame.cumprod(),
+    lambda frame: frame.rolling(2).sum(),
+    lambda frame: frame.expanding(2).sum(),
+    lambda frame: frame.head(2),
+    lambda frame: frame.drop_duplicates(keep="first"),
+    lambda frame: frame.drop_duplicates(keep="last"),
+    lambda frame: frame.nlargest(2, "left"),
+    lambda frame: frame.nsmallest(2, "left"),
+)
+
+
+@pytest.mark.parametrize("operation", DATAFRAME_ORDER_OPERATIONS)
+def test_every_dataframe_order_dependent_operation_rejects_unordered_input(
+    tmp_path: Path,
+    operation: Callable[[dp.DataFrame], object],
+) -> None:
+    path = tmp_path / "unordered-frame.csv"
+    pd.DataFrame({"left": [3, 1, 2], "right": [6, 4, 5]}).to_csv(path, index=False)
+    frame = dp.read_csv(path)
+
+    with pytest.raises(UnorderedOperationError):
+        operation(frame)
+
+
+def test_order_independent_duplicate_removal_accepts_unordered_input(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unordered-duplicates.csv"
+    source = pd.DataFrame({"value": [2, 1, 2]})
+    source.to_csv(path, index=False)
+
+    result = dp.read_csv(path).drop_duplicates(keep=False).collect()
+
+    pd.testing.assert_frame_equal(
+        result.reset_index(drop=True),
+        source.drop_duplicates(keep=False).reset_index(drop=True),
     )

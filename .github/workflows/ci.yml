@@ -1,18 +1,18 @@
 name: CI
 
-# Automatic CI runs on push/pull_request are temporarily disabled.
-# Trigger manually via the GitHub Actions UI or gh CLI.
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        narwhals-version: ["2.17.0", "2.25.0"]
 
     steps:
       - uses: actions/checkout@v5
@@ -21,7 +21,18 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --frozen --group dev
-      - run: uv run pytest
+      - run: uv pip install "narwhals==${{ matrix.narwhals-version }}"
+      - run: uv run --no-sync pytest
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pyright

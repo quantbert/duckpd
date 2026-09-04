@@ -17,7 +17,6 @@ from duckpd._logical import (
     ColumnRef,
     Expression,
     FilterPlan,
-    FrameMetadata,
     FunctionCall,
     LimitPlan,
     LiteralValue,
@@ -27,9 +26,15 @@ from duckpd._logical import (
     OrderColumn,
     OrderSpec,
     ProjectPlan,
+    RowIdentity,
     SortDirection,
 )
-from duckpd._metadata import after_projection, protected_column_ids
+from duckpd._metadata import (
+    after_filter,
+    after_projection,
+    after_reindex,
+    protected_column_ids,
+)
 from duckpd._reductions import expression_type
 from duckpd._typing import ScalarValue, is_scalar_value
 from duckpd.errors import (
@@ -91,7 +96,9 @@ class LocIndexer:
 
             filtered_df = DataFrameClass(
                 self._frame._session,
-                FilterPlan(self._frame._plan, pred, self._frame._plan.metadata),
+                FilterPlan(
+                    self._frame._plan, pred, after_filter(self._frame._plan.metadata)
+                ),
             )
 
         # Resolve columns
@@ -120,7 +127,6 @@ class LocIndexer:
             order_label,
             "BIGINT",
             hidden=True,
-            row_identity=True,
         )
 
         records: list[dict[str, object]] = []
@@ -143,23 +149,34 @@ class LocIndexer:
 
         columns = (*self._frame._plan.metadata.columns, order_col)
         input_ordering = self._frame._plan.metadata.ordering
-        ordering = (
-            OrderSpec(
-                (
-                    OrderColumn(
-                        order_col_id,
-                        SortDirection.ASCENDING,
-                        NullPlacement.LAST,
-                    ),
-                )
-            )
-            if input_ordering.keys
-            else OrderSpec()
+        input_identity = self._frame._plan.metadata.row_identity
+        has_total_input_order = (
+            input_identity.stable
+            and input_identity.unique
+            and bool(input_identity.columns)
+            and bool(input_ordering.keys)
         )
-        metadata = FrameMetadata(
+        if has_total_input_order:
+            request_order = OrderColumn(
+                order_col_id,
+                SortDirection.ASCENDING,
+                NullPlacement.LAST,
+            )
+            ordering = OrderSpec((request_order, *input_ordering.keys))
+            row_identity = RowIdentity(
+                (order_col_id, *input_identity.columns),
+                stable=True,
+                unique=True,
+                source_key=input_identity.source_key,
+            )
+        else:
+            ordering = OrderSpec()
+            row_identity = RowIdentity()
+        metadata = after_reindex(
+            self._frame._plan.metadata,
             columns,
-            self._frame._plan.metadata.index,
             ordering,
+            row_identity,
         )
         plan = LocIndexPlan(
             input=self._frame._plan,

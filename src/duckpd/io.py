@@ -17,7 +17,6 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     Expression,
-    FrameMetadata,
     NamedExpression,
     NullPlacement,
     OrderColumn,
@@ -257,10 +256,9 @@ def concat(
                 else:
                     new_cols.append(replace_column(col, label=str(counter)))
                     counter += 1
-            new_meta = FrameMetadata(
-                tuple(new_cols),
-                result._plan.metadata.index,
-                result._plan.metadata.ordering,
+            new_meta = replace_column(
+                result._plan.metadata,
+                columns=tuple(new_cols),
             )
             result = result._identity_project(new_meta)
 
@@ -327,14 +325,12 @@ def concat(
                     f"__duckpd_union_source_{source_order_id.value.hex}__",
                     "UBIGINT",
                     hidden=True,
-                    row_identity=True,
                 ),
                 Column(
                     source_row_id,
                     f"__duckpd_union_row_{source_row_id.value.hex}__",
                     "UBIGINT",
                     hidden=True,
-                    row_identity=True,
                 ),
             )
         )
@@ -347,6 +343,11 @@ def concat(
         tuple(output_columns),
         index_ids=tuple(index_ids),
         ordering_keys=ordering_keys,
+        identity_ids=(
+            (source_order_id, source_row_id)
+            if source_order_id is not None and source_row_id is not None
+            else ()
+        ),
     )
     plan = UnionPlan(
         input_plans,

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date
-from importlib.metadata import entry_points
+import math
+from datetime import date, timedelta
+from decimal import Decimal
+from importlib.metadata import entry_points, version
 from pathlib import Path
+from typing import Any, cast
 
 import narwhals as nw
 import pandas as pd
@@ -21,6 +24,19 @@ import duckpd
 from duckpd.errors import UnsupportedOperationError
 from duckpd.frame import DataFrame
 from scripts.generate_compatibility import load_matrix, render_matrix
+
+
+def _collect_once(
+    lazy: nw.LazyFrame[DataFrame],
+    session: duckpd.Session,
+) -> pa.Table:
+    assert session.execution_count == 0
+    assert isinstance(lazy.to_native(), DataFrame)
+    assert session.execution_count == 0
+    result = lazy.collect().to_native()
+    assert isinstance(result, pa.Table)
+    assert session.execution_count == 1
+    return result
 
 
 def test_narwhals_entrypoint_wraps_duckpd_without_execution() -> None:
@@ -137,7 +153,6 @@ def test_narwhals_expression_operator_subset() -> None:
             (10 / nw.col("a")).alias("reverse_divide"),
             (nw.col("a") % 2).alias("modulo"),
             (10 % nw.col("a")).alias("reverse_modulo"),
-            (-nw.col("a")).alias("negate"),
             (nw.col("a") != nw.col("b")).alias("not_equal"),
             (nw.col("a") <= nw.col("b")).alias("less_equal"),
             (
@@ -154,11 +169,26 @@ def test_narwhals_expression_operator_subset() -> None:
             "reverse_divide": [2.0],
             "modulo": [1],
             "reverse_modulo": [0],
-            "negate": [-5],
             "not_equal": [True],
             "less_equal": [False],
             "predicate": [True],
         }
+
+
+@pytest.mark.skipif(
+    tuple(int(part) for part in version("narwhals").split(".")[:2]) < (2, 18),
+    reason="Narwhals 2.17 does not expose unary negation on public expressions",
+)
+def test_narwhals_expression_unary_negation() -> None:
+    with duckpd.connect() as session:
+        result = (
+            nw.from_native(session.from_pandas(pd.DataFrame({"a": [5]})))
+            .select((-nw.col("a")).alias("negate"))
+            .collect()
+            .to_native()
+        )
+
+    assert result.to_pydict() == {"negate": [-5]}
 
 
 def test_narwhals_expression_validation_fails_before_execution() -> None:
@@ -173,8 +203,8 @@ def test_narwhals_expression_validation_fails_before_execution() -> None:
             lazy.select(nw.col("a"), nw.col("a"))
         with pytest.raises(MultiOutputExpressionError, match="Multi-output"):
             lazy.select(nw.col("a", "b") + nw.col("a", "b", "c"))
-        with pytest.raises(NotImplementedError, match="Datetime"):
-            lazy.select(nw.col("a").cast(nw.Datetime))
+        casted = lazy.select(nw.col("a").cast(nw.Datetime("us")))
+        assert casted.collect_schema()["a"] == nw.Datetime("us")
         with pytest.raises(UnsupportedOperationError, match="ignore_nulls=True"):
             lazy.select(nw.all_horizontal(nw.col("a"), ignore_nulls=True))
 
@@ -443,6 +473,195 @@ def test_narwhals_aggregate_validation_fails_before_execution() -> None:
         ):
             lazy.select("value", nw.col("value").sum().alias("total"))
         assert session.execution_count == 0
+
+
+def test_narwhals_numeric_expression_surface_is_lazy() -> None:
+    source = pd.DataFrame({"x": [-2.5, 4.0]})
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.from_pandas(source)).select(
+            nw.col("x").abs().alias("absolute"),
+            nw.col("x").round().alias("rounded"),
+            nw.col("x").floor().alias("floor"),
+            nw.col("x").ceil().alias("ceil"),
+            nw.col("x").clip(-1, 3).alias("clipped"),
+            (nw.col("x") // 2).alias("floor_divide"),
+            (nw.col("x") ** 2).alias("power"),
+            nw.col("x").exp().alias("exp"),
+            nw.col("x").abs().sqrt().alias("sqrt"),
+            nw.col("x").abs().log(base=2).alias("log2"),
+            nw.col("x").cos().alias("cos"),
+            nw.col("x").sin().alias("sin"),
+        )
+
+        result = _collect_once(lazy, session).to_pydict()
+
+    assert result["absolute"] == [2.5, 4.0]
+    assert result["rounded"] == [-3.0, 4.0]
+    assert result["floor"] == [-3.0, 4.0]
+    assert result["ceil"] == [-2.0, 4.0]
+    assert result["clipped"] == [-1.0, 3.0]
+    assert result["floor_divide"] == [-2.0, 2.0]
+    assert result["power"] == [6.25, 16.0]
+    assert result["exp"] == pytest.approx([math.exp(-2.5), math.exp(4.0)])
+    assert result["sqrt"] == pytest.approx([math.sqrt(2.5), 2.0])
+    assert result["log2"] == pytest.approx([math.log2(2.5), 2.0])
+    assert result["cos"] == pytest.approx([math.cos(-2.5), math.cos(4.0)])
+    assert result["sin"] == pytest.approx([math.sin(-2.5), math.sin(4.0)])
+
+
+def test_narwhals_ordered_expression_surface() -> None:
+    source = pd.DataFrame({"pos": [0, 1, 2, 3], "x": [3.0, 1.0, 2.0, 4.0]})
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.from_pandas(source, order_by="pos")).select(
+            nw.col("x").cum_sum().over(order_by="pos").alias("cumulative"),
+            nw.col("x").cum_min().over(order_by="pos").alias("minimum"),
+            nw.col("x").cum_max().over(order_by="pos").alias("maximum"),
+            nw.col("x").cum_prod().over(order_by="pos").alias("product"),
+            nw.col("x").cum_count().over(order_by="pos").alias("count"),
+            nw.col("x").diff().over(order_by="pos").alias("difference"),
+            nw.col("x").shift(1).over(order_by="pos").alias("shifted"),
+            nw.col("x").rank(method="ordinal").over(order_by="pos").alias("rank"),
+            nw.col("x")
+            .rolling_sum(2, min_samples=1)
+            .over(order_by="pos")
+            .alias("rolling"),
+        )
+
+        result = _collect_once(lazy, session).to_pydict()
+
+    assert result == {
+        "cumulative": [3.0, 4.0, 6.0, 10.0],
+        "minimum": [3.0, 1.0, 1.0, 1.0],
+        "maximum": [3.0, 3.0, 3.0, 4.0],
+        "product": [3.0, 3.0, 6.0, 24.0],
+        "count": [1, 2, 3, 4],
+        "difference": [None, -2.0, 1.0, 2.0],
+        "shifted": [None, 3.0, 1.0, 2.0],
+        "rank": [3.0, 1.0, 2.0, 4.0],
+        "rolling": [3.0, 4.0, 3.0, 6.0],
+    }
+
+
+def test_narwhals_ordered_expression_rejections_are_pre_execution() -> None:
+    with duckpd.connect() as session:
+        lazy = nw.from_native(
+            session.from_pandas(pd.DataFrame({"x": [1, 2]}), order_by="x")
+        )
+
+        with pytest.raises(UnsupportedOperationError, match="reverse=True"):
+            lazy.select(nw.col("x").cum_sum(reverse=True))
+        with pytest.raises(ValueError, match="log base"):
+            lazy.select(nw.col("x").log(base=1))
+
+        assert session.execution_count == 0
+
+
+def test_narwhals_relational_methods_are_lazy() -> None:
+    source = pd.DataFrame(
+        {"pos": [0, 1, 2, 3], "key": ["a", "a", "b", None], "value": [2, 1, 4, 3]}
+    )
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.from_pandas(source, order_by="pos"))
+
+        transformed = (
+            lazy.drop_nulls(subset=["key"])
+            .unique(subset=["key"], keep="first", order_by=["pos"])
+            .top_k(2, by="value")
+            .with_row_index("row", order_by=["value"])
+        )
+
+        result = _collect_once(transformed, session).to_pydict()
+
+    assert result == {
+        "row": [0, 1],
+        "pos": [0, 2],
+        "key": ["a", "b"],
+        "value": [2, 4],
+    }
+
+
+def test_narwhals_join_mappings_are_lazy() -> None:
+    with duckpd.connect() as session:
+        left = nw.from_native(
+            session.from_pandas(pd.DataFrame({"key": [1, 2], "left": ["a", "b"]}))
+        )
+        right = nw.from_native(
+            session.from_pandas(pd.DataFrame({"key": [2, 3], "right": ["c", "d"]}))
+        )
+
+        joined = left.join(right, on="key", how="full").sort("key")
+        result = _collect_once(joined, session).to_pydict()
+
+    assert result == {
+        "key": [1, 2, 3],
+        "left": ["a", "b", None],
+        "right": [None, "c", "d"],
+    }
+
+
+def test_narwhals_intentional_relational_exclusions_fail_early() -> None:
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.from_pandas(pd.DataFrame({"x": [1, 2]})))
+
+        with pytest.raises(UnsupportedOperationError, match="nested dtype"):
+            lazy.explode("x")
+        with pytest.raises(UnsupportedOperationError, match="typed plan"):
+            lazy.unpivot(on=["x"])
+        with pytest.raises(UnsupportedOperationError, match="as-of"):
+            lazy.join_asof(lazy, on="x")
+
+        assert session.execution_count == 0
+
+
+def test_narwhals_scalar_schema_conversion() -> None:
+    table = pa.table(
+        {
+            "decimal": pa.array([Decimal("1.25")], type=pa.decimal128(8, 2)),
+            "timestamp": pa.array(
+                [pd.Timestamp("2024-01-01", tz="UTC")],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "duration": pa.array([timedelta(seconds=1)], type=pa.duration("us")),
+        }
+    )
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.from_arrow(table))
+
+        assert lazy.collect_schema() == nw.Schema(
+            {
+                "decimal": nw.Decimal(8, 2),
+                "timestamp": nw.Datetime("us", "UTC"),
+                "duration": nw.Duration("us"),
+            }
+        )
+        assert session.execution_count == 0
+
+
+def test_narwhals_public_scan_is_explicitly_unsupported(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.parquet"
+    pd.DataFrame({"x": [2, 1]}).to_parquet(source_path)
+
+    with pytest.raises(AssertionError, match="UNKNOWN Implementation"):
+        nw.scan_parquet(source_path, backend=cast("Any", "duckpd"))
+
+
+def test_narwhals_sink_and_collection_backends(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.parquet"
+    sink_path = tmp_path / "sink.parquet"
+    pd.DataFrame({"x": [2, 1]}).to_parquet(source_path)
+
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.read_parquet(source_path)).sort("x")
+        pandas_result = lazy.collect(backend="pandas").to_native()
+        assert pandas_result["x"].tolist() == [1, 2]
+        assert session.execution_count == 1
+
+        lazy.sink_parquet(sink_path)
+        assert session.execution_count == 2
+
+    assert pd.read_parquet(sink_path)["x"].tolist() == [1, 2]
 
 
 def test_narwhals_plugin_entrypoint_is_packaged() -> None:

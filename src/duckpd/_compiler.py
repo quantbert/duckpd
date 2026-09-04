@@ -42,11 +42,13 @@ from duckpd._logical import (
     SortPlan,
     SqlSource,
     TableSource,
+    TopKPlan,
     UnaryExpression,
     UnaryOperator,
     UnionPlan,
     WindowExpression,
 )
+from duckpd._optimizer import LogicalOptimizer, OptimizationResult
 from duckpd._quoting import quote_identifier
 from duckpd.errors import UnsupportedOperationError
 
@@ -67,6 +69,7 @@ class DuckDBCompiler:
 
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._optimizer = LogicalOptimizer()
 
     def inspect_source(
         self,
@@ -114,10 +117,35 @@ class DuckDBCompiler:
             {column.id: column.label for column in visible},
         )
 
-    def compile(self, plan: LogicalPlan) -> CompiledFrame:
+    def optimize(
+        self,
+        plan: LogicalPlan,
+        *,
+        disabled_passes: frozenset[str] = frozenset(),
+    ) -> OptimizationResult:
+        """Return the named logical rewrite result without compiling it."""
+        return self._optimizer.optimize(plan, disabled_passes=disabled_passes)
+
+    def compile(
+        self,
+        plan: LogicalPlan,
+        *,
+        optimize: bool = True,
+    ) -> CompiledFrame:
+        compiled_plan = self.optimize(plan).plan if optimize else plan
+        compiled = self._compile(compiled_plan)
+        self._validate_compiled_schema(compiled_plan, compiled)
+        return compiled
+
+    def _compile(self, plan: LogicalPlan) -> CompiledFrame:
         self._session._ensure_open()
         if isinstance(plan, ScanPlan):
-            relation = self._relation_for_source(plan.source)
+            source_relation = self._relation_for_source(plan.source)
+            expressions = tuple(
+                duckdb.SQLExpression(quote_identifier(column.label)).alias(column.label)
+                for column in plan.columns
+            )
+            relation = source_relation.project(*expressions)
             bindings = {column.id: column.label for column in plan.columns}
             return CompiledFrame(relation, bindings)
 
@@ -130,7 +158,7 @@ class DuckDBCompiler:
         if isinstance(plan, LocIndexPlan):
             return self._compile_loc_index(plan)
 
-        compiled_input = self.compile(plan.input)
+        compiled_input = self._compile(plan.input)
         if isinstance(plan, FilterPlan):
             predicate = self.compile_expression(plan.predicate, compiled_input.bindings)
             return CompiledFrame(
@@ -187,6 +215,16 @@ class DuckDBCompiler:
                     for aggregate in plan.aggregates
                 },
             )
+        if isinstance(plan, TopKPlan):
+            keys = tuple(
+                self._compile_sort_key(key, compiled_input.bindings)
+                for key in plan.keys
+            )
+            relation = compiled_input.relation.sort(*keys).limit(
+                plan.count,
+                offset=plan.offset,
+            )
+            return CompiledFrame(relation, compiled_input.bindings)
         if isinstance(plan, SortPlan):
             keys = tuple(
                 self._compile_sort_key(key, compiled_input.bindings)
@@ -239,6 +277,45 @@ class DuckDBCompiler:
         relation = compiled_input.relation.limit(plan.count, offset=plan.offset)
         return CompiledFrame(relation, compiled_input.bindings)
 
+    @staticmethod
+    def _validate_compiled_schema(
+        plan: LogicalPlan,
+        compiled: CompiledFrame,
+    ) -> None:
+        """Reject compiler output that contradicts declared logical types."""
+        actual_types = {
+            label: str(dtype)
+            for label, dtype in zip(
+                compiled.relation.columns,
+                compiled.relation.types,
+                strict=True,
+            )
+        }
+
+        def canonical(dtype: str) -> str:
+            normalized = " ".join(dtype.upper().split())
+            normalized = normalized.replace("TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE")
+            return normalized.replace(", ", ",")
+
+        for column in plan.metadata.columns:
+            binding = compiled.bindings.get(column.id)
+            if binding is None:
+                raise AssertionError(
+                    f"Compiler omitted logical column {column.label!r}"
+                )
+            actual = actual_types.get(binding)
+            if actual is None:
+                raise AssertionError(
+                    f"Compiler binding {binding!r} is absent from physical schema"
+                )
+            if canonical(column.duckdb_type) == "UNKNOWN":
+                continue
+            if canonical(actual) != canonical(column.duckdb_type):
+                raise AssertionError(
+                    "Compiler type mismatch for "
+                    f"{column.label!r}: declared {column.duckdb_type}, got {actual}"
+                )
+
     def _compile_sample_clause(self, plan: SamplePlan) -> str:
         if plan.n is None:
             raise AssertionError("Row-count sampling requires n")
@@ -258,7 +335,12 @@ class DuckDBCompiler:
                 raise KeyError(msg) from error
             return duckdb.SQLExpression(quote_identifier(label))
         if isinstance(expression, LiteralValue):
-            return duckdb.ConstantExpression(expression.value)
+            literal = duckdb.ConstantExpression(expression.value)
+            if isinstance(expression.value, int) and not isinstance(
+                expression.value, bool
+            ):
+                return literal.cast("BIGINT")
+            return literal
         if isinstance(expression, UnaryExpression):
             operand = self.compile_expression(expression.operand, bindings)
             if expression.operator is UnaryOperator.INVERT:
@@ -674,8 +756,8 @@ class DuckDBCompiler:
         ).otherwise(value)
 
     def _compile_join(self, plan: JoinPlan) -> CompiledFrame:
-        left_compiled = self.compile(plan.left)
-        right_compiled = self.compile(plan.right)
+        left_compiled = self._compile(plan.left)
+        right_compiled = self._compile(plan.right)
 
         lhs_alias = "lhs"
         rhs_alias = "rhs"
@@ -805,7 +887,7 @@ class DuckDBCompiler:
         if not plan.inputs:
             raise ValueError("UnionPlan requires at least one input plan")
 
-        compiled_inputs = [self.compile(inp) for inp in plan.inputs]
+        compiled_inputs = [self._compile(inp) for inp in plan.inputs]
         target_columns = plan.metadata.columns
 
         projected_relations: list[duckdb.DuckDBPyRelation] = []
@@ -869,7 +951,7 @@ class DuckDBCompiler:
         return CompiledFrame(result_rel.project(*final_proj), final_bindings)
 
     def _compile_loc_index(self, plan: LocIndexPlan) -> CompiledFrame:
-        compiled_input = self.compile(plan.input)
+        compiled_input = self._compile(plan.input)
         index_ids = plan.input.metadata.index.columns
         index_cols = [compiled_input.bindings[column_id] for column_id in index_ids]
 

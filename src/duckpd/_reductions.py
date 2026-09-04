@@ -18,6 +18,7 @@ from duckpd._logical import (
     FunctionCall,
     LiteralValue,
     LogicalPlan,
+    Nullability,
     UnaryExpression,
     WindowExpression,
 )
@@ -58,6 +59,8 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         raise AssertionError(f"Expression column is absent: {expression.column_id}")
     if isinstance(expression, LiteralValue):
         value = expression.value
+        if value is None:
+            return "UNKNOWN"
         if isinstance(value, bool):
             return "BOOLEAN"
         if isinstance(value, int):
@@ -72,10 +75,15 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
     if isinstance(expression, CastExpression):
         return expression.target_type
     if isinstance(expression, CaseWhen):
-        val_type = expression_type(plan, expression.value)
-        if val_type != "UNKNOWN":
-            return val_type
-        return expression_type(plan, expression.otherwise)
+        value_type = expression_type(plan, expression.value)
+        otherwise_type = expression_type(plan, expression.otherwise)
+        if value_type == "UNKNOWN":
+            return otherwise_type
+        if otherwise_type == "UNKNOWN" or otherwise_type == value_type:
+            return value_type
+        if is_numeric_type(value_type) and is_numeric_type(otherwise_type):
+            return binary_numeric_type(value_type, otherwise_type, "add")
+        return "UNKNOWN"
     if isinstance(expression, FunctionCall):
         func_name = expression.name.lower()
         if func_name in {"length", "year", "month", "day", "hour", "minute", "second"}:
@@ -204,7 +212,19 @@ def aggregate_plan(
         else:
             output_type = "UNKNOWN"
 
-        output = Column(ColumnId.create(), label, output_type)
+        non_null = operator in {
+            AggregateOperator.COUNT,
+            AggregateOperator.SIZE,
+            AggregateOperator.NUNIQUE,
+            AggregateOperator.ANY,
+            AggregateOperator.ALL,
+        } or (operator is AggregateOperator.SUM and skipna and min_count == 0)
+        output = Column(
+            ColumnId.create(),
+            label,
+            output_type,
+            nullable=(Nullability.NON_NULL if non_null else Nullability.NULLABLE),
+        )
         aggregates.append(
             AggregateExpression(
                 output,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace as dataclass_replace
 from decimal import Decimal
 from math import isfinite
 from pathlib import Path
@@ -14,9 +15,7 @@ import pyarrow as pa
 
 from duckpd._executor import CommitReport, ProfileResult
 from duckpd._logical import (
-    AggregateExpression,
     AggregateOperator,
-    AggregatePlan,
     BinaryExpression,
     BinaryOperator,
     CaseWhen,
@@ -40,11 +39,14 @@ from duckpd._logical import (
     SortDirection,
     SortKey,
     SortPlan,
+    SourceKind,
+    SourceProvenance,
     TableSource,
     WindowExpression,
+    expression_nullability,
 )
 from duckpd._metadata import (
-    after_aggregate,
+    after_filter,
     after_projection,
     after_sort,
     find_column,
@@ -71,6 +73,7 @@ from duckpd._typing import (
 )
 from duckpd.errors import (
     AlignmentError,
+    UnorderedOperationError,
     UnsupportedOperationError,
 )
 
@@ -106,10 +109,11 @@ class DataFrame:
     @property
     def ordering(self) -> tuple[str, ...]:
         """Names of columns that guarantee the current row order."""
+        identity_ids = set(self._plan.metadata.row_identity.columns)
         return tuple(
             self._column_by_id(key.column_id).label
             for key in self._plan.metadata.ordering.keys
-            if not self._column_by_id(key.column_id).row_identity
+            if key.column_id not in identity_ids
         )
 
     @property
@@ -190,9 +194,22 @@ class DataFrame:
         """Persist the complete plan while retaining index and order metadata."""
         table_name = name if name is not None else f"__duckpd_persist_{uuid4().hex}__"
         self._session._executor.persist(self._plan, table_name)
+        metadata = dataclass_replace(
+            self._plan.metadata,
+            provenance=SourceProvenance(
+                SourceKind.TABLE,
+                (table_name,),
+                writable=True,
+                row_preserving=self._plan.metadata.provenance.row_preserving,
+                transformations=(
+                    *self._plan.metadata.provenance.transformations,
+                    "persist",
+                ),
+            ),
+        )
         return DataFrame(
             self._session,
-            ScanPlan(TableSource(table_name), self._plan.metadata),
+            ScanPlan(TableSource(table_name), metadata),
         )
 
     def save_as_table(
@@ -247,9 +264,9 @@ class DataFrame:
 
     def explain(
         self,
-        mode: Literal["all", "logical", "sql", "physical"] = "all",
+        mode: Literal["all", "logical", "optimized", "json", "sql", "physical"] = "all",
     ) -> str:
-        """Return DuckDB's execution plan views without fetching result rows."""
+        """Return logical, optimized, SQL, physical, or JSON plan views."""
         return self._session._executor.explain(self._plan, mode=mode)
 
     def explain_write(
@@ -787,7 +804,7 @@ class DataFrame:
 
         return DataFrame(
             self._session,
-            FilterPlan(self._plan, predicate, self._plan.metadata),
+            FilterPlan(self._plan, predicate, after_filter(self._plan.metadata)),
         )
 
     def where(
@@ -899,7 +916,13 @@ class DataFrame:
             else:
                 clipped = expr
 
-            new_col = Column(ColumnId.create(), col.label, col.duckdb_type)
+            new_col = Column(
+                ColumnId.create(),
+                col.label,
+                col.duckdb_type,
+                nullable=expression_nullability(clipped, self._plan.metadata),
+                alias_of=col.id if isinstance(clipped, ColumnRef) else None,
+            )
             new_cols.append(new_col)
             projections.append(NamedExpression(new_col, clipped))
 
@@ -1011,7 +1034,13 @@ class DataFrame:
                         )
                     new_scalar = cast("ScalarValue", new_v)
                     cur_expr = CaseWhen(cond, LiteralValue(new_scalar), cur_expr)
-            new_col = Column(ColumnId.create(), col.label, col.duckdb_type)
+            new_col = Column(
+                ColumnId.create(),
+                col.label,
+                col.duckdb_type,
+                nullable=expression_nullability(cur_expr, self._plan.metadata),
+                alias_of=col.id if isinstance(cur_expr, ColumnRef) else None,
+            )
             new_cols.append(new_col)
             projections.append(NamedExpression(new_col, cur_expr))
         all_cols = projection_columns(self._plan.metadata, tuple(new_cols))
@@ -1160,7 +1189,9 @@ class DataFrame:
             self._require_same_plan(key)
             return DataFrame(
                 self._session,
-                FilterPlan(self._plan, key._expression, self._plan.metadata),
+                FilterPlan(
+                    self._plan, key._expression, after_filter(self._plan.metadata)
+                ),
             )
 
         labels = tuple(key)
@@ -1274,6 +1305,10 @@ class DataFrame:
                 ColumnId.create(),
                 label,
                 expression_type(frame._plan, expression),
+                nullable=expression_nullability(expression, frame._plan.metadata),
+                alias_of=(
+                    expression.column_id if isinstance(expression, ColumnRef) else None
+                ),
             )
             if existing is not None:
                 # Replace column in-place to preserve original column order
@@ -1341,11 +1376,11 @@ class DataFrame:
             for key in keys
             if isinstance(key.expression, ColumnRef)
         }
+        identity_ids = set(self._plan.metadata.row_identity.columns)
         stable_keys = tuple(
             SortKey(ColumnRef(key.column_id), key.direction, key.null_placement)
             for key in self._plan.metadata.ordering.keys
-            if key.column_id not in selected_ids
-            and self._column_by_id(key.column_id).row_identity
+            if key.column_id not in selected_ids and key.column_id in identity_ids
         )
         keys = (*keys, *stable_keys)
         return DataFrame(
@@ -1495,17 +1530,13 @@ class DataFrame:
         if random_state is not None and not 0 <= random_state <= 2_147_483_647:
             raise ValueError("random_state must be between 0 and 2**31 - 1")
 
-        metadata = FrameMetadata(
-            columns=self._plan.metadata.columns,
-            index=self._plan.metadata.index,
-            ordering=OrderSpec(),
-        )
+        metadata = dataclass_replace(self._plan.metadata, ordering=OrderSpec())
         if ignore_index:
             if metadata.index.columns:
                 metadata = reset_index_metadata(metadata, drop=True)
             else:
-                metadata = FrameMetadata(
-                    columns=self._plan.metadata.columns,
+                metadata = dataclass_replace(
+                    metadata,
                     index=IndexSpec(),
                     ordering=OrderSpec(),
                 )
@@ -1598,11 +1629,7 @@ class DataFrame:
         new_labels = [column.label for column in new_columns]
         if len(new_labels) != len(set(new_labels)):
             raise ValueError("rename would create duplicate column labels")
-        new_metadata = FrameMetadata(
-            new_columns,
-            self._plan.metadata.index,
-            self._plan.metadata.ordering,
-        )
+        new_metadata = dataclass_replace(self._plan.metadata, columns=new_columns)
         return self._identity_project(new_metadata)
 
     def drop(
@@ -1926,6 +1953,10 @@ class DataFrame:
         """Execute a bounded preview and return a pandas DataFrame."""
         if count < 0:
             raise ValueError("count must be non-negative")
+        if not self._plan.metadata.ordering.keys:
+            raise UnorderedOperationError(
+                "head() requires guaranteed row ordering; declare order_by first"
+            )
         return self.limit(count).collect()
 
     def nunique(
@@ -2004,61 +2035,13 @@ class DataFrame:
             raise ValueError("subset must not be empty")
 
         subset_columns = tuple(self._column(label) for label in subset_labels)
-        subset_ids = {col.id for col in subset_columns}
 
-        # If keep is 'last' or False, we use window functions.
-        # If keep is 'first', we can use either aggregate or window.
-        # If there is no explicit ordering and keep is 'first', aggregate works.
-        # If keep is 'last' or False, window function provides exact semantics.
-        all_visible = self._plan.metadata.visible_columns
         ordering_keys = self._plan.metadata.ordering.keys
-
-        if keep == "first" and not ordering_keys:
-            # Group by the subset columns; pass through all visible columns.
-            aggregates: list[AggregateExpression] = []
-            output_columns: list[Column] = []
-            for col in all_visible:
-                out_col = Column(
-                    ColumnId.create(),
-                    col.label,
-                    col.duckdb_type,
-                    hidden=False,
-                )
-                output_columns.append(out_col)
-                if col.id in subset_ids:
-                    # Subset columns are group keys — identity pass-through
-                    aggregates.append(
-                        AggregateExpression(
-                            out_col,
-                            operator=None,
-                            expression=ColumnRef(col.id),
-                            input_duckdb_type=col.duckdb_type,
-                        )
-                    )
-                else:
-                    # Non-subset columns: use any_value to pick one row per group
-                    aggregates.append(
-                        AggregateExpression(
-                            out_col,
-                            operator=AggregateOperator.ANY_VALUE,
-                            expression=ColumnRef(col.id),
-                            input_duckdb_type=col.duckdb_type,
-                        )
-                    )
-
-            key_ids = tuple(col.id for col in subset_columns)
-            metadata = after_aggregate(
-                tuple(output_columns), index_ids=(), ordering_keys=()
+        if keep in {"first", "last"} and not ordering_keys:
+            raise UnorderedOperationError(
+                "drop_duplicates keep='first'/'last' requires guaranteed row "
+                "ordering; declare order_by first"
             )
-            distinct_plan = AggregatePlan(
-                self._plan,
-                tuple(aggregates),
-                metadata,
-                keys=key_ids,
-                dropna=False,
-                sort=False,
-            )
-            return DataFrame(self._session, distinct_plan)
 
         # Window-based deduplication
         partition_exprs = tuple(ColumnRef(col.id) for col in subset_columns)
@@ -2119,7 +2102,9 @@ class DataFrame:
                 BinaryOperator.EQUAL,
                 LiteralValue(1),
             )
-            filter_plan = FilterPlan(proj_plan, predicate, proj_plan.metadata)
+            filter_plan = FilterPlan(
+                proj_plan, predicate, after_filter(proj_plan.metadata)
+            )
             return DataFrame(self._session, filter_plan)
         else:  # keep is False
             cnt = WindowExpression(
@@ -2149,7 +2134,9 @@ class DataFrame:
                 BinaryOperator.EQUAL,
                 LiteralValue(1),
             )
-            filter_plan = FilterPlan(proj_plan, predicate, proj_plan.metadata)
+            filter_plan = FilterPlan(
+                proj_plan, predicate, after_filter(proj_plan.metadata)
+            )
             return DataFrame(self._session, filter_plan)
 
     def nlargest(
@@ -2187,6 +2174,11 @@ class DataFrame:
         if keep == "all":
             raise UnsupportedOperationError(
                 "DuckPD does not yet support keep='all' in nlargest/nsmallest"
+            )
+        if not self._plan.metadata.ordering.keys:
+            raise UnorderedOperationError(
+                "nlargest/nsmallest tie handling requires guaranteed row "
+                "ordering; declare order_by first"
             )
         labels = (columns,) if isinstance(columns, str) else tuple(columns)
         value_direction = (
@@ -2316,7 +2308,22 @@ class DataFrame:
                     ColumnRef(left.id if reverse else right.id),
                 )
                 output_type = expression_type(plan, expression)
-            outputs.append((Column(ColumnId.create(), label, output_type), expression))
+            outputs.append(
+                (
+                    Column(
+                        ColumnId.create(),
+                        label,
+                        output_type,
+                        nullable=expression_nullability(expression, plan.metadata),
+                        alias_of=(
+                            expression.column_id
+                            if isinstance(expression, ColumnRef)
+                            else None
+                        ),
+                    ),
+                    expression,
+                )
+            )
         return self._project_binary_outputs(plan, outputs)
 
     def _project_binary_outputs(

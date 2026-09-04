@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
@@ -36,8 +37,11 @@ from duckpd._logical import (
     ScanPlan,
     SortKey,
     SortPlan,
+    SourceKind,
+    TopKPlan,
     UnionPlan,
 )
+from duckpd._optimizer import plan_to_dict
 from duckpd._quoting import quote_identifier
 from duckpd._typing import ParquetCompression
 from duckpd.errors import (
@@ -114,20 +118,32 @@ class ProfileResult:
     peak_buffer_memory: int
     peak_temp_dir_size: int
     raw: dict[str, Any]
+    planning_seconds: float = 0.0
+    execution_seconds: float = 0.0
+    optimization: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the raw DuckDB profile metrics dictionary."""
-        return self.raw
+        """Return DuckDB metrics plus DuckPD planning and optimizer details."""
+        return {
+            **self.raw,
+            "duckpd": {
+                "planning_seconds": self.planning_seconds,
+                "execution_seconds": self.execution_seconds,
+                "optimization": self.optimization,
+            },
+        }
 
     def to_json(self, *, indent: int | None = 2) -> str:
-        """Return the profile metrics as formatted JSON."""
-        return json.dumps(self.raw, indent=indent)
+        """Return all profile metrics as formatted JSON."""
+        return json.dumps(self.to_dict(), indent=indent)
 
     def summary(self) -> str:
         """Format a concise human-readable profiling summary."""
         lines = [
             "DuckPD Query Profile Summary",
             f"  Execution Latency:      {self.latency * 1000:.3f} ms",
+            f"  Planning Time:          {self.planning_seconds * 1000:.3f} ms",
+            f"  Execution Time:         {self.execution_seconds * 1000:.3f} ms",
             f"  CPU Time:               {self.cpu_time * 1000:.3f} ms",
             f"  Rows Scanned:           {self.rows_scanned:,}",
             f"  Rows Returned:          {self.rows_returned:,}",
@@ -512,6 +528,7 @@ class Executor:
                     ProjectPlan,
                     SortPlan,
                     LimitPlan,
+                    TopKPlan,
                     AggregatePlan,
                     SamplePlan,
                     LocIndexPlan,
@@ -545,6 +562,11 @@ class Executor:
                 "not multi-file paths"
             )
             raise UnsupportedOperationError(msg)
+        provenance = plan.metadata.provenance
+        if provenance.kind is not SourceKind.PARQUET or not provenance.writable:
+            raise UnsupportedOperationError(
+                "commit() requires writable local Parquet source provenance"
+            )
 
         source_path_str = scan.source.paths[0]
         if any(c in source_path_str for c in "*?[]"):
@@ -735,26 +757,39 @@ class Executor:
         self,
         plan: LogicalPlan,
         *,
-        mode: Literal["all", "logical", "sql", "physical"] = "all",
+        mode: Literal["all", "logical", "optimized", "json", "sql", "physical"] = "all",
     ) -> str:
-        compiled = self._compiler.compile(plan)
+        optimization = self._compiler.optimize(plan)
+        logical = json.dumps(plan_to_dict(plan), indent=2)
+        optimized = json.dumps(plan_to_dict(optimization.plan), indent=2)
+        if mode == "logical":
+            return f"DuckPD logical plan:\n{logical}"
+        if mode == "optimized":
+            return f"DuckPD optimized logical plan:\n{optimized}"
+        if mode == "json":
+            return json.dumps(optimization.to_dict(), indent=2)
+
+        compiled = self._compiler.compile(optimization.plan, optimize=False)
         relation = compiled.relation
         self._session._begin_execution()
-        if mode == "logical":
-            return f"DuckPD logical plan:\n{plan!r}"
         if mode == "sql":
             return f"DuckDB SQL:\n{relation.sql_query()}"
         if mode == "physical":
             return f"DuckDB physical plan:\n{relation.explain()}"
         if mode == "all":
+            changed = [
+                snapshot.name for snapshot in optimization.snapshots if snapshot.changed
+            ]
             return (
-                f"DuckPD logical plan:\n{plan!r}\n\n"
+                f"DuckPD logical plan:\n{logical}\n\n"
+                f"DuckPD optimized logical plan:\n{optimized}\n"
+                f"Applied rewrites: {changed}\n\n"
                 f"DuckDB SQL:\n{relation.sql_query()}\n\n"
                 f"DuckDB physical plan:\n{relation.explain()}"
             )
         msg = (
-            f"Unknown explain mode: {mode!r}; "
-            "expected 'all', 'logical', 'sql', or 'physical'"
+            f"Unknown explain mode: {mode!r}; expected 'all', 'logical', "
+            "'optimized', 'json', 'sql', or 'physical'"
         )
         raise ValueError(msg)
 
@@ -777,7 +812,7 @@ class Executor:
         )
 
     def profile(self, plan: LogicalPlan) -> ProfileResult:
-        """Execute plan with DuckDB structured JSON profiling enabled."""
+        """Execute plan and separate planning from engine execution time."""
         self._validate_execution(plan)
         con = self._session._connection
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
@@ -787,11 +822,18 @@ class Executor:
             con.execute("PRAGMA enable_profiling = 'json'")
             con.execute(f"PRAGMA profiling_output = '{temp_path}'")
             self._session._begin_execution()
-            compiled = self._compiler.compile(plan)
-            visible_rel = self._compiler.project_visible(compiled, plan).relation
+            planning_started = perf_counter()
+            optimization = self._compiler.optimize(plan)
+            compiled = self._compiler.compile(optimization.plan, optimize=False)
+            visible_rel = self._compiler.project_visible(
+                compiled, optimization.plan
+            ).relation
+            planning_seconds = perf_counter() - planning_started
+            execution_started = perf_counter()
             reader = visible_rel.to_arrow_reader()
             for _ in reader:
                 pass
+            execution_seconds = perf_counter() - execution_started
         finally:
             con.execute("PRAGMA disable_profiling")
 
@@ -812,6 +854,9 @@ class Executor:
             peak_buffer_memory=int(raw_data.get("system_peak_buffer_memory") or 0),
             peak_temp_dir_size=int(raw_data.get("system_peak_temp_dir_size") or 0),
             raw=raw_data,
+            planning_seconds=planning_seconds,
+            execution_seconds=execution_seconds,
+            optimization=optimization.to_dict(),
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:

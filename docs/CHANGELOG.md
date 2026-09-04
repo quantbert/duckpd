@@ -27,6 +27,10 @@ the [release policy](RELEASES.md).
 - Local Parquet atomic commit (`DataFrame.commit` and `CommitReport`): canonicalizes local source paths at frame creation, streams lazy modifications through a sibling staging file, preserves hidden index columns and Arrow schema/pandas metadata, validates DuckDB logical types and row-count preservation, supports optional backup retention, and performs atomic replacement. POSIX mode and available extended attributes are copied; Windows replacement metadata is preserved by `ReplaceFileW`. Owner/group, Parquet encodings, and physical layout may change. The initial implementation is single-writer and does not lock unrelated processes.
 - Cross-platform process RSS sampling (`get_peak_rss_bytes` in `benchmark.metrics`): unifies Linux `/proc/self/status` VmHWM, macOS `getrusage`, and Windows `ctypes` peak working set sampling without unconditional `resource` imports.
 - Experimental Narwhals plugin: `nw.from_native()` wraps DuckPD DataFrames as lazy frames; `nw.col`/`nw.lit` expressions support aliases, scalar broadcasting, arithmetic, comparisons, boolean composition, casts, null predicates, documented string/datetime accessors, global reductions, and lazy grouped aggregation. Supported transformations build DuckPD plans without collection.
+- Narwhals lazy coverage now includes numeric transforms, ordered cumulative/rank/row-window expressions, relational transforms, equi/cross joins, scalar temporal/decimal schemas, explicit Arrow/pandas collection, and direct Parquet sinks. Undefined reshape, join, nested-type, fallback, and public plugin-scan paths reject before execution.
+- Typed semantic metadata now includes expression aliases and nullability, explicit `RowIdentity` stability/uniqueness/source keys, and `SourceProvenance` with sanitized canonical locations, fingerprints, write capability, and transformation history.
+- A named idempotent logical optimizer adds safe predicate pushdown, required-column/source liveness, combined limits, top-k plans, redundant project/sort removal, and common-subplan persist recommendations.
+- `explain("optimized")` and `explain("json")` expose optimized plans and per-pass before/after snapshots. Profiles separate DuckPD planning and execution timings; `scripts/benchmark_optimizer.py` warms and alternates variants, asserts Arrow-result equality, reports median/range statistics, and ablates each retained pass on Linux.
 - Release artifact verification: generated Narwhals compatibility documentation, wheel/sdist content checks, and clean-environment wheel installation smoke tests are configured for the CI Python 3.11–3.14 matrix; local Linux verification passes on all four Python versions.
 
 ### Changed
@@ -35,6 +39,8 @@ the [release policy](RELEASES.md).
 - Pandas collection preserves exact decimal, binary, and date values rather than accepting DuckDB's lossy/default pandas conversions.
 - Pandas collection now preserves nullable integer, boolean, string, datetime/time-zone, and duration source dtypes through identity-preserving plans; SQL null output policy is explicit, outer joins safely promote plain integer/boolean payloads, and nested DuckDB types are rejected before execution.
 - Row-wise concat now preserves input sequence and ordered-input row identity; persistence retains index and order metadata. Joins explicitly clear total ordering guarantees so positional and window operations fail early until an explicit stable sort is applied.
+- Compiler output is checked against declared logical schemas; unknown types remain conservative rather than suppressing known mismatches.
+- Stable-order requirements now cover first-tie ranking and composite `.loc` request/source identities; unordered operations reject before execution.
 
 ## Untagged development milestones
 

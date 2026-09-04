@@ -12,6 +12,7 @@ from duckpd._logical import (
     IndexUniqueness,
     JoinPlan,
     JoinType,
+    Nullability,
 )
 from duckpd._metadata import after_join, find_column
 from duckpd.errors import AlignmentError
@@ -284,6 +285,18 @@ def plan_merge(
             output_columns.append(replace(c, label=f"{c.label}{rsuffix or ''}"))
         else:
             output_columns.append(c)
+
+    nullable_ids: set[ColumnId] = set()
+    if join_type in {JoinType.RIGHT, JoinType.OUTER}:
+        nullable_ids.update(column.id for column in left_included)
+    if join_type in {JoinType.LEFT, JoinType.OUTER}:
+        nullable_ids.update(column.id for column in right_included)
+    output_columns = [
+        replace(column, nullable=Nullability.NULLABLE)
+        if column.id in nullable_ids
+        else column
+        for column in output_columns
+    ]
 
     output_labels = [column.label for column in output_columns]
     duplicate_labels = sorted(

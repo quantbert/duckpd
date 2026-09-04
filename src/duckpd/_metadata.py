@@ -13,8 +13,10 @@ from duckpd._logical import (
     NullPlacement,
     OrderColumn,
     OrderSpec,
+    RowIdentity,
     SortDirection,
     SortKey,
+    SourceProvenance,
 )
 
 
@@ -32,9 +34,14 @@ def source_metadata(
     columns: tuple[Column, ...],
     *,
     index_labels: tuple[str, ...] = (),
+    provenance: SourceProvenance | None = None,
 ) -> FrameMetadata:
     """Create source metadata and hide explicit index columns."""
-    base = FrameMetadata(columns)
+    provenance = provenance or SourceProvenance()
+    base = FrameMetadata(
+        columns,
+        provenance=provenance,
+    )
     if not index_labels:
         return base
     index_columns = tuple(find_column(base, label) for label in index_labels)
@@ -43,7 +50,7 @@ def source_metadata(
         replace(column, hidden=True) if column.id in index_ids else column
         for column in columns
     )
-    return FrameMetadata(updated, IndexSpec(index_ids, drop=True), OrderSpec())
+    return replace(base, columns=updated, index=IndexSpec(index_ids, drop=True))
 
 
 def projection_columns(
@@ -76,7 +83,18 @@ def after_projection(
         if all(key.column_id in available for key in metadata.ordering.keys)
         else OrderSpec()
     )
-    result = FrameMetadata(columns, index, ordering)
+    identity = (
+        metadata.row_identity
+        if all(column_id in available for column_id in metadata.row_identity.columns)
+        else RowIdentity()
+    )
+    result = FrameMetadata(
+        columns,
+        index,
+        ordering,
+        identity,
+        _after_transform(metadata.provenance, "project"),
+    )
     validate_metadata(result)
     return result
 
@@ -86,7 +104,11 @@ def after_sort(metadata: FrameMetadata, keys: tuple[SortKey, ...]) -> FrameMetad
     order_keys: list[OrderColumn] = []
     for key in keys:
         if not isinstance(key.expression, ColumnRef):
-            return FrameMetadata(metadata.columns, metadata.index, OrderSpec())
+            return replace(
+                metadata,
+                ordering=OrderSpec(),
+                provenance=_after_transform(metadata.provenance, "sort"),
+            )
         order_keys.append(
             OrderColumn(
                 key.expression.column_id,
@@ -94,10 +116,10 @@ def after_sort(metadata: FrameMetadata, keys: tuple[SortKey, ...]) -> FrameMetad
                 key.null_placement,
             )
         )
-    result = FrameMetadata(
-        metadata.columns,
-        metadata.index,
-        OrderSpec(tuple(order_keys)),
+    result = replace(
+        metadata,
+        ordering=OrderSpec(tuple(order_keys)),
+        provenance=_after_transform(metadata.provenance, "sort"),
     )
     validate_metadata(result)
     return result
@@ -126,10 +148,11 @@ def set_index(
         replace(column, hidden=True) if drop and column.id in index_ids else column
         for column in metadata.columns
     )
-    result = FrameMetadata(
-        updated,
-        IndexSpec(index_ids, drop=drop),
-        metadata.ordering,
+    result = replace(
+        metadata,
+        columns=updated,
+        index=IndexSpec(index_ids, drop=drop),
+        provenance=_after_transform(metadata.provenance, "set_index"),
     )
     validate_metadata(result)
     return result
@@ -165,7 +188,13 @@ def reset_index(metadata: FrameMetadata, *, drop: bool) -> FrameMetadata:
         if all(key.column_id in available for key in metadata.ordering.keys)
         else OrderSpec()
     )
-    result = FrameMetadata(columns, IndexSpec(), ordering)
+    result = replace(
+        metadata,
+        columns=columns,
+        index=IndexSpec(),
+        ordering=ordering,
+        provenance=_after_transform(metadata.provenance, "reset_index"),
+    )
     validate_metadata(result)
     return result
 
@@ -210,12 +239,72 @@ def after_union(
     *,
     index_ids: tuple[ColumnId, ...] = (),
     ordering_keys: tuple[OrderColumn, ...] = (),
+    identity_ids: tuple[ColumnId, ...] = (),
 ) -> FrameMetadata:
     """Create metadata for a union (concat) plan."""
     index = IndexSpec(index_ids, drop=True) if index_ids else IndexSpec()
-    result = FrameMetadata(columns, index, OrderSpec(ordering_keys))
+    identity_ids = tuple(identity_ids)
+    result = FrameMetadata(
+        columns,
+        index,
+        OrderSpec(ordering_keys),
+        RowIdentity(
+            identity_ids,
+            stable=bool(identity_ids),
+            unique=bool(identity_ids),
+        ),
+    )
     validate_metadata(result)
     return result
+
+
+def after_filter(metadata: FrameMetadata) -> FrameMetadata:
+    """Preserve identity while recording that source rows were filtered."""
+    return replace(
+        metadata,
+        provenance=_after_transform(
+            metadata.provenance,
+            "filter",
+            row_preserving=False,
+        ),
+    )
+
+
+def after_reindex(
+    metadata: FrameMetadata,
+    columns: tuple[Column, ...],
+    ordering: OrderSpec,
+    row_identity: RowIdentity,
+) -> FrameMetadata:
+    """Track stable request order without claiming duplicated rows are unique."""
+    result = replace(
+        metadata,
+        columns=columns,
+        ordering=ordering,
+        row_identity=row_identity,
+        provenance=_after_transform(
+            metadata.provenance,
+            "reindex",
+            row_preserving=False,
+        ),
+    )
+    validate_metadata(result)
+    return result
+
+
+def _after_transform(
+    provenance: SourceProvenance,
+    operation: str,
+    *,
+    row_preserving: bool = True,
+) -> SourceProvenance:
+    if not provenance.locations:
+        return provenance
+    return replace(
+        provenance,
+        row_preserving=provenance.row_preserving and row_preserving,
+        transformations=(*provenance.transformations, operation),
+    )
 
 
 def validate_metadata(metadata: FrameMetadata) -> None:
@@ -227,5 +316,6 @@ def validate_metadata(metadata: FrameMetadata) -> None:
         for key in metadata.ordering.keys
         if key.column_id not in available
     )
+    dangling.update(set(metadata.row_identity.columns) - available)
     if dangling:
         raise AssertionError(f"Metadata references missing columns: {dangling}")

@@ -167,7 +167,7 @@ optimizer need proves otherwise.
 - [x] `Function`, `Case`, and `Cast`.
 - [x] `AggregateExpression` for global reductions.
 - [x] `WindowExpression` with partition, order, and frame metadata.
-- [ ] Typed aliases and nullability.
+- [x] Typed aliases and nullability.
 
 ### Frame metadata
 
@@ -177,12 +177,10 @@ optimizer need proves otherwise.
       uniqueness state, and names.
 - [x] `OrderSpec`: unknown or guaranteed ordered keys, directions, null
       placement, and stability.
-- [ ] `RowIdentity`: stable hidden ordinals are implemented for pandas and
-      Arrow snapshots, row-wise unions synthesize stable source/row ordinals,
-      and persistence retains identity columns. Join identity and externally
-      keyed source identity remain incomplete.
-- [ ] `SourceProvenance`: source kind, location, fingerprint, write capability,
-      and transformations that preserve source rows.
+- [x] `RowIdentity`: stable/unique source ordinals, composite reindex and union
+      identities, and explicit clearing across joins and aggregates.
+- [x] `SourceProvenance`: sanitized canonical locations, fingerprints, write
+      capability, and row-preserving transformation history.
 - [x] `FrameState`: plan, schema, index, order, row identity, provenance, and
       owning session.
 
@@ -328,11 +326,10 @@ Goal: make metadata trustworthy before implementing many methods.
       uniqueness.
 - [x] Add `order_by=` declarations at data-source boundaries.
 - [x] Reject order-dependent methods when `OrderSpec` is unknown.
-- [ ] Define collection behavior for absent, explicit, duplicate, named, and
+- [x] Define collection behavior for absent, explicit, duplicate, named, and
       null-containing indexes.
-- [ ] Define Series behavior after the parent DataFrame handle is reassigned;
-      recommended: the Series remains bound to the immutable state from which
-      it was created.
+- [x] Define Series behavior after the parent DataFrame handle is reassigned:
+      the Series remains bound to the immutable state from which it was created.
 - [x] Ensure metadata inspection does not accidentally execute row-producing
       queries.
 
@@ -340,7 +337,7 @@ Exit gate:
 
 - [x] Metadata unit tests cover every plan node and cannot leave dangling
       index/order column IDs.
-- [ ] Differential tests match pandas for supported dtype/null/index cases.
+- [x] Differential tests match pandas for supported dtype/null/index cases.
 
 ### Phase 3: core single-frame pandas API
 
@@ -482,21 +479,23 @@ Goal: make execution boundaries safe and explainable.
 - [x] Implement `save_as_table()` and append behavior with schema validation.
 - [x] Implement direct CSV and Parquet sinks using relation writers or
       `COPY (query) TO`; request `RETURN_STATS` where a report is needed.
-- [ ] Keep sink paths and options parameterized or safely escaped.
-- [x] Add `explain(mode="logical" | "sql" | "physical" | "all")`.
-- [ ] Add an optimized logical-plan view with named rewrite passes and
+- [x] Keep sink paths and options parameterized or safely escaped.
+- [x] Add `explain(mode="logical" | "optimized" | "json" | "sql" |
+      "physical" | "all")`.
+- [x] Add an optimized logical-plan view with named rewrite passes and
       before/after plan snapshots.
-- [ ] Implement required-column analysis, projection/predicate pushdown,
+- [x] Implement required-column analysis, projection/predicate pushdown,
       limit/top-k pushdown, and redundant project/sort elimination where these
       add pandas-semantic knowledge beyond DuckDB's optimizer.
-- [ ] Add liveness and common-subplan analysis; recommend explicit `persist()`
+- [x] Add liveness and common-subplan analysis; recommend explicit `persist()`
       before considering automatic cache insertion.
-- [x] Add `profile()` using DuckDB's structured JSON profiling. Report plan
-      build, compile, operator, I/O, spill, conversion, and total timings.
-- [ ] Support machine-readable profile output and optional Chrome Trace Event
-      JSON without parsing DuckDB's human-readable plan text.
-- [ ] Add a benchmark context that forces complete execution without disabling
-      normal optimization, and separates planning, execution, and conversion.
+- [x] Add `profile()` using DuckDB's structured JSON profiling. Report DuckPD
+      planning/execution timing plus DuckDB operator, I/O, spill, and total
+      metrics.
+- [x] Support machine-readable optimized plans and profile output without
+      parsing DuckDB's human-readable plan text.
+- [x] Add a Linux benchmark context that forces complete execution and
+      separately reports optimizer and execution costs.
 - [x] Add `explain_write()` with strategy, estimated scan, blocking operators,
       ordering guarantees, spill configuration, and expected extra disk use.
 - [ ] Mark estimates as estimates and avoid executing full counts merely to
@@ -625,8 +624,9 @@ Goal: publish a narrow, honest, measurable API.
       observability, performance, portability, interoperability, and openness.
 - [x] Add small, medium, and larger-than-memory benchmark datasets generated
       deterministically rather than checked into Git.
-- [ ] Run the package build/install smoke checks across the CI OS/Python matrix;
-      clean installs pass locally on Linux with Python 3.11, 3.12, 3.13, and 3.14.
+- [x] Run package build/install smoke checks on Linux for Python 3.11, 3.12,
+      3.13, and 3.14. Cross-platform validation is deferred to the beta exit
+      portability gate.
 - [x] Add artifact-content checks for wheel/sdist metadata, required package
       files such as `py.typed`, and exclusion of caches, generated data, and
       secrets.
@@ -693,8 +693,9 @@ product contract must remain explicitly unsupported and fail before execution.
 
 Exit gate:
 
-- [ ] The documented v0.1 matrix is fully tested, examples run in CI, package
-      artifacts install cleanly, and unsupported behavior is explicit.
+- [ ] The documented Linux-beta matrix is fully tested, examples run in CI,
+      package artifacts install cleanly on supported Linux/Python combinations,
+      and unsupported behavior is explicit.
 
 ### Beta exit portability gate
 
@@ -709,9 +710,10 @@ otherwise ready to leave beta. At that point:
 - [ ] Clean-install the built wheel and run the package smoke pipeline on Windows.
 
 
-## First PR-sized increments
+## Implementation sequence
 
-Implement in this order. Each increment should be independently testable.
+Complete numbered increments in order. The active incomplete increments are
+decomposed into independently testable milestones below.
 
 1. [x] Project scaffold, `uv`, quality tools, CI, and version policy.
 2. [x] Session lifecycle plus Parquet/pandas/Arrow source registration.
@@ -745,48 +747,167 @@ Implement in this order. Each increment should be independently testable.
        benchmarks and execution limits.
 16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
-17. [ ] Finish Narwhals compliance and cross-platform release verification.
+17. [ ] Complete the Linux-beta Narwhals lazy-frame contract.
     - [x] Prototype wrapping, generated compatibility documentation, expression
-          projection/filtering, and string/datetime expression namespaces.
-    - [x] Clean wheel installs pass locally on Linux with Python 3.11–3.14.
-    - [ ] Confirm the clean-install matrix across CI operating systems.
+          projection/filtering, string/datetime namespaces, and aggregation.
+    - [x] Complete the supported expression, relational, join, schema, I/O, and
+          collection surface defined in Stream 1 below, except upstream-blocked
+          public plugin scans.
+    - [x] Pass the supported Narwhals compliance corpus on the lowest and newest
+          supported Narwhals 2.x releases without hidden collection.
+18. [x] Close semantic and metadata correctness debt.
+    - [x] Make typed nullability, row identity, and source provenance explicit
+          plan metadata with complete transition tests.
+    - [x] Close the dtype/null/index and ordered-operation differential gates
+          defined in Stream 2 below.
+19. [x] Add observable, semantics-preserving optimizer passes with Linux
+        benchmark proof as defined in Stream 3 below.
 
-### Active workstreams and immediate next priorities
+### Active Linux-beta workstreams and goals
+
+Cross-platform runtime validation is not an active beta priority. Development,
+performance claims, and release checks target Linux on Python 3.11 through 3.14.
+The portability work in the beta exit gate remains deferred.
 
 ```mermaid
 graph TD
-    A[Current State: v0.0.7 Solid Lazy Core] --> B[Stream 1: Cross-Frame Alignment & Concat axis=1]
-    A --> C[Stream 2: Single-Frame Analytical Transforms clip/replace]
-    A --> D[Stream 3: Observability & Native Memory/Spill Profiling]
-    A --> E[Stream 4: Atomic Commit & Persistent Sinks]
-    A --> F[Stream 5: Release Readiness & Narwhals Integration]
+    A[Current State: v0.0.7 Solid Lazy Core] --> N[Stream 1: Narwhals Compliance]
+    A --> M[Stream 2: Semantic and Metadata Hardening]
+    M --> O[Stream 3: Optimizer and Observability]
 ```
 
-1. **Stream 1: Cross-Frame Alignment (Phase 5)**
-   - [x] Implement `duckpd.concat(objs, axis=1)` via index-aligned full outer
-     joins with column collision handling.
-   - [x] Implement cross-frame arithmetic (`df1 + df2`, `s1 + s2`) aligning
-     lazily on explicit compatible indexes (`IndexSpec`).
-2. **Stream 2: High-Value Analytical Transformations (Phase 3) [Completed]**
-   - [x] `clip(lower, upper)` for Series and DataFrame.
-   - [x] `replace(to_replace, value)` for Series and DataFrame.
-   - [x] `sample(n=..., frac=..., random_state=...)` with deterministic seeds.
-3. **Stream 3: Observability & Memory Profiling (Phase 8) [Completed]**
-   - `df.profile()` exposes DuckDB structured JSON profiling (operator timings, spill, I/O).
-   - Benchmark and execution-limit tests capture isolated RSS and verify DuckDB spill bytes.
-   - Windows-specific runtime validation is deferred to the beta exit portability gate.
-4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9) [Completed]**
-   - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
-   - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.
-5. **Stream 5: Ecosystem & Release Readiness (Phase 12)**
-   - [x] Prototype Narwhals wrapping, core expressions, expression-based frame
-     transforms, and string/datetime expression namespaces without collection.
-   - [x] Add aggregate expressions and lazy-frame aggregate dispatch.
-   - [ ] Run clean wheel build/install smoke tests across the CI OS/Python
-     matrix for v0.1.0 release tagging.
+#### Stream 1: Narwhals lazy-frame compliance
 
-Do not begin broad accessor coverage, mutable assignment, or remote split
-planning before increment 6 proves metadata transitions are reliable.
+**Goal:** make DuckPD a useful Narwhals lazy backend for supported analytical
+workflows while preserving DuckPD's no-hidden-collection, explicit-ordering,
+and fail-before-execution contracts.
+
+**Scope and sequence:**
+
+1. **Compliance baseline**
+   - [x] Run the upstream lazy-frame/backend tests against the lowest and newest
+         supported Narwhals versions.
+   - [x] Classify every failure as supported work, an intentional exclusion, or
+         an upstream incompatibility; record the result in the machine-readable
+         compatibility matrix.
+   - [x] Add a shared assertion harness proving plan construction performs zero
+         executions, `to_native()` returns DuckPD, and collection executes one
+         DuckDB query.
+2. **Expression coverage**
+   - [x] Map supported numeric transforms and scalar functions onto typed
+         DuckPD expressions.
+   - [x] Map cumulative, ranking, and row-based rolling expressions only when
+         the input has the ordering metadata required by DuckPD.
+   - [x] Reject unsupported dtypes, windows, and argument combinations before
+         compilation or source execution.
+3. **Relational coverage**
+   - [x] Implement `drop_nulls`, `unique`, `top_k`, and `with_row_index` using
+         existing DuckPD plans and metadata transitions.
+   - [x] Reject `unpivot` and `explode` before execution until their nested and
+         mixed-dtype output semantics are defined.
+   - [x] Map equi-joins and cross joins to DuckPD merge plans; explicitly reject
+         as-of, semi, and anti joins.
+4. **Schema, I/O, and collection**
+   - [x] Return precise Narwhals scalar schemas for decimal, timestamp,
+         timezone, and duration types. Keep unsupported nested types explicit.
+   - [ ] Public `backend="duckpd"` scans remain blocked by Narwhals resolving
+         plugins to `Implementation.UNKNOWN` before namespace dispatch.
+         `sink_parquet` is lazy; use DuckPD readers followed by `nw.from_native`.
+   - [x] Keep Arrow as the default collection backend and expose pandas only
+         through an explicit requested backend; reject Polars explicitly.
+5. **Contract closure**
+   - [x] Document eager-only protocols, arbitrary Python `map_batches`, nested
+         dtype limits, and ordering-dependent exclusions.
+   - [x] Generate compatibility documentation in CI and fail when code, tests,
+         and the matrix disagree.
+
+**Exit gate:** every operation marked supported passes on both tested Narwhals
+versions for ordinary, empty, null, duplicate, and ordering-sensitive inputs;
+unsupported operations fail before source execution; no adapter path silently
+collects to pandas.
+
+#### Stream 2: semantic and metadata hardening
+
+**Goal:** make schema, nullability, index, order, row identity, and provenance
+trustworthy enough that every plan rewrite and adapter can preserve or reject
+semantics mechanically.
+
+**Scope and sequence:**
+
+1. **Contract audit**
+   - [x] Reconcile stale roadmap checkboxes with implemented behavior and add
+         focused tests for Series snapshots after DataFrame handle reassignment,
+         shared-state aliases, sink path safety, and index collection.
+   - [x] Define the supported collection contract for absent, named, duplicate,
+         multi-column, and null-containing indexes.
+2. **Typed expression and schema metadata**
+   - [x] Make expression aliases and nullability explicit in the typed IR.
+   - [x] Define conservative nullability propagation for projections, `CASE`,
+         casts, aggregates, joins, unions, and windows.
+   - [x] Reject compiler output whose physical schema contradicts declared
+         metadata.
+3. **Row identity**
+   - [x] Replace ad hoc identity flags with a `RowIdentity` model covering
+         stability, uniqueness, source keys, and synthesized ordinals.
+   - [x] Define transitions for scans, filters, projects, sorts, joins, unions,
+         aggregates, windows, reindexing, and persistence.
+   - [x] Require positional and first/last-sensitive operations to prove the
+         identity and ordering they consume.
+4. **Source provenance**
+   - [x] Add `SourceProvenance` for source kind, sanitized canonical location,
+         fingerprint, write capability, and row-preserving transformations.
+   - [x] Preserve provenance only through transformations that retain the
+         source-row contract and clear it at semantic boundaries.
+   - [x] Use provenance for commit eligibility, source diagnostics, and
+         credential-safe machine-readable plans.
+5. **Differential closure**
+   - [x] Cover supported dtype/null/index combinations against pandas 3.0,
+         including empty and all-null inputs.
+   - [x] Apply a shared unordered-input suite to every positional, cumulative,
+         ranking, rolling, and first/last tie-sensitive operation.
+   - [x] Cover ordered inputs with duplicate sort keys, null keys/values, and
+         stable tie behavior.
+   - [x] Assert streaming plans remain one DuckDB query and metadata inspection
+         executes no row-producing query.
+
+**Exit gate:** every plan node has total metadata transitions with no dangling
+column IDs; supported collection and ordered-operation cases match pandas;
+operations lacking sufficient identity or ordering fail before execution.
+
+#### Stream 3: optimizer and observability
+
+**Goal:** improve Linux query performance with DuckPD-aware rewrites whose
+semantic effects are inspectable and whose value is proven by benchmarks.
+
+**Scope and sequence:**
+
+1. **Optimizer framework**
+   - [x] Add a named, ordered, idempotent rewrite pipeline and an optimized
+         logical-plan view with before/after snapshots.
+   - [x] Require every pass to preserve root schema, index, ordering, row
+         identity, provenance, and null semantics.
+2. **Semantic optimizer passes**
+   - [x] Implement required-column and hidden-metadata liveness analysis.
+   - [x] Push projections and safe predicates through plan nodes and into scans.
+   - [x] Add limit/top-k rewrites and eliminate redundant projects and sorts.
+   - [x] Detect common subplans and recommend explicit `persist()` without
+         automatic caching.
+3. **Observability and benchmark proof**
+   - [x] Export machine-readable optimized plans and DuckDB JSON profiles.
+   - [x] Separate DuckPD planning and execution timings while retaining DuckDB
+         spill, I/O, operator, and total metrics.
+   - [x] Benchmark the rewrite pipeline against validated results on Linux and
+         retain only semantics-preserving passes without material regression.
+
+**Exit gate:** every optimizer pass is observable, idempotent, and proven to
+preserve schema, index, ordering, row identity, provenance, and null semantics;
+retained passes improve representative validated Linux workloads without
+material regressions.
+
+Controlled UDF/fallback work remains deferred to Phase 10. Remote sources and
+split planning remain deferred to Phase 11; neither is part of the active
+Linux-beta optimizer stream.
+
 ## Definition of done for each public operation
 
 - [ ] Public signature and supported arguments are documented.

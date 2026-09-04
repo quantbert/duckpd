@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from duckpd._typing import ScalarValue
@@ -21,6 +22,14 @@ class ColumnId:
         return cls(uuid4())
 
 
+class Nullability(Enum):
+    """Whether a logical expression may produce SQL NULL."""
+
+    UNKNOWN = "unknown"
+    NULLABLE = "nullable"
+    NON_NULL = "non_null"
+
+
 @dataclass(frozen=True)
 class Column:
     """Column metadata available without executing row-producing queries."""
@@ -29,7 +38,20 @@ class Column:
     label: str
     duckdb_type: str
     hidden: bool = False
-    row_identity: bool = False
+    nullable: Nullability = Nullability.UNKNOWN
+    alias_of: ColumnId | None = None
+
+
+def sanitize_source_location(location: str) -> str:
+    """Remove URI credentials, query parameters, and fragments."""
+    if "://" not in location:
+        return location
+    parsed = urlsplit(location)
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 @dataclass(frozen=True)
@@ -287,12 +309,48 @@ class OrderSpec:
 
 
 @dataclass(frozen=True)
+class RowIdentity:
+    """Stable physical columns that identify source rows within a plan."""
+
+    columns: tuple[ColumnId, ...] = ()
+    stable: bool = False
+    unique: bool = False
+    source_key: str | None = None
+
+
+class SourceKind(Enum):
+    """Origin category retained independently of a concrete scan node."""
+
+    UNKNOWN = "unknown"
+    PANDAS = "pandas"
+    ARROW = "arrow"
+    PARQUET = "parquet"
+    CSV = "csv"
+    TABLE = "table"
+    SQL = "sql"
+
+
+@dataclass(frozen=True)
+class SourceProvenance:
+    """Source location, mutability, and transformation lineage."""
+
+    kind: SourceKind = SourceKind.UNKNOWN
+    locations: tuple[str, ...] = ()
+    fingerprint: str | None = None
+    writable: bool = False
+    row_preserving: bool = True
+    transformations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class FrameMetadata:
-    """Schema, index, and ordering state for one logical plan."""
+    """Schema, index, ordering, row identity, and source provenance."""
 
     columns: tuple[Column, ...]
     index: IndexSpec = IndexSpec()
     ordering: OrderSpec = OrderSpec()
+    row_identity: RowIdentity = RowIdentity()
+    provenance: SourceProvenance = SourceProvenance()
 
     @property
     def visible_columns(self) -> tuple[Column, ...]:
@@ -394,6 +452,59 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
     )
 
 
+def expression_nullability(
+    expression: Expression,
+    metadata: FrameMetadata,
+) -> Nullability:
+    """Infer nullability conservatively from typed expression structure."""
+    if isinstance(expression, ColumnRef):
+        return next(
+            (
+                column.nullable
+                for column in metadata.columns
+                if column.id == expression.column_id
+            ),
+            Nullability.UNKNOWN,
+        )
+    if isinstance(expression, LiteralValue):
+        return (
+            Nullability.NULLABLE if expression.value is None else Nullability.NON_NULL
+        )
+    if isinstance(expression, UnaryExpression):
+        return expression_nullability(expression.operand, metadata)
+    if isinstance(expression, CastExpression):
+        return expression_nullability(expression.operand, metadata)
+    if isinstance(expression, FunctionCall):
+        if expression.name.lower() in {"isnull", "notnull", "isnan", "isfinite"}:
+            return Nullability.NON_NULL
+        values = [
+            expression_nullability(argument, metadata)
+            for argument in expression.arguments
+        ]
+    elif isinstance(expression, CaseWhen):
+        values = [
+            expression_nullability(expression.value, metadata),
+            expression_nullability(expression.otherwise, metadata),
+        ]
+    elif isinstance(expression, WindowExpression):
+        values = [
+            expression_nullability(argument, metadata)
+            for argument in expression.arguments
+        ]
+        if not values:
+            return Nullability.NON_NULL
+    else:
+        values = [
+            expression_nullability(expression.left, metadata),
+            expression_nullability(expression.right, metadata),
+        ]
+    if any(value is Nullability.NULLABLE for value in values):
+        return Nullability.NULLABLE
+    if values and all(value is Nullability.NON_NULL for value in values):
+        return Nullability.NON_NULL
+    return Nullability.UNKNOWN
+
+
 class LogicalPlanBase:
     """Shared metadata access for immutable plan nodes."""
 
@@ -444,6 +555,17 @@ class LimitPlan(LogicalPlanBase):
     """Restrict the number of output rows."""
 
     input: LogicalPlan
+    count: int
+    offset: int
+    metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
+class TopKPlan(LogicalPlanBase):
+    """Order rows and retain only a bounded result window."""
+
+    input: LogicalPlan
+    keys: tuple[SortKey, ...]
     count: int
     offset: int
     metadata: FrameMetadata
@@ -523,6 +645,7 @@ LogicalPlan: TypeAlias = (
     | FilterPlan
     | ProjectPlan
     | SortPlan
+    | TopKPlan
     | LimitPlan
     | AggregatePlan
     | JoinPlan

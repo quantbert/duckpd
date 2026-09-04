@@ -3,6 +3,10 @@
 DuckPD is a work in progress. Releases before `1.0` are intended for evaluation,
 experimentation, and feedback rather than production-critical workloads.
 
+Pre-`1.0` beta development and release validation target Linux on Python 3.11
+through 3.14. Windows and other cross-platform runtime guarantees are deferred
+to the roadmap's beta exit portability gate.
+
 ## Versioning
 
 DuckPD uses [PEP 440](https://peps.python.org/pep-0440/) versions with a
@@ -46,13 +50,14 @@ moving its tag.
 
 ## Current minimum gate
 
-Until stronger artifact checks are implemented, the minimum release gate is:
+The minimum Linux-beta release gate is:
 
 - Ruff lint and format checks;
 - strict Pyright analysis;
 - the complete pytest suite and coverage threshold;
 - successful wheel and source-distribution builds;
+- artifact-content validation for metadata, required package files, generated
+  data, caches, and secrets;
+- clean wheel installation and package smoke tests on Linux for Python 3.11,
+  3.12, 3.13, and 3.14;
 - an explicit work-in-progress warning in the package README.
-
-Planned clean-environment installation and artifact-content checks are tracked
-in the [roadmap](roadmap.md).

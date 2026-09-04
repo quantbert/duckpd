@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace as dataclass_replace
 from decimal import Decimal
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
@@ -20,7 +21,6 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     FilterPlan,
-    FrameMetadata,
     FunctionCall,
     IndexSpec,
     LiteralValue,
@@ -34,8 +34,9 @@ from duckpd._logical import (
     UnaryExpression,
     UnaryOperator,
     WindowExpression,
+    expression_nullability,
 )
-from duckpd._metadata import after_aggregate, after_sort
+from duckpd._metadata import after_aggregate, after_filter, after_sort
 from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._reductions import (
     aggregate_plan,
@@ -153,17 +154,13 @@ class Series:
         if random_state is not None and not 0 <= random_state <= 2_147_483_647:
             raise ValueError("random_state must be between 0 and 2**31 - 1")
 
-        metadata = FrameMetadata(
-            columns=self._plan.metadata.columns,
-            index=self._plan.metadata.index,
-            ordering=OrderSpec(),
-        )
+        metadata = dataclass_replace(self._plan.metadata, ordering=OrderSpec())
         if ignore_index:
             if metadata.index.columns:
                 metadata = reset_index_metadata(metadata, drop=True)
             else:
-                metadata = FrameMetadata(
-                    columns=self._plan.metadata.columns,
+                metadata = dataclass_replace(
+                    metadata,
                     index=IndexSpec(),
                     ordering=OrderSpec(),
                 )
@@ -188,6 +185,12 @@ class Series:
             ColumnId.create(),
             out_label,
             expression_type(self._plan, self._expression),
+            nullable=expression_nullability(self._expression, self._plan.metadata),
+            alias_of=(
+                self._expression.column_id
+                if isinstance(self._expression, ColumnRef)
+                else None
+            ),
         )
         all_cols = projection_columns(self._plan.metadata, (out_col,))
         projections = [
@@ -357,7 +360,9 @@ class Series:
             raise ValueError("Series.dropna supports only axis=0 or axis='index'")
 
         not_null_pred = FunctionCall("notnull", (self._expression,))
-        filtered_plan = FilterPlan(self._plan, not_null_pred, self._plan.metadata)
+        filtered_plan = FilterPlan(
+            self._plan, not_null_pred, after_filter(self._plan.metadata)
+        )
         return Series(self._session, filtered_plan, self._expression, self.name)
 
     def where(
@@ -1255,13 +1260,8 @@ class Series:
         val_sort_key = SortKey(self._expression, direction, null_placement)
         order_by_keys: tuple[SortKey, ...]
         if method == "first":
-            # 'first' breaks ties based on original row ordering
-            tiebreaker_keys: list[SortKey] = []
-            if self._plan.metadata.ordering.keys:
-                tiebreaker_keys = [
-                    SortKey(ColumnRef(k.column_id), k.direction, k.null_placement)
-                    for k in self._plan.metadata.ordering.keys
-                ]
+            guaranteed_order = self._require_order()
+            tiebreaker_keys = list(guaranteed_order)
             order_by_keys = (val_sort_key, *tiebreaker_keys)
         else:
             # other methods rank solely by value

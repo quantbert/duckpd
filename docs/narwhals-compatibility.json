@@ -136,16 +136,88 @@
       "ordering": "not applicable",
       "since": "0.0.7",
       "status": "subset",
-      "notes": "Unsupported nested and parameterized types report Narwhals Unknown."
+      "notes": "Decimal, timestamp/time-zone, duration, and common scalar types are precise; unsupported nested types report Narwhals Unknown."
     },
     {
       "method": "LazyFrame.collect",
-      "arguments": "backend=None or pyarrow",
+      "arguments": "backend=None, pyarrow, or pandas",
       "dtypes": "Arrow-compatible",
       "ordering": "preserved when defined by DuckPD metadata",
       "since": "0.0.7",
       "status": "subset",
-      "notes": "Executes in DuckDB and returns a Narwhals Arrow DataFrame."
+      "notes": "Executes in DuckDB exactly once; Arrow is the default and pandas requires explicit selection."
+    },
+    {
+      "method": "Expr numeric",
+      "arguments": "abs, round, floor, ceil, exp, sqrt, log, cos, sin, clip, floor division, power",
+      "dtypes": "numeric DuckDB types",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Builds typed scalar expressions without execution."
+    },
+    {
+      "method": "Expr ordered/window",
+      "arguments": "cum_sum, cum_min, cum_max, cum_prod, cum_count, diff, shift, rank, row-based rolling sum/mean/std/var",
+      "dtypes": "numeric DuckDB types",
+      "ordering": "requires over(order_by=...) matching DuckPD guaranteed order",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Forward ordered operations are supported; reverse cumulative operations and partitioned windows fail before execution."
+    },
+    {
+      "method": "Expr unary negation",
+      "arguments": "unary -",
+      "dtypes": "numeric DuckDB types",
+      "ordering": "preserved",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Supported by DuckPD when exposed by Narwhals; the Narwhals 2.17 public Expr does not expose unary negation."
+    },
+    {
+      "method": "LazyFrame.drop_nulls / unique / top_k / with_row_index",
+      "arguments": "supported Narwhals 2.x arguments",
+      "dtypes": "DuckDB-filterable and orderable types",
+      "ordering": "explicit order required for deterministic unique and row index",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Maps to typed DuckPD filter, window, sort, and limit plans without collection."
+    },
+    {
+      "method": "LazyFrame.join",
+      "arguments": "inner, left, full, cross; key mappings; suffix",
+      "dtypes": "DuckDB-comparable keys",
+      "ordering": "cleared by joins",
+      "since": "0.0.7",
+      "status": "subset",
+      "notes": "Equi-joins and cross joins are lazy; semi, anti, and as-of joins fail before execution."
+    },
+    {
+      "method": "LazyFrame.unpivot / explode",
+      "arguments": "none",
+      "dtypes": "none",
+      "ordering": "not applicable",
+      "since": "0.0.7",
+      "status": "unsupported",
+      "notes": "Explicitly rejected until typed unpivot plans and nested DuckDB-to-Narwhals dtype semantics exist."
+    },
+    {
+      "method": "Namespace scan_csv / scan_parquet",
+      "arguments": "backend='duckpd'",
+      "dtypes": "not applicable",
+      "ordering": "not applicable",
+      "since": "0.0.7",
+      "status": "unsupported",
+      "notes": "Narwhals 2.x resolves unknown plugin backends through Implementation.UNKNOWN before plugin namespace dispatch; use duckpd.read_csv/read_parquet followed by nw.from_native."
+    },
+    {
+      "method": "LazyFrame.sink_parquet",
+      "arguments": "filesystem path",
+      "dtypes": "Parquet-compatible DuckDB types",
+      "ordering": "preserved when defined",
+      "since": "0.0.7",
+      "status": "supported",
+      "notes": "Writes directly through DuckDB without pandas conversion; in-memory BytesIO sinks are rejected."
     }
   ]
 }

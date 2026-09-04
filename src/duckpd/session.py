@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -18,18 +19,21 @@ from duckpd._logical import (
     ArrowSource,
     ColumnRef,
     CsvSource,
-    FrameMetadata,
     NullPlacement,
     OrderColumn,
     OrderSpec,
     PandasSource,
     ParquetSource,
+    RowIdentity,
     ScanPlan,
     SortDirection,
     SortKey,
     SortPlan,
+    SourceKind,
+    SourceProvenance,
     SqlSource,
     TableSource,
+    sanitize_source_location,
 )
 from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
 from duckpd.errors import SessionClosedError, UnsupportedOperationError
@@ -290,7 +294,12 @@ class Session:
     ) -> ScanPlan | SortPlan:
         columns = self._compiler.inspect_source(source)
         index_labels = self._normalize_labels(index)
-        metadata = source_metadata(columns, index_labels=index_labels)
+        provenance = self._source_provenance(source)
+        metadata = source_metadata(
+            columns,
+            index_labels=index_labels,
+            provenance=provenance,
+        )
         stable_order_key: OrderColumn | None = None
         if stable_order_label is not None:
             stable_column = next(
@@ -303,15 +312,24 @@ class Session:
                 SortDirection.ASCENDING,
                 NullPlacement.LAST,
             )
-            metadata = FrameMetadata(
-                tuple(
-                    replace(column, hidden=True, row_identity=True)
-                    if column.id == stable_column.id
-                    else column
-                    for column in metadata.columns
+            updated_columns = tuple(
+                replace(column, hidden=True)
+                if column.id == stable_column.id
+                else column
+                for column in metadata.columns
+            )
+            metadata = replace(
+                metadata,
+                columns=updated_columns,
+                ordering=OrderSpec((stable_order_key,)),
+                row_identity=RowIdentity(
+                    (stable_column.id,),
+                    stable=True,
+                    unique=True,
+                    source_key=(
+                        provenance.locations[0] if provenance.locations else None
+                    ),
                 ),
-                metadata.index,
-                OrderSpec((stable_order_key,)),
             )
         scan = ScanPlan(source, metadata)
         order_labels = self._normalize_labels(order_by)
@@ -328,6 +346,74 @@ class Session:
                 ),
             )
         return SortPlan(scan, keys, after_sort(metadata, keys))
+
+    @staticmethod
+    def _source_provenance(
+        source: (
+            ArrowSource
+            | CsvSource
+            | PandasSource
+            | ParquetSource
+            | SqlSource
+            | TableSource
+        ),
+    ) -> SourceProvenance:
+        if isinstance(source, PandasSource):
+            return SourceProvenance(
+                SourceKind.PANDAS,
+                (source.key,),
+                fingerprint=hashlib.sha256(source.key.encode()).hexdigest(),
+            )
+        if isinstance(source, ArrowSource):
+            return SourceProvenance(
+                SourceKind.ARROW,
+                (source.key,),
+                fingerprint=hashlib.sha256(source.key.encode()).hexdigest(),
+            )
+        if isinstance(source, (ParquetSource, CsvSource)):
+            canonical = tuple(
+                (
+                    sanitize_source_location(path)
+                    if "://" in path
+                    else str(Path(path).resolve())
+                )
+                for path in source.paths
+            )
+            fingerprints: list[str] = []
+            for original, location in zip(source.paths, canonical, strict=True):
+                if "://" in original or any(char in original for char in "*?[]"):
+                    fingerprints.append(hashlib.sha256(original.encode()).hexdigest())
+                    continue
+                stat = Path(location).stat()
+                fingerprints.append(f"{location}:{stat.st_size}:{stat.st_mtime_ns}")
+            fingerprint = hashlib.sha256("\n".join(fingerprints).encode()).hexdigest()
+            if isinstance(source, ParquetSource):
+                writable = (
+                    len(canonical) == 1
+                    and "://" not in canonical[0]
+                    and not source.hive_partitioning
+                )
+                return SourceProvenance(
+                    SourceKind.PARQUET,
+                    canonical,
+                    fingerprint=fingerprint,
+                    writable=writable,
+                )
+            return SourceProvenance(
+                SourceKind.CSV,
+                canonical,
+                fingerprint=fingerprint,
+            )
+        if isinstance(source, TableSource):
+            return SourceProvenance(
+                SourceKind.TABLE,
+                (source.name,),
+                writable=True,
+            )
+        return SourceProvenance(
+            SourceKind.SQL,
+            fingerprint=hashlib.sha256(source.query.encode()).hexdigest(),
+        )
 
     @staticmethod
     def _normalize_labels(value: str | Sequence[str] | None) -> tuple[str, ...]:

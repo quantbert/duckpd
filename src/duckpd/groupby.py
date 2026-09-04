@@ -219,11 +219,15 @@ class DataFrameGroupBy:
             else ()
         )
         if not self._sort:
+            identity_id = next(
+                iter(self._frame._plan.metadata.row_identity.columns),
+                None,
+            )
             row_identity = next(
                 (
                     column
                     for column in self._frame._plan.metadata.columns
-                    if column.row_identity
+                    if column.id == identity_id
                 ),
                 None,
             )
@@ -233,7 +237,6 @@ class DataFrameGroupBy:
                     "__duckpd_group_first_seen__",
                     row_identity.duckdb_type,
                     hidden=True,
-                    row_identity=True,
                 )
                 output_columns.append(first_seen)
                 aggregates.append(
@@ -386,11 +389,12 @@ class DataFrameGroupBy:
                         )
                     target_expr = ColumnRef(target_col.id)
                     input_type = target_col.duckdb_type
-                    out_type = (
-                        "DOUBLE"
-                        if func_lower in {"mean", "std", "var", "median"}
-                        else target_col.duckdb_type
-                    )
+                    if func_lower in {"mean", "std", "var", "median"}:
+                        out_type = "DOUBLE"
+                    elif func_lower == "sum" and target_col.duckdb_type == "BOOLEAN":
+                        out_type = "BIGINT"
+                    else:
+                        out_type = target_col.duckdb_type
                 else:
                     raise UnsupportedOperationError(
                         f"Unsupported aggregate function: {func_name!r}"
@@ -420,11 +424,15 @@ class DataFrameGroupBy:
             else ()
         )
         if not self._sort:
+            identity_id = next(
+                iter(self._frame._plan.metadata.row_identity.columns),
+                None,
+            )
             row_identity = next(
                 (
                     column
                     for column in self._frame._plan.metadata.columns
-                    if column.row_identity
+                    if column.id == identity_id
                 ),
                 None,
             )
@@ -434,7 +442,6 @@ class DataFrameGroupBy:
                     "__duckpd_group_first_seen__",
                     row_identity.duckdb_type,
                     hidden=True,
-                    row_identity=True,
                 )
                 output_columns.append(first_seen)
                 aggregates.append(
