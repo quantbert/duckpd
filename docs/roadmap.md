@@ -53,7 +53,8 @@ package:
 - [x] Decide whether PyArrow is required or an `arrow` extra. Requiring it is
       recommended for the first release because streaming is a core promise.
 - [x] Confirm that the `duckpd` distribution name is available on PyPI.
-- [x] Support Linux, macOS, and Windows in CI on Python 3.11 through 3.14.
+- [x] Configure Linux, macOS, and Windows CI on Python 3.11 through 3.14;
+      final Windows-specific validation is deferred to the beta exit gate.
 
 ## v0.1 acceptance workflow
 
@@ -514,9 +515,6 @@ Exit gate:
 - [x] Augment benchmark reporting and `test_execution_limits.py` to capture true
       process peak RSS (`getrusage`/`/proc/self/status`) and verify DuckDB temporary
       spill file generation during constrained-memory sorts and joins.
-- [ ] Enforce non-zero Windows peak-working-set sampling on `windows-latest`;
-      the bounded-RSS test now fails rather than skips when sampling returns `0`,
-      but the updated job still requires a real Windows CI run.
 - [x] A test forbids pandas conversion methods during every direct sink.
 
 ### Phase 9: lazy mutation and safe local commit
@@ -653,6 +651,19 @@ Exit gate:
 - [ ] The documented v0.1 matrix is fully tested, examples run in CI, package
       artifacts install cleanly, and unsupported behavior is explicit.
 
+### Beta exit portability gate
+
+Windows-specific release validation is intentionally deferred until DuckPD is
+otherwise ready to leave beta. At that point:
+
+- [ ] Run the full `windows-latest` Python 3.11–3.14 CI matrix.
+- [ ] Confirm `GetProcessMemoryInfo` returns non-zero peak RSS and the constrained
+      workload remains below its process-memory bound.
+- [ ] Exercise Parquet atomic replacement through `ReplaceFileW`, including
+      replacement metadata and failure cleanup.
+- [ ] Clean-install the built wheel and run the package smoke pipeline on Windows.
+
+
 ## First PR-sized increments
 
 Implement in this order. Each increment should be independently testable.
@@ -687,8 +698,6 @@ Implement in this order. Each increment should be independently testable.
 15. [x] Structured profiling (`df.profile()`) exposing DuckDB operator and I/O
        timings, plus native process RSS and DuckDB spill byte metrics in
        benchmarks and execution limits.
-   - [ ] Run the updated bounded-RSS test under `windows-latest`; non-zero
-         `GetProcessMemoryInfo` sampling is enforced but not yet CI-confirmed.
 16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
 17. [ ] Narwhals lazy frame compliance plugin prototype and compatibility
@@ -713,10 +722,10 @@ graph TD
    - `clip(lower, upper)` for Series and DataFrame via bounded `CASE WHEN` expression compilation.
    - `replace(to_replace, value)` for scalar, list, and dictionary value replacements.
    - [x] `sample(n=..., frac=..., random_state=...)` row sampling with deterministic seed behavior.
-3. **Stream 3: Observability & Memory Profiling (Phase 8)**
+3. **Stream 3: Observability & Memory Profiling (Phase 8) [Completed]**
    - `df.profile()` exposes DuckDB structured JSON profiling (operator timings, spill, I/O).
    - Benchmark and execution-limit tests capture isolated RSS and verify DuckDB spill bytes.
-   - Windows CI now enforces non-zero RSS; runtime confirmation remains pending.
+   - Windows-specific runtime validation is deferred to the beta exit portability gate.
 4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9) [Completed]**
    - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
    - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.

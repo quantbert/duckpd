@@ -612,10 +612,12 @@ class Executor:
                 source_arrow_schema,
                 compression=cast("Any", arrow_compression),
             ) as writer:
-                if _failure_injector is not None:
-                    _failure_injector("during_write")
+                injected_during_write = False
                 for batch in reader:
                     writer.write_batch(batch.cast(source_arrow_schema))
+                    if _failure_injector is not None and not injected_during_write:
+                        injected_during_write = True
+                        _failure_injector("during_write")
             if _failure_injector is not None:
                 _failure_injector("after_staging_write")
 

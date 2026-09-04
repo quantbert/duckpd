@@ -132,14 +132,19 @@ def test_assignment_builds_plans_without_compiling_or_reading_source(
         def fail_compile(_plan: object) -> None:
             raise AssertionError("assignment attempted to compile the source")
 
-        with monkeypatch.context() as patch:
-            patch.setattr(session._compiler, "compile", fail_compile)
-            frame["added"] = frame["value"] * 10
-            frame.loc[frame["flag"], "value"] = 99
-            assigned = frame.assign(derived=frame["added"] + frame["value"])
-            filtered = assigned[assigned["derived"] > 0]
-            chained = filtered.assign(final=filtered["derived"] * 2)
-            assert session.execution_count == 0
+        unavailable = source.with_suffix(".parquet.unavailable")
+        source.rename(unavailable)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(session._compiler, "compile", fail_compile)
+                frame["added"] = frame["value"] * 10
+                frame.loc[frame["flag"], "value"] = 99
+                assigned = frame.assign(derived=frame["added"] + frame["value"])
+                filtered = assigned[assigned["derived"] > 0]
+                chained = filtered.assign(final=filtered["derived"] * 2)
+                assert session.execution_count == 0
+        finally:
+            unavailable.rename(source)
 
         expected = pdf.copy()
         expected["added"] = expected["value"] * 10
