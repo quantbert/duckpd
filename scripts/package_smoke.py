@@ -76,12 +76,12 @@ def check_artifacts(root: Path, dist: Path) -> Path:
     return wheel
 
 
-def smoke_install(wheel: Path) -> None:
+def smoke_install(wheel: Path, python_spec: str) -> None:
     """Install the wheel into a clean venv and execute a native pipeline."""
     with tempfile.TemporaryDirectory(prefix="duckpd-wheel-smoke-") as directory:
         environment = Path(directory) / "venv"
         subprocess.run(
-            ["uv", "venv", "--python", sys.executable, str(environment)],
+            ["uv", "venv", "--python", python_spec, str(environment)],
             check=True,
         )
         python = environment / (
@@ -110,12 +110,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("dist", nargs="?", default="dist")
     parser.add_argument("--artifacts-only", action="store_true")
+    parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="interpreter used to create the clean smoke-test environment",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     dist = (root / args.dist).resolve()
     wheel = check_artifacts(root, dist)
     if not args.artifacts_only:
-        smoke_install(wheel)
+        smoke_install(wheel, args.python)
 
 
 if __name__ == "__main__":

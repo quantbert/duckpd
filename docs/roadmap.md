@@ -625,8 +625,8 @@ Goal: publish a narrow, honest, measurable API.
       observability, performance, portability, interoperability, and openness.
 - [x] Add small, medium, and larger-than-memory benchmark datasets generated
       deterministically rather than checked into Git.
-- [x] Add package build/install smoke tests and verify wheels with the supported
-      Python matrix.
+- [ ] Run the package build/install smoke checks across the CI OS/Python matrix;
+      clean installs pass locally on Linux with Python 3.11, 3.12, 3.13, and 3.14.
 - [x] Add artifact-content checks for wheel/sdist metadata, required package
       files such as `py.typed`, and exclusion of caches, generated data, and
       secrets.
@@ -689,9 +689,9 @@ Implement in this order. Each increment should be independently testable.
          `GetProcessMemoryInfo` sampling is enforced but not yet CI-confirmed.
 16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
-17. [x] Narwhals lazy frame compliance plugin prototype, compatibility matrix
-       documentation generation, and clean wheel build/install smoke test across
-       the Python 3.11–3.14 CI matrix.
+17. [ ] Narwhals lazy frame compliance plugin prototype and compatibility
+       generation are implemented; clean wheel installs pass locally on Linux
+       with Python 3.11–3.14, with the CI OS matrix confirmation pending.
 
 ### Active workstreams and immediate next priorities
 
