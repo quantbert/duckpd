@@ -1,9 +1,3 @@
-> [!WARNING]
-> **DuckPD is a work in progress and is not yet recommended for
-> production-critical workloads.** The API and supported pandas semantics may
-> change between `0.x` releases. Validate results and resource behavior for
-> each intended workload before adopting it.
-
 <p align="center">
 
   <img src="duckpd.png" alt="DuckPD mascot - a duck dressed as a panda" width="280">
