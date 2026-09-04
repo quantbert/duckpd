@@ -195,15 +195,45 @@ Methods operate lazily on plan-backed Series, compiling directly into DuckDB str
 
 ## 9. Narwhals Interoperability
 
-DuckPD ships an experimental Narwhals plugin. It wraps a `duckpd.DataFrame` as
-a Narwhals `LazyFrame` without collecting and keeps supported transformations
-in DuckPD/DuckDB. The machine-readable contract and generated method table are
-in [`narwhals-compatibility.json`](narwhals-compatibility.json) and
+DuckPD ships an experimental
+[Narwhals plugin](https://narwhals-dev.github.io/narwhals/extending/).
+It wraps a `duckpd.DataFrame` as a Narwhals `LazyFrame` without collecting and
+keeps supported transformations in DuckPD/DuckDB. The machine-readable contract
+and generated method table are in
+[`narwhals-compatibility.json`](narwhals-compatibility.json) and
 [`NARWHALS_COMPATIBILITY.md`](NARWHALS_COMPATIBILITY.md).
 
-The prototype intentionally supports only the operations marked supported in
-that generated table. Expression-based Narwhals transformations are not yet
-part of the contract.
+### Why this integration matters
+
+- **Downstream libraries need one adapter.** A library written against Narwhals
+  can accept DuckPD without adding a DuckPD-specific conversion path.
+- **Compatibility does not require pandas materialization.** Supported Narwhals
+  transformations build DuckPD logical plans; DuckDB remains the execution
+  engine and large inputs remain lazy.
+- **Applications can stay backend-neutral.** The same application boundary can
+  accept DuckPD and other Narwhals backends while preserving each native frame.
+- **Round-tripping preserves ownership.** `to_native()` returns the underlying
+  `duckpd.DataFrame`, not a pandas or Polars substitute.
+- **The protocol creates a testable contract.** Schema mapping, error classes,
+  supported arguments, ordering behavior, and execution boundaries are recorded
+  in the generated compatibility matrix.
+
+For example, every operation below is lazy:
+
+```python
+import narwhals as nw
+
+lazy = nw.from_native(duckpd_frame)
+result = lazy.select("order_id", "amount").sort("amount").head(100)
+native = result.to_native()  # duckpd.DataFrame; still not executed
+```
+
+Narwhals is an interoperability layer, not a new execution engine. It does not
+increase pandas compatibility, make unsupported DuckPD operations available,
+or guarantee that every Narwhals consumer works with the current prototype.
+The prototype intentionally supports only operations marked supported in the
+generated table. Expression-based transformations, grouping, and joins are not
+yet part of the contract.
 
 
 ---

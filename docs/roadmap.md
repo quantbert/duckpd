@@ -640,6 +640,47 @@ Goal: publish a narrow, honest, measurable API.
 - [x] Require Narwhals interoperability tests to prove `to_native()` returns a
       DuckPD frame, supported transformations remain lazy, and execution stays
       in DuckDB.
+
+#### Practical Narwhals lazy-frame compliance path
+
+“Full compliance” here means implementing the required Narwhals lazy-frame
+protocol wherever it maps to DuckPD without eager fallback, hidden collection,
+or invented ordering. Optional protocol operations that conflict with DuckPD's
+product contract must remain explicitly unsupported and fail before execution.
+
+- [ ] Implement a compliant expression object and namespace for `col`, `lit`,
+      aliases, broadcasting, arithmetic, comparisons, boolean logic, casts, and
+      null predicates.
+- [ ] Map supported string, datetime, numeric, aggregate, cumulative, ranking,
+      and rolling expression namespaces onto typed DuckPD expressions.
+- [ ] Implement expression-based `select`, `with_columns`, `filter`, and
+      `aggregate`, including Narwhals output-name and scalar-broadcast rules.
+- [ ] Complete lazy-frame relational methods: `drop_nulls`, `unique`, `top_k`,
+      `with_row_index`, supported `unpivot`, and `explode` where DuckDB/DuckPD
+      type semantics are defined.
+- [ ] Add compliant lazy group-by objects and aggregation dispatch, preserving
+      DuckPD's explicit ordering and `drop_null_keys` behavior.
+- [ ] Map supported equi-joins, cross joins, and as-of joins; reject unsupported
+      strategies or ambiguous ordering before query execution.
+- [ ] Complete schema conversion for decimal, timestamp/time-zone, duration,
+      list, array, struct, and enum DuckDB types instead of reporting `Unknown`.
+- [ ] Implement namespace I/O that maps Narwhals `scan_csv` and `scan_parquet`
+      to DuckPD lazy scans, plus lazy `sink_parquet` without pandas conversion.
+- [ ] Define collection backends deliberately: Arrow first, then pandas/Polars
+      only when explicitly requested and without changing `to_native()` behavior.
+- [ ] Normalize missing-column, duplicate-column, invalid-operation, and
+      multi-output-expression errors to Narwhals exception classes.
+- [ ] Run Narwhals' backend/compliance tests against the lowest and newest
+      supported Narwhals 2.x versions, including empty, null, duplicate, nested
+      dtype, and ordering-sensitive cases.
+- [ ] For every adapter operation, assert plan construction performs zero
+      executions, `to_native()` returns DuckPD, and collection executes through
+      DuckDB exactly once.
+- [ ] Expand the machine-readable matrix with each implemented protocol method
+      and keep generated documentation mandatory in CI.
+- [ ] Document intentional exclusions such as eager-only Series/DataFrame
+      protocols, arbitrary Python `map_batches`, and operations whose semantics
+      require an unsupported fallback.
 - [ ] Publish a pre-release and collect real unsupported-operation traces only
       with explicit user consent and no query data.
 - [x] Define the pre-`1.0` versioning, deprecation, and immutable-release policy.
