@@ -157,9 +157,13 @@ class Session:
 
         self._ensure_open()
         if isinstance(path, (str, Path)):
-            paths = (str(path),)
+            raw_paths = (str(path),)
         else:
-            paths = tuple(str(item) for item in path)
+            raw_paths = tuple(str(item) for item in path)
+        paths = tuple(
+            item if "://" in item else str(Path(item).expanduser().resolve())
+            for item in raw_paths
+        )
         if not paths:
             msg = "At least one Parquet path is required"
             raise ValueError(msg)

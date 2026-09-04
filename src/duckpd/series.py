@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from decimal import Decimal
+from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
 
 import pandas as pd
@@ -138,13 +139,19 @@ class Series:
                 cast("object", frac), (int, float)
             ):
                 raise ValueError(f"'frac' must be a float, got {type(frac).__name__}")
+            if not isfinite(float(frac)):
+                raise ValueError("'frac' must be finite")
             if frac < 0.0:
                 raise ValueError("A negative fraction of rows was requested")
+            if frac > 1.0:
+                raise ValueError("Replace has to be set to True when frac > 1")
         if random_state is not None and (
             isinstance(random_state, bool)
             or not isinstance(cast("object", random_state), int)
         ):
             raise ValueError("random_state must be an integer seed or None")
+        if random_state is not None and not 0 <= random_state <= 2_147_483_647:
+            raise ValueError("random_state must be between 0 and 2**31 - 1")
 
         metadata = FrameMetadata(
             columns=self._plan.metadata.columns,

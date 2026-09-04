@@ -934,6 +934,7 @@ def test_dataframe_and_series_sample() -> None:
         2, random_state=1, ignore_index=True
     ).collect()
     assert list(sample_idx_ignored.index) == [0, 1]
+    assert list(sample_idx_ignored.columns) == ["v"]
 
     # Series ignore_index
     s_indexed = indexed_df["v"]
@@ -943,6 +944,7 @@ def test_dataframe_and_series_sample() -> None:
     assert all(idx in ["row1", "row2", "row3"] for idx in s_sample_preserved.index)
     s_sample_ignored = s_indexed.sample(2, random_state=1, ignore_index=True).collect()
     assert list(s_sample_ignored.index) == [0, 1]
+    assert s_sample_ignored.name == "v"
 
     # Validation and error handling
     with pytest.raises(UnsupportedOperationError, match="axis"):
@@ -963,9 +965,32 @@ def test_dataframe_and_series_sample() -> None:
         df.sample(n=-1)
     with pytest.raises(ValueError, match="negative fraction"):
         df.sample(frac=-0.1)
+    with pytest.raises(ValueError, match="Replace has to be set to True"):
+        df.sample(frac=1.1)
+    with pytest.raises(ValueError, match="finite"):
+        s.sample(frac=float("nan"))
+    with pytest.raises(ValueError, match="larger sample than population"):
+        small_df.sample(n=8).collect()
+    with pytest.raises(ValueError, match="larger sample than population"):
+        small_df["x"].sample(n=8).collect()
+    with pytest.raises(ValueError, match="larger sample than population"):
+        empty_df.sample().collect()
     with pytest.raises(ValueError, match="integer"):
         df.sample(n="5")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="float"):
         df.sample(frac="0.5")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="random_state"):
         df.sample(random_state="invalid")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="between 0 and 2\\*\\*31 - 1"):
+        df.sample(random_state=-1)
+    with pytest.raises(ValueError, match="between 0 and 2\\*\\*31 - 1"):
+        s.sample(random_state=2**31)
+
+
+def test_seeded_row_count_sample_is_repeatable_with_parallel_session() -> None:
+    with duckpd.connect(threads=4) as session:
+        frame = session.sql("SELECT i FROM range(200000) AS values(i)")
+        first = frame.sample(n=500, random_state=123).collect()
+        second = frame.sample(n=500, random_state=123).collect()
+
+    pd.testing.assert_frame_equal(first, second)

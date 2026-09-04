@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -446,9 +447,26 @@ def test_save_as_table() -> None:
             df.save_as_table("tbl_test", mode="invalid")  # type: ignore[arg-type]
 
 
+def test_save_as_table_failed_overwrite_rolls_back() -> None:
+    with dp.connect() as session:
+        original = pd.DataFrame({"a": [1]})
+        session.from_pandas(original).save_as_table("rollback_target")
+        failing = session.sql("SELECT CAST(error('boom') AS BIGINT) AS a")
+
+        with pytest.raises(duckdb.InvalidInputException, match="boom"):
+            failing.save_as_table("rollback_target", mode="overwrite")
+
+        pd.testing.assert_frame_equal(
+            session.table("rollback_target").collect(), original
+        )
+
+
 def test_parquet_atomic_commit_with_index_preservation(tmp_path: Path) -> None:
     src_file = tmp_path / "data.parquet"
-    pdf = pd.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+    pdf = pd.DataFrame(
+        {"val": [10, 20, 30]},
+        index=pd.Index([1, 2, 3], name="id"),
+    )
     pdf.to_parquet(src_file)
 
     df = dp.read_parquet(src_file, index="id")
@@ -460,12 +478,15 @@ def test_parquet_atomic_commit_with_index_preservation(tmp_path: Path) -> None:
     assert report.bytes_written > 0
     assert report.backup_path is not None
     assert Path(report.backup_path).exists()
+    pd.testing.assert_frame_equal(pd.read_parquet(report.backup_path), pdf)
 
-    # File on disk preserves original column order (including index) and updated values
+    # pandas/Arrow metadata reconstructs the original named index after commit.
     disk_pdf = pd.read_parquet(src_file)
-    assert list(disk_pdf.columns) == ["id", "val"]
-    assert disk_pdf["val"].tolist() == [20, 40, 60]
-    assert disk_pdf["id"].tolist() == [1, 2, 3]
+    expected = pd.DataFrame(
+        {"val": [20, 40, 60]},
+        index=pd.Index([1, 2, 3], name="id"),
+    )
+    pd.testing.assert_frame_equal(disk_pdf, expected)
 
     # DataFrame handle reflects committed state and continues working
     res = df.collect()
@@ -515,14 +536,14 @@ def test_parquet_atomic_commit_concurrency_and_failure_injection(
         os.utime(src_file, None)
 
     with pytest.raises(ConcurrentModificationError, match="modified concurrently"):
-        df.commit(_before_replace=touch_concurrent)
+        df._session._executor.commit(df._plan, _before_replace=touch_concurrent)
 
     # 2. Failure injection leaves original file intact and staging cleaned up
     def blow_up() -> None:
         raise RuntimeError("Simulated failure")
 
     with pytest.raises(RuntimeError, match="Simulated failure"):
-        df.commit(_before_replace=blow_up)
+        df._session._executor.commit(df._plan, _before_replace=blow_up)
 
     # Original file is intact and readable
     disk_pdf = pd.read_parquet(src_file)
@@ -532,3 +553,66 @@ def test_parquet_atomic_commit_concurrency_and_failure_injection(
     # Staging files are cleaned up
     staging_files = list(tmp_path.glob(".duckpd_staging_*"))
     assert len(staging_files) == 0
+
+
+def test_parquet_commit_resolves_relative_source_at_read_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_dir = tmp_path / "source"
+    other_dir = tmp_path / "other"
+    source_dir.mkdir()
+    other_dir.mkdir()
+    original_path = source_dir / "data.parquet"
+    decoy_path = other_dir / "data.parquet"
+    pd.DataFrame({"value": [1, 2]}).to_parquet(original_path)
+    pd.DataFrame({"value": [90, 99]}).to_parquet(decoy_path)
+
+    with dp.connect() as session:
+        monkeypatch.chdir(source_dir)
+        frame = session.read_parquet("data.parquet")
+        frame["value"] = frame["value"] + 10
+        monkeypatch.chdir(other_dir)
+        frame.commit()
+
+    assert pd.read_parquet(original_path)["value"].tolist() == [11, 12]
+    assert pd.read_parquet(decoy_path)["value"].tolist() == [90, 99]
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="Windows ACL preservation uses ReplaceFileW rather than POSIX modes",
+)
+def test_parquet_commit_preserves_posix_permissions(tmp_path: Path) -> None:
+    import stat
+
+    source = tmp_path / "restricted.parquet"
+    pd.DataFrame({"value": [1, 2]}).to_parquet(source)
+    source.chmod(0o600)
+
+    frame = dp.read_parquet(source)
+    frame["value"] = frame["value"] + 1
+    frame.commit()
+
+    assert stat.S_IMODE(source.stat().st_mode) == 0o600
+
+
+def test_parquet_commit_supports_declared_compression_codecs(
+    tmp_path: Path,
+) -> None:
+    for compression in (
+        "uncompressed",
+        "brotli",
+        "snappy",
+        "lz4",
+        "lz4_raw",
+        "gzip",
+        "zstd",
+    ):
+        source = tmp_path / f"{compression}.parquet"
+        pd.DataFrame({"value": [1, 2]}).to_parquet(source)
+        frame = dp.read_parquet(source)
+        frame["value"] = frame["value"] + 1
+
+        frame.commit(compression=compression)
+
+        assert pd.read_parquet(source)["value"].tolist() == [2, 3]

@@ -188,25 +188,53 @@ class DuckDBCompiler:
                 compiled_input.relation.sort(*keys), compiled_input.bindings
             )
         if isinstance(plan, SamplePlan):
-            clause = self._compile_sample_clause(plan)
-            query = f"SELECT * FROM _subquery_to_sample USING SAMPLE {clause}"
-            relation = compiled_input.relation.query("_subquery_to_sample", query)
-            return CompiledFrame(relation, compiled_input.bindings)
+            if plan.frac is not None or plan.seed is not None:
+                if plan.seed is not None:
+                    hash_args = [
+                        *(
+                            quote_identifier(column)
+                            for column in compiled_input.relation.columns
+                        ),
+                        str(plan.seed),
+                    ]
+                    order_expression = f"hash({', '.join(hash_args)})"
+                else:
+                    order_expression = "random()"
+                if plan.frac is not None:
+                    limit_expression = (
+                        "(SELECT CAST(round_even(count(*) * "
+                        f"{plan.frac}, 0) AS BIGINT) FROM _population)"
+                    )
+                else:
+                    limit_expression = str(plan.n)
+                query = (
+                    "WITH _population AS MATERIALIZED ("
+                    "SELECT * FROM _subquery_to_sample"
+                    ") "
+                    "SELECT * FROM _population "
+                    f"ORDER BY {order_expression} "
+                    f"LIMIT {limit_expression}"
+                )
+            else:
+                clause = self._compile_sample_clause(plan)
+                query = f"SELECT * FROM _subquery_to_sample USING SAMPLE {clause}"
+            sampled = compiled_input.relation.query("_subquery_to_sample", query)
+            expressions = tuple(
+                duckdb.SQLExpression(
+                    quote_identifier(compiled_input.bindings[column.id])
+                ).alias(column.label)
+                for column in plan.metadata.columns
+            )
+            relation = sampled.project(*expressions)
+            bindings = {column.id: column.label for column in plan.metadata.columns}
+            return CompiledFrame(relation, bindings)
         relation = compiled_input.relation.limit(plan.count, offset=plan.offset)
         return CompiledFrame(relation, compiled_input.bindings)
 
     def _compile_sample_clause(self, plan: SamplePlan) -> str:
-        if plan.n is not None:
-            clause = f"reservoir({plan.n} ROWS)"
-        elif plan.frac is not None:
-            pct = plan.frac * 100.0
-            clause = f"reservoir({pct} PERCENT)"
-        else:
-            clause = "reservoir(1 ROWS)"
-
-        if plan.seed is not None:
-            clause += f" REPEATABLE ({plan.seed})"
-        return clause
+        if plan.n is None:
+            raise AssertionError("Row-count sampling requires n")
+        return f"reservoir({plan.n} ROWS)"
 
     def compile_expression(
         self, expression: Expression, bindings: dict[ColumnId, str]

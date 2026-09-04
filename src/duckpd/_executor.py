@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from duckpd._logical import (
     AggregatePlan,
@@ -48,6 +51,31 @@ if TYPE_CHECKING:
     from duckpd._compiler import DuckDBCompiler
     from duckpd._logical import LogicalPlan
     from duckpd.session import Session
+
+
+def _replace_file_preserving_metadata(source: Path, staging: Path) -> None:
+    """Atomically replace source while retaining available file metadata."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        replace_file = ctypes.WinDLL("kernel32", use_last_error=True).ReplaceFileW
+        replace_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+        ]
+        replace_file.restype = wintypes.BOOL
+        if not replace_file(str(source), str(staging), None, 0, None, None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return
+
+    shutil.copystat(source, staging)
+    os.utime(staging, None)
+    os.replace(staging, source)
 
 
 @dataclass(frozen=True)
@@ -430,7 +458,6 @@ class Executor:
         retain_previous: bool = False,
         _before_replace: Callable[[], None] | None = None,
     ) -> CommitReport:
-        import shutil
         import time
 
         t0 = time.perf_counter()
@@ -498,6 +525,7 @@ class Executor:
         initial_stat = source_path.stat()
         initial_mtime_ns = initial_stat.st_mtime_ns
         initial_size = initial_stat.st_size
+        source_arrow_schema = pq.ParquetFile(source_path).schema_arrow
 
         # 3. Inspect original source schema, columns, and row count
         con = self._session._connection
@@ -558,12 +586,16 @@ class Executor:
         staging_path = dest_dir / staging_name
 
         try:
-            # 7. Write to staging file directly via DuckDB
-            commit_rel.write_parquet(
-                str(staging_path),
-                compression=compression,
-                overwrite=True,
-            )
+            # 7. Stream Arrow batches while retaining Parquet/Arrow metadata.
+            arrow_compression = None if compression == "uncompressed" else compression
+            reader = commit_rel.to_arrow_reader()
+            with pq.ParquetWriter(
+                staging_path,
+                source_arrow_schema,
+                compression=cast("Any", arrow_compression),
+            ) as writer:
+                for batch in reader:
+                    writer.write_batch(batch.cast(source_arrow_schema))
 
             # 8. Validate output readability, row-preservation, and schema
             staging_rel = con.read_parquet(str(staging_path))
@@ -587,6 +619,13 @@ class Executor:
                     f"does not match original {orig_columns}"
                 )
                 raise ValueError(msg)
+            staging_arrow_schema = pq.ParquetFile(staging_path).schema_arrow
+            if not staging_arrow_schema.equals(
+                source_arrow_schema, check_metadata=True
+            ):
+                raise ValueError(
+                    "Committed Parquet schema metadata does not match source"
+                )
 
             if _before_replace is not None:
                 _before_replace()
@@ -612,8 +651,16 @@ class Executor:
                 shutil.copy2(source_path, backup_file)
                 backup_path = str(backup_file)
 
-            # 11. Atomic replacement
-            os.replace(staging_path, source_path)
+            # Recheck after backup creation, then atomically preserve metadata.
+            post_backup_stat = source_path.stat()
+            if (
+                post_backup_stat.st_mtime_ns != initial_mtime_ns
+                or post_backup_stat.st_size != initial_size
+            ):
+                raise ConcurrentModificationError(
+                    f"Source file '{source_path}' changed while retaining backup"
+                )
+            _replace_file_preserving_metadata(source_path, staging_path)
             bytes_written = source_path.stat().st_size
             t1 = time.perf_counter()
 
@@ -757,16 +804,23 @@ class Executor:
             self._validate_execution(plan.input)
             self._validate_loc_plan(plan)
             return
+        if isinstance(plan, SamplePlan):
+            self._validate_execution(plan.input)
+            if plan.n:
+                compiled_input = self._compiler.compile(plan.input)
+                count_row = compiled_input.relation.count("*").fetchone()
+                if count_row is None:
+                    raise MaterializationError("Failed to count sample population")
+                population = int(cast("int", count_row[0]))
+                if plan.n > population:
+                    raise ValueError(
+                        "Cannot take a larger sample than population "
+                        "when 'replace=False'"
+                    )
+            return
         if isinstance(
             plan,
-            (
-                FilterPlan,
-                ProjectPlan,
-                SortPlan,
-                LimitPlan,
-                AggregatePlan,
-                SamplePlan,
-            ),
+            (FilterPlan, ProjectPlan, SortPlan, LimitPlan, AggregatePlan),
         ):
             self._validate_execution(plan.input)
 

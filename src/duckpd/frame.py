@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from decimal import Decimal
+from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
 from uuid import uuid4
@@ -218,7 +219,6 @@ class DataFrame:
         *,
         compression: ParquetCompression = "snappy",
         retain_previous: bool = False,
-        _before_replace: Callable[[], None] | None = None,
     ) -> CommitReport:
         """Atomically commit transformations back to a single Parquet source.
 
@@ -238,7 +238,6 @@ class DataFrame:
             self._plan,
             compression=compression,
             retain_previous=retain_previous,
-            _before_replace=_before_replace,
         )
         self._plan = ScanPlan(
             ParquetSource((report.source_path,)),
@@ -1422,9 +1421,9 @@ class DataFrame:
         axis: int | str | None = None,
         ignore_index: bool = False,
     ) -> DataFrame:
-        """Return a random sample of items from the DataFrame.
+        """Return a random sample of rows from the DataFrame.
 
-        Builds an immutable lazy plan using DuckDB reservoir or Bernoulli sampling.
+        Builds an immutable lazy plan using DuckDB reservoir sampling.
         """
         if axis not in (0, "index", None):
             raise UnsupportedOperationError(
@@ -1452,13 +1451,19 @@ class DataFrame:
                 cast("object", frac), (int, float)
             ):
                 raise ValueError(f"'frac' must be a float, got {type(frac).__name__}")
+            if not isfinite(float(frac)):
+                raise ValueError("'frac' must be finite")
             if frac < 0.0:
                 raise ValueError("A negative fraction of rows was requested")
+            if frac > 1.0:
+                raise ValueError("Replace has to be set to True when frac > 1")
         if random_state is not None and (
             isinstance(random_state, bool)
             or not isinstance(cast("object", random_state), int)
         ):
             raise ValueError("random_state must be an integer seed or None")
+        if random_state is not None and not 0 <= random_state <= 2_147_483_647:
+            raise ValueError("random_state must be between 0 and 2**31 - 1")
 
         metadata = FrameMetadata(
             columns=self._plan.metadata.columns,
