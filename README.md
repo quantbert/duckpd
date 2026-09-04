@@ -10,7 +10,32 @@
 
 DuckPD is a lazy DataFrame library with a pandas-shaped API and DuckDB as its execution engine. The goal is to make working with DuckDB feel familiar to pandas users while preserving the performance, scalability, and query-optimization advantages of DuckDB.
 
+Query 100 GB datasets with familiar pandas-style code, without first loading them into memory. DuckPD keeps operations lazy and pushes execution into DuckDB, avoiding the out-of-memory failures that large pandas workloads can cause.
+
 Where practical, DuckPD aims to match pandas APIs and semantics closely enough that existing pandas knowledge — and eventually a large amount of pandas-oriented code — transfers naturally. It does **not**, however, aim to reproduce pandas by sacrificing the properties that make DuckDB valuable.
+
+## Example
+
+```python
+import duckpd as pd
+
+prices = pd.read_parquet("price-data/*.parquet", order_by="date")
+
+features = (
+    prices.assign(
+        fast_ma=lambda frame: frame["close"].rolling(20).mean(),
+        slow_ma=lambda frame: frame["close"].rolling(50).mean(),
+    )
+    .assign(ma_cross=lambda frame: frame["fast_ma"] > frame["slow_ma"])
+)
+
+print(features.explain())
+preview = features.head(10)
+features.write_parquet("price-features.parquet")
+```
+
+Feature generation stays lazy. `head()` materializes only a bounded pandas
+preview, while `write_parquet()` executes the full pipeline directly in DuckDB.
 
 ## Project directives
 
@@ -86,30 +111,6 @@ DuckPD maps pandas semantics directly to DuckDB's vectorized analytical engine:
 
 
 For a detailed breakdown of unique DuckPD extensions, execution boundaries, and intentional semantic deviations from pandas, see the [API Compatibility & Semantic Guide](docs/COMPATIBILITY.md).
-
-## Example
-
-```python
-import duckpd as pd
-
-orders = pd.read_parquet("orders/*.parquet")
-
-result = (
-    orders[orders["status"] == "paid"]
-    .assign(net=lambda frame: frame["amount"] - frame["refund_amount"])
-    .sort_values("net", ascending=False)[["order_id", "net"]]
-    .limit(100)
-)
-
-print(result.explain())
-preview = result.head(10)
-result.write_parquet("largest-paid-orders.parquet")
-pandas_result = result.collect()
-```
-
-Transformations above are lazy. `explain()`, `head()`, `collect()`, Arrow output,
-and file output are explicit execution boundaries. `limit()` stays lazy while
-`head()` returns a bounded pandas preview.
 
 ## Ordering, indexing, and sessions
 

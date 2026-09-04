@@ -439,6 +439,12 @@ Goal: add positional and order-sensitive behavior only on sound foundations.
       window row numbers and counts.
 - [x] Implement expanding and rolling `count`, `sum`, `mean`, `min`, `max`,
       `std`, and `var` for row-based windows first.
+- [ ] Implement pandas-compatible `DataFrameGroupBy.rolling()` and
+      `SeriesGroupBy.rolling()` for row-based windows, compiling group keys to
+      window partitions while preserving explicit ordering within each group.
+- [ ] Support alignment-safe assignment of grouped rolling results back to the
+      originating frame without materialization; arbitrary Python
+      `GroupBy.transform` callbacks remain out of scope.
 - [ ] Add time-based rolling windows only after timezone and closed-boundary
       semantics are specified.
 - [x] Track when joins, aggregates, unions, and materialization destroy or
@@ -581,10 +587,23 @@ Exit gate:
 
 Goal: broaden sources after local semantics are stable.
 
+- [ ] Make safe, read-only `Session.attach_postgres()` and
+      `Session.attach_mysql()` APIs the first Phase 11 priority. Attached tables
+      return lazy DuckPD frames that re-read committed source data at each
+      execution boundary; `persist()` remains the explicit snapshot operation.
+- [ ] Keep connection setup outside `Session.sql()`: use DuckDB secrets or
+      structured connection parameters, default attachments to `READ_ONLY`, and
+      redact credentials from plans, logs, exceptions, and reprs.
+- [ ] Test extension installation/loading, session ownership and cleanup,
+      transaction visibility, schema-cache invalidation, and repeated
+      `collect()` behavior against supported PostgreSQL and MySQL versions.
+- [ ] Expose source identity and known pushdown capabilities in `explain()` and
+      warn or fail before unexpectedly large network scans where transfer cannot
+      be bounded.
 - [ ] Support HTTP/S3/GCS Parquet through DuckDB configuration and secrets.
 - [ ] Test projection, predicate, and row-group pruning with `EXPLAIN ANALYZE`.
-- [ ] Support attached PostgreSQL, MySQL, and SQLite as DuckDB scans first,
-      while clearly reporting where computation occurs.
+- [ ] Add safe `Session.attach_sqlite()` support after the PostgreSQL and MySQL
+      attachment contract is established.
 - [ ] Introduce `SourceCapabilities` for projection, filter, aggregation, join,
       window, limit, and sort pushdown.
 - [ ] Add a backend-neutral source fragment to the IR before implementing a
@@ -592,7 +611,6 @@ Goal: broaden sources after local semantics are stable.
 - [ ] Compile supported fragments to source-native SQL, stream reduced results
       through Arrow, and finish unsupported work in DuckDB.
 - [ ] Add cost and safety guards against unexpectedly large network scans.
-- [ ] Redact credentials and secrets from plans, logs, exceptions, and reprs.
 - [ ] Use versioned object paths plus a manifest/catalog for remote replacement;
       do not claim atomic rename semantics on object stores.
 - [ ] Delegate recurring row-level updates to DuckDB, Iceberg, or DuckLake
@@ -762,6 +780,20 @@ decomposed into independently testable milestones below.
           defined in Stream 2 below.
 19. [x] Add observable, semantics-preserving optimizer passes with Linux
         benchmark proof as defined in Stream 3 below.
+20. [ ] Add pandas-compatible grouped row-based rolling windows as the next
+        product priority.
+    - [ ] Implement `DataFrameGroupBy.rolling()` and `SeriesGroupBy.rolling()`
+          using DuckDB window partitions and DuckPD's explicit ordering metadata.
+    - [ ] Preserve pandas index and alignment semantics so grouped rolling
+          features can be assigned back to their originating frame lazily.
+    - [ ] Add differential tests for multiple keys, null keys, duplicate order
+          keys, insufficient window periods, and unordered-input failures.
+    - [ ] Update the compatibility matrix and README with a validated
+          multi-ticker moving-average crossover example.
+21. [ ] Add safe, read-only `Session.attach_postgres()` and
+      `Session.attach_mysql()` APIs as the next product priority, with
+      refresh-on-execution semantics, credential redaction, explicit
+      pushdown reporting, and network-transfer safety guards.
 
 ### Active Linux-beta workstreams and goals
 
@@ -904,9 +936,11 @@ preserve schema, index, ordering, row identity, provenance, and null semantics;
 retained passes improve representative validated Linux workloads without
 material regressions.
 
-Controlled UDF/fallback work remains deferred to Phase 10. Remote sources and
-split planning remain deferred to Phase 11; neither is part of the active
-Linux-beta optimizer stream.
+Pandas-compatible grouped rolling and aligned window feature assignment are the
+next active product priority. Safe PostgreSQL and MySQL attachment follows in
+Phase 11; general remote-source split planning remains deferred until the
+read-only attachment, credential-safety, observability, and transfer-guard
+contract is established.
 
 ## Definition of done for each public operation
 
