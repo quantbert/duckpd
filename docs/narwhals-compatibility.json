@@ -46,7 +46,7 @@
       "ordering": "preserved",
       "since": "0.0.7",
       "status": "supported",
-      "notes": "Builds a lazy DuckPD projection."
+      "notes": "Strict mode raises Narwhals ColumnNotFoundError; non-strict mode ignores absent columns."
     },
     {
       "method": "LazyFrame.rename",
@@ -55,7 +55,7 @@
       "ordering": "preserved",
       "since": "0.0.7",
       "status": "supported",
-      "notes": "Uses DuckPD metadata-only rename semantics."
+      "notes": "Uses DuckPD metadata-only rename semantics and ignores absent mapping keys."
     },
     {
       "method": "LazyFrame.sort",

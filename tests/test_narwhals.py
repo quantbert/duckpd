@@ -8,6 +8,8 @@ from pathlib import Path
 import narwhals as nw
 import pandas as pd
 import pyarrow as pa
+import pytest
+from narwhals.exceptions import ColumnNotFoundError
 
 import duckpd
 from duckpd.frame import DataFrame
@@ -44,6 +46,18 @@ def test_narwhals_metadata_operations_remain_lazy() -> None:
         assert transformed.columns == ["renamed"]
         assert list(transformed.collect_schema()) == ["renamed"]
         assert isinstance(transformed.to_native(), DataFrame)
+        assert session.execution_count == 0
+
+
+def test_narwhals_drop_and_rename_missing_column_contracts() -> None:
+    with duckpd.connect() as session:
+        lazy = nw.from_native(session.from_pandas(pd.DataFrame({"a": [1], "b": [2]})))
+
+        with pytest.raises(ColumnNotFoundError, match="missing"):
+            lazy.drop("missing")
+
+        assert lazy.drop("missing", strict=False).columns == ["a", "b"]
+        assert lazy.rename({"missing": "renamed"}).columns == ["a", "b"]
         assert session.execution_count == 0
 
 

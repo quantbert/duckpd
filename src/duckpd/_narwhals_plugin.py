@@ -113,12 +113,18 @@ class DuckPDLazyFrame:
         if strict:
             missing = sorted(set(columns) - set(self.columns))
             if missing:
-                raise KeyError(f"Columns not found: {missing}")
+                from narwhals.exceptions import ColumnNotFoundError
+
+                raise ColumnNotFoundError(f"Columns not found: {missing}")
         retained = [name for name in self.columns if name not in columns]
         return self._with_native(self._native_frame[retained])
 
     def rename(self, mapping: Mapping[str, str]) -> DuckPDLazyFrame:
-        return self._with_native(self._native_frame.rename(columns=dict(mapping)))
+        existing = set(self.columns)
+        applicable = {old: new for old, new in mapping.items() if old in existing}
+        if not applicable:
+            return self._with_native(self._native_frame)
+        return self._with_native(self._native_frame.rename(columns=applicable))
 
     def sort(
         self,
