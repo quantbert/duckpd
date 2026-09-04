@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import duckdb
 import numpy as np
@@ -34,6 +38,47 @@ if TYPE_CHECKING:
     from duckpd._compiler import DuckDBCompiler
     from duckpd._logical import LogicalPlan
     from duckpd.session import Session
+
+
+@dataclass(frozen=True)
+class ProfileResult:
+    """Structured execution profiling metrics for a DuckPD plan."""
+
+    latency: float
+    cpu_time: float
+    rows_scanned: int
+    rows_returned: int
+    bytes_read: int
+    bytes_written: int
+    peak_buffer_memory: int
+    peak_temp_dir_size: int
+    raw: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the raw DuckDB profile metrics dictionary."""
+        return self.raw
+
+    def to_json(self, *, indent: int | None = 2) -> str:
+        """Return the profile metrics as formatted JSON."""
+        return json.dumps(self.raw, indent=indent)
+
+    def summary(self) -> str:
+        """Format a concise human-readable profiling summary."""
+        lines = [
+            "DuckPD Query Profile Summary",
+            f"  Execution Latency:      {self.latency * 1000:.3f} ms",
+            f"  CPU Time:               {self.cpu_time * 1000:.3f} ms",
+            f"  Rows Scanned:           {self.rows_scanned:,}",
+            f"  Rows Returned:          {self.rows_returned:,}",
+            f"  Bytes Read:             {self.bytes_read:,} bytes",
+            f"  Bytes Written:          {self.bytes_written:,} bytes",
+            f"  Peak Buffer Memory:     {self.peak_buffer_memory:,} bytes",
+            f"  Peak Temp Spill Size:   {self.peak_temp_dir_size:,} bytes",
+        ]
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return self.summary()
 
 
 def _decimal_or_none(value: object) -> Decimal | None:
@@ -296,6 +341,42 @@ class Executor:
             f"Compression: {compression}\n"
             f"Output columns: {list(plan.metadata.visible_columns)}\n"
             f"DuckDB physical plan:\n{visible_rel.explain()}"
+        )
+
+    def profile(self, plan: LogicalPlan) -> ProfileResult:
+        """Execute plan with DuckDB structured JSON profiling enabled."""
+        self._validate_execution(plan)
+        con = self._session._connection
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            temp_path = tmp.name
+
+        try:
+            con.execute("PRAGMA enable_profiling = 'json'")
+            con.execute(f"PRAGMA profiling_output = '{temp_path}'")
+            self._session._begin_execution()
+            compiled = self._compiler.compile(plan)
+            visible_rel = self._compiler.project_visible(compiled, plan).relation
+            visible_rel.fetchall()
+        finally:
+            con.execute("PRAGMA disable_profiling")
+
+        try:
+            with open(temp_path, encoding="utf-8") as f:
+                raw_data = cast("dict[str, Any]", json.loads(f.read()))
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+        return ProfileResult(
+            latency=float(raw_data.get("latency") or 0.0),
+            cpu_time=float(raw_data.get("cpu_time") or 0.0),
+            rows_scanned=int(raw_data.get("cumulative_rows_scanned") or 0),
+            rows_returned=int(raw_data.get("rows_returned") or 0),
+            bytes_read=int(raw_data.get("total_bytes_read") or 0),
+            bytes_written=int(raw_data.get("total_bytes_written") or 0),
+            peak_buffer_memory=int(raw_data.get("system_peak_buffer_memory") or 0),
+            peak_temp_dir_size=int(raw_data.get("system_peak_temp_dir_size") or 0),
+            raw=raw_data,
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:

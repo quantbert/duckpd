@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal
+from decimal import Decimal
+from typing import TYPE_CHECKING, Literal, cast
 
 import pandas as pd
 
@@ -40,7 +41,7 @@ from duckpd._reductions import (
     validate_min_count,
     validate_quantile,
 )
-from duckpd._typing import is_scalar_value, normalize_dtype
+from duckpd._typing import ScalarValue, is_scalar_value, normalize_dtype
 from duckpd.errors import (
     AlignmentError,
     UnorderedOperationError,
@@ -70,6 +71,30 @@ class Series:
         self._plan = plan
         self._expression = expression
         self.name = name
+
+    def rename(
+        self,
+        index: object | None = None,
+        *,
+        axis: int | str | None = None,
+        copy: bool = True,
+        inplace: bool = False,
+        level: object | None = None,
+        errors: str = "raise",
+    ) -> Series:
+        """Alter Series name."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if not copy:
+            raise UnsupportedOperationError("DuckPD does not support copy=False")
+        if level is not None:
+            raise UnsupportedOperationError("DuckPD does not support MultiIndex levels")
+        if isinstance(index, dict):
+            raise UnsupportedOperationError(
+                "DuckPD does not yet support renaming index labels"
+            )
+        new_name = str(index) if index is not None else None
+        return Series(self._session, self._plan, self._expression, new_name)
 
     def to_frame(self, name: str | None = None) -> DataFrame:
         """Convert Series to a DataFrame."""
@@ -291,6 +316,153 @@ class Series:
             CaseWhen(cond_expr, other_expr, self._expression),
             self.name,
         )
+
+    def clip(
+        self,
+        lower: object = None,
+        upper: object = None,
+        *,
+        axis: int | str | None = None,
+        inplace: bool = False,
+    ) -> Series:
+        """Trim values at input thresholds."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if axis not in {0, "index", None}:
+            raise UnsupportedOperationError(
+                "DuckPD clip currently supports only axis=0 or axis='index'"
+            )
+        if lower is None and upper is None:
+            return self
+
+        if (
+            isinstance(lower, (int, float))
+            and isinstance(upper, (int, float))
+            and lower > upper
+        ):
+            raise ValueError("Cannot set lower > upper")
+
+        lower_expr: Expression | None = None
+        if isinstance(lower, Series):
+            if lower._session is not self._session or lower._plan is not self._plan:
+                raise AlignmentError("Cannot align Series from different frames")
+            lower_expr = lower._expression
+        elif lower is not None:
+            lower_expr = LiteralValue(cast("ScalarValue", lower))
+
+        upper_expr: Expression | None = None
+        if isinstance(upper, Series):
+            if upper._session is not self._session or upper._plan is not self._plan:
+                raise AlignmentError("Cannot align Series from different frames")
+            upper_expr = upper._expression
+        elif upper is not None:
+            upper_expr = LiteralValue(cast("ScalarValue", upper))
+        expr = self._expression
+        cond_lower = (
+            BinaryExpression(expr, BinaryOperator.LESS_THAN, lower_expr)
+            if lower_expr is not None
+            else None
+        )
+        cond_upper = (
+            BinaryExpression(expr, BinaryOperator.GREATER_THAN, upper_expr)
+            if upper_expr is not None
+            else None
+        )
+
+        if cond_lower is not None and cond_upper is not None:
+            clipped: Expression = CaseWhen(
+                cond_lower,
+                lower_expr,  # type: ignore[arg-type]
+                CaseWhen(cond_upper, upper_expr, expr),  # type: ignore[arg-type]
+            )
+        elif cond_lower is not None:
+            clipped = CaseWhen(cond_lower, lower_expr, expr)  # type: ignore[arg-type]
+        elif cond_upper is not None:
+            clipped = CaseWhen(cond_upper, upper_expr, expr)  # type: ignore[arg-type]
+        else:
+            clipped = expr
+
+        return Series(self._session, self._plan, clipped, self.name)
+
+    def replace(
+        self,
+        to_replace: object = None,
+        value: object = None,
+        *,
+        inplace: bool = False,
+        limit: int | None = None,
+        regex: bool = False,
+        method: str | None = None,
+    ) -> Series:
+        """Replace values given in to_replace with value."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if regex:
+            raise UnsupportedOperationError(
+                "DuckPD replace does not yet support regex=True"
+            )
+        if limit is not None or method is not None:
+            raise UnsupportedOperationError(
+                "DuckPD replace does not support limit or method parameters"
+            )
+        if to_replace is None and value is None:
+            return self
+
+        pairs: list[tuple[object, object]] = []
+        if isinstance(to_replace, dict):
+            pairs = list(cast("dict[object, object]", to_replace).items())
+        elif isinstance(to_replace, (list, tuple)):
+            replace_list = cast("Sequence[object]", to_replace)
+            if isinstance(value, (list, tuple)):
+                value_list = cast("Sequence[object]", value)
+                if len(replace_list) != len(value_list):
+                    raise ValueError(
+                        "Replacement list lengths must match: "
+                        f"len(to_replace)={len(replace_list)} vs "
+                        f"len(value)={len(value_list)}"
+                    )
+                pairs = list(zip(replace_list, value_list, strict=True))
+            else:
+                pairs = [(old_val, value) for old_val in replace_list]
+        else:
+            pairs = [(to_replace, value)]
+
+        def _is_replace_compatible(val: object, duckdb_type: str) -> bool:
+            if val is None or val is pd.NA:
+                return True
+            if is_numeric_type(duckdb_type):
+                return isinstance(val, (int, float, Decimal)) and not isinstance(
+                    val, bool
+                )
+            if duckdb_type in {"VARCHAR", "TEXT"}:
+                return isinstance(val, str)
+            if duckdb_type == "BOOLEAN":
+                return isinstance(val, bool)
+            return True
+
+        target_type = expression_type(self._plan, self._expression)
+        applicable_pairs = [
+            p for p in pairs if _is_replace_compatible(p[0], target_type)
+        ]
+
+        expr = self._expression
+        cur_expr: Expression = expr
+        for old_v, new_v in reversed(applicable_pairs):
+            is_null_val = (
+                old_v is None
+                or old_v is pd.NA
+                or (isinstance(old_v, float) and pd.isna(old_v))
+            )
+            if is_null_val:
+                cond: Expression = FunctionCall("isnull", (expr,))
+            else:
+                old_scalar = cast("ScalarValue", old_v)
+                cond = BinaryExpression(
+                    expr, BinaryOperator.EQUAL, LiteralValue(old_scalar)
+                )
+            new_scalar = cast("ScalarValue", new_v)
+            cur_expr = CaseWhen(cond, LiteralValue(new_scalar), cur_expr)
+        return Series(self._session, self._plan, cur_expr, self.name)
 
     def _coerce_cond(self, cond: object) -> Expression:
         if isinstance(cond, Series):

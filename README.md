@@ -81,15 +81,17 @@ DuckPD maps pandas semantics directly to DuckDB's vectorized analytical engine:
 | API Category                          | Supported Methods &amp; Operations                                                                                                                                   | Execution Model                                               |
 | :------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------- |
 | **I/O &amp; Data Loading**            | `read_parquet()`, `read_csv()`, `from_pandas()`, `from_arrow()`, `Session.sql()`, `connect()`                                                                        | **Lazy** (scans metadata / registers source)                  |
-| **Transformations &amp; Projections** | `df[cols]`, `df[bool_filter]`, `assign()`, `sort_values()`, `limit()`, `drop_duplicates()`, `set_index()`, `reset_index()`, `df.loc[]`, `df.iloc[]`                  | **Lazy** (appends to logical query graph)                     |
+| **Transformations &amp; Projections** | `df[cols]`, `df[bool_filter]`, `assign()`, `sort_values()`, `limit()`, `drop_duplicates()`, `clip()`, `replace()`, `set_index()`, `reset_index()`, `df.loc[]`, `df.iloc[]` | **Lazy** (appends to logical query graph)                     |
 | **Joins &amp; Merges**                | `merge()`, `join()` (`inner`, `left`, `right`, `outer`, `cross`, custom suffixes, `validate=`)                                                                       | **Lazy** (relational hash join, pre-flight cardinality check) |
 | **Concatenation**                     | `duckpd.concat()` (multi-frame row union, schema alignment, null padding, defined numeric coercion, stable order synthesis)                                          | **Lazy** (union with projection padding)                      |
 | **String Accessor (`.str`)**          | `upper()`, `lower()`, `strip()`, `len()`, `startswith()`, `endswith()`, `contains()`, `replace()`                                                                    | **Lazy** (DuckDB SQL functions)                               |
 | **Datetime Accessor (`.dt`)**         | `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime()`, `to_period()`                                                                                      | **Lazy** (DuckDB timestamp extractors)                        |
 | **GroupBy Aggregations**              | `groupby().agg()`, `.sum()`, `.mean()`, `.min()`, `.max()`, `.std()`, `.var()`, `.count()` (`as_index=True/False`)                                                   | **Lazy** for `.agg()`, **Eager** for reductions               |
 | **Statistical Reductions**            | `sum()`, `mean()`, `min()`, `max()`, `count()`, `size`, `std()`, `var()`, `median()`, `quantile()`, `any()`, `all()`, `nunique()`                                    | **Eager** (single aggregate SQL pushdown)                     |
-| **Collection, Output &amp; State**    | `collect()`, `to_pandas()`, `head(n)`, `explain()`, `explain_write()`, `write_parquet()`, `write_csv()`, `to_csv()`, `to_arrow()`, `to_arrow_batches()`, `persist()` | **Explicit Execution Boundary**                               |
+| **Collection, Output &amp; State**    | `collect()`, `to_pandas()`, `head(n)`, `profile()`, `explain()`, `explain_write()`, `write_parquet()`, `write_csv()`, `to_csv()`, `to_arrow()`, `to_arrow_batches()`, `persist()` | **Explicit Execution Boundary**                               |
 
+
+For a detailed breakdown of unique DuckPD extensions, execution boundaries, and intentional semantic deviations from pandas, see the [API Compatibility & Semantic Guide](docs/COMPATIBILITY.md).
 
 ## Example
 
@@ -218,5 +220,5 @@ uv run pyright
 uv build
 ```
 
-See the [documentation index](docs/README.md) for the implementation roadmap,
-architecture decisions, benchmarks, research, and changelog.
+See the [documentation index](docs/README.md) and [API compatibility guide](docs/COMPATIBILITY.md)
+for the implementation roadmap, architecture decisions, benchmarks, research, and changelog.

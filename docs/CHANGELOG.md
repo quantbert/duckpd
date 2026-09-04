@@ -16,6 +16,11 @@ the [release policy](RELEASES.md).
 - Streaming tests ensure `DataFrame.to_arrow_batches` yields bounded record batches without constructing pandas DataFrames.
 - A constrained-memory smoke test exercises sorting, aggregation, and Parquet output under strict DuckDB resource settings; it does not measure RSS or prove that spill occurred.
 - Hypothesis differential tests cover selected nullable-integer and float round trips, reductions, string accessors, missing-value transformations, and concatenation against pandas 3.0.
+- Column-wise concatenation (`duckpd.concat(..., axis=1)` or `axis='columns'`): optimizes same-lineage Series and DataFrames into a single lazy projection with zero joins, aligns multi-frame inputs via explicit index outer/inner joins, supports `ignore_index=True` renumbering, and rejects colliding column labels when `ignore_index=False`.
+- Numerical boundary trimming (`Series.clip` and `DataFrame.clip`): compiles thresholds lazily to bounded `CASE WHEN` SQL expressions supporting scalar, Series, and per-column dictionary bounds with NULL preservation.
+- Value replacement (`Series.replace` and `DataFrame.replace`): compiles replacements lazily via typed `CASE WHEN` branches supporting scalars, lists, mappings, and column-specific dictionaries with type-compatibility filtering and NULL detection.
+- Series renaming (`Series.rename`): alters Series name metadata lazily without execution.
+- Query profiling (`DataFrame.profile` and `ProfileResult`): executes queries with DuckDB structured JSON profiling enabled and returns typed performance metrics (execution latency, CPU time, rows scanned, rows returned, bytes read/written, peak buffer memory, peak spill directory size, JSON serialization, and human-readable summary).
 
 ### Changed
 

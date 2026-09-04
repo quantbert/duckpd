@@ -184,7 +184,9 @@ def plan_merge(
         left_included = left_frame._plan.metadata.columns
         # Right columns include visible only (hidden index dropped)
         right_included = [
-            c for c in right_frame._plan.metadata.columns if c.id not in right_key_ids
+            c
+            for c in right_frame._plan.metadata.visible_columns
+            if c.id not in right_key_ids
         ]
     else:
         left_included = left_frame._plan.metadata.visible_columns

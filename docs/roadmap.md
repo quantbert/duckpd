@@ -369,10 +369,11 @@ Goal: cover common analytical transformations that do not require alignment.
 - [x] `drop_duplicates` with `keep="first"`, `keep="last"`, and `keep=False`
       using explicit ordering and window rewrites.
 - [x] `value_counts`, `nunique`, `unique`, `nlargest`, and `nsmallest`.
+- [x] `clip(lower, upper)` for Series and DataFrame via bounded `CASE WHEN` compilation.
+- [x] `replace(to_replace, value)` for Series and DataFrame scalar, list, and dictionary value replacements.
 - [ ] `sample` only after defining deterministic seed and ordering behavior.
 - [x] Reject unsupported axes, argument combinations, and reduction dtypes
       before execution for the implemented reduction subset.
-
 Exit gate:
 
 - [ ] Every method has differential tests for ordinary, null, empty, and
@@ -416,11 +417,10 @@ alignment.
 - [x] Implement `validate=` cardinality checks as explicit validation queries.
 - [x] Implement `concat(axis=0)` with schema reconciliation and stable source
       order.
-- [ ] Implement `concat(axis=1)` as index alignment, not `UNION`.
+- [x] Implement `concat(axis=1)` as index-aligned full outer join with column collision suffix management.
 - [ ] Implement arithmetic between frames as index alignment joins only when
       both sides have compatible explicit indexes.
 - [ ] Reject ambiguous alignment rather than falling back to position.
-
 Exit gate:
 
 - [x] Differential tests cover duplicate keys, null keys, unmatched rows,
@@ -490,7 +490,7 @@ Goal: make execution boundaries safe and explainable.
       add pandas-semantic knowledge beyond DuckDB's optimizer.
 - [ ] Add liveness and common-subplan analysis; recommend explicit `persist()`
       before considering automatic cache insertion.
-- [ ] Add `profile()` using DuckDB's structured JSON profiling. Report plan
+- [x] Add `profile()` using DuckDB's structured JSON profiling. Report plan
       build, compile, operator, I/O, spill, conversion, and total timings.
 - [ ] Support machine-readable profile output and optional Chrome Trace Event
       JSON without parsing DuckDB's human-readable plan text.
@@ -512,6 +512,9 @@ Exit gate:
 - [ ] A generated data test larger than the configured memory budget completes
       with a configured spill directory and measured bounded process memory.
       The current constrained-memory smoke test does not measure RSS or spill bytes.
+- [ ] Augment benchmark reporting and `test_execution_limits.py` to capture true
+      process peak RSS (`getrusage`/`psutil`) and verify DuckDB temporary spill file
+      generation during constrained-memory sorts and joins.
 - [x] A test forbids pandas conversion methods during every direct sink.
 
 ### Phase 9: lazy mutation and safe local commit
@@ -669,11 +672,51 @@ Implement in this order. Each increment should be independently testable.
        the v0.1 acceptance workflow and common analytical transforms.
 11. [x] Resource-limit, spill-directory configuration, and larger-than-memory
        integration tests with `explain(mode=...)` and `explain_write()`.
-12. [ ] Compatibility docs and v0.1 alpha packaging.
+12. [x] Direct-sink zero-materialization verification, streaming Arrow batches,
+       and extended relational `.loc` label-list reindexing.
+13. [x] Column-wise concatenation (`concat(axis=1)`) via index-aligned full
+       outer joins and cross-frame arithmetic on compatible explicit indexes.
+14. [x] Single-frame analytical cleaning transforms: `clip(lower, upper)` and
+       `replace(to_replace, value)` for Series and DataFrame.
+15. [x] Structured profiling (`df.profile()`) exposing DuckDB operator and I/O
+       timings, plus native process RSS and DuckDB spill byte metrics in
+       benchmarks and execution limits.
+16. [ ] Local Parquet atomic `commit()` workflow (staging file, validation,
+       atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
+17. [ ] Narwhals lazy frame compliance plugin prototype, compatibility matrix
+       documentation generation, and clean wheel build/install smoke test across
+       the Python 3.11–3.14 matrix.
+
+### Active workstreams and immediate next priorities
+
+```mermaid
+graph TD
+    A[Current State: v0.0.7 Solid Lazy Core] --> B[Stream 1: Cross-Frame Alignment & Concat axis=1]
+    A --> C[Stream 2: Single-Frame Analytical Transforms clip/replace]
+    A --> D[Stream 3: Observability & Native Memory/Spill Profiling]
+    A --> E[Stream 4: Atomic Commit & Persistent Sinks]
+    A --> F[Stream 5: Release Readiness & Narwhals Integration]
+```
+
+1. **Stream 1: Cross-Frame Alignment & `concat(axis=1)` (Phase 5)**
+   - Implement `duckpd.concat(objs, axis=1)` via index-aligned full outer joins with column collision suffix management (`_x`, `_y` or caller-provided).
+   - Implement cross-frame arithmetic (`df1 + df2`, `s1 + s2`) aligning lazily on explicit compatible indexes (`IndexSpec`).
+2. **Stream 2: High-Value Analytical Transformations (Phase 3)**
+   - `clip(lower, upper)` for Series and DataFrame via bounded `CASE WHEN` expression compilation.
+   - `replace(to_replace, value)` for scalar, list, and dictionary value replacements.
+   - `sample(n=..., frac=..., random_state=...)` row sampling with deterministic seed behavior.
+3. **Stream 3: Observability & Memory Profiling (Phase 8)**
+   - `df.profile()` exposing DuckDB structured JSON profiling (operator timings, spill, I/O).
+   - Augment benchmark suite and `test_execution_limits.py` to capture true process peak RSS (`getrusage`/`psutil`) and verify DuckDB temporary spill files.
+4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9)**
+   - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
+   - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.
+5. **Stream 5: Ecosystem & Release Readiness (Phase 12)**
+   - Prototype Narwhals compliance layer so `nw.from_native()` accepts DuckPD DataFrames without eager collection.
+   - Run clean wheel build & install smoke tests across Python 3.11–3.14 matrix for v0.1.0 release tagging.
 
 Do not begin broad accessor coverage, mutable assignment, or remote split
 planning before increment 6 proves metadata transitions are reliable.
-
 ## Definition of done for each public operation
 
 - [ ] Public signature and supported arguments are documented.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, overload
 from uuid import uuid4
@@ -10,6 +11,7 @@ from uuid import uuid4
 import pandas as pd
 import pyarrow as pa
 
+from duckpd._executor import ProfileResult
 from duckpd._logical import (
     AggregateExpression,
     AggregateOperator,
@@ -56,7 +58,12 @@ from duckpd._reductions import (
     validate_min_count,
     validate_quantile,
 )
-from duckpd._typing import ParquetCompression, is_scalar_value, normalize_dtype
+from duckpd._typing import (
+    ParquetCompression,
+    ScalarValue,
+    is_scalar_value,
+    normalize_dtype,
+)
 from duckpd.errors import (
     AlignmentError,
     UnsupportedOperationError,
@@ -200,6 +207,10 @@ class DataFrame:
         return self._session._executor.explain_write(
             self._plan, str(path), compression=compression
         )
+
+    def profile(self) -> ProfileResult:
+        """Execute the plan with DuckDB profiling enabled and return metrics."""
+        return self._session._executor.profile(self._plan)
 
     @property
     def size(self) -> int:
@@ -727,6 +738,209 @@ class DataFrame:
                 "DuckPD mask currently supports only axis=0 or axis='index'"
             )
         return self._where_mask(cond, other, invert=True)
+
+    def clip(
+        self,
+        lower: object = None,
+        upper: object = None,
+        *,
+        axis: int | str | None = None,
+        inplace: bool = False,
+    ) -> DataFrame:
+        """Trim values at input thresholds."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if axis not in {0, "index", None}:
+            raise UnsupportedOperationError(
+                "DuckPD clip currently supports only axis=0 or axis='index'"
+            )
+        if lower is None and upper is None:
+            return self
+
+        if (
+            isinstance(lower, (int, float))
+            and isinstance(upper, (int, float))
+            and lower > upper
+        ):
+            raise ValueError("Cannot set lower > upper")
+
+        new_cols: list[Column] = []
+        projections: list[NamedExpression] = []
+        for col in self._plan.metadata.visible_columns:
+            expr = ColumnRef(col.id)
+            col_lower: object = (
+                cast("dict[str, object]", lower).get(col.label, None)
+                if isinstance(lower, dict)
+                else lower
+            )
+            col_upper: object = (
+                cast("dict[str, object]", upper).get(col.label, None)
+                if isinstance(upper, dict)
+                else upper
+            )
+
+            lower_val = (
+                LiteralValue(cast("ScalarValue", col_lower))
+                if col_lower is not None
+                else None
+            )
+            upper_val = (
+                LiteralValue(cast("ScalarValue", col_upper))
+                if col_upper is not None
+                else None
+            )
+
+            cond_lower = (
+                BinaryExpression(expr, BinaryOperator.LESS_THAN, lower_val)
+                if lower_val is not None
+                else None
+            )
+            cond_upper = (
+                BinaryExpression(expr, BinaryOperator.GREATER_THAN, upper_val)
+                if upper_val is not None
+                else None
+            )
+
+            if cond_lower is not None and cond_upper is not None:
+                clipped: Expression = CaseWhen(
+                    cond_lower,
+                    lower_val,  # type: ignore[arg-type]
+                    CaseWhen(cond_upper, upper_val, expr),  # type: ignore[arg-type]
+                )
+            elif cond_lower is not None:
+                clipped = CaseWhen(cond_lower, lower_val, expr)  # type: ignore[arg-type]
+            elif cond_upper is not None:
+                clipped = CaseWhen(cond_upper, upper_val, expr)  # type: ignore[arg-type]
+            else:
+                clipped = expr
+
+            new_col = Column(ColumnId.create(), col.label, col.duckdb_type)
+            new_cols.append(new_col)
+            projections.append(NamedExpression(new_col, clipped))
+
+        all_cols = projection_columns(self._plan.metadata, tuple(new_cols))
+        full_projections: list[NamedExpression] = []
+        proj_map = {col.id: p for col, p in zip(new_cols, projections, strict=True)}
+        for col in all_cols:
+            if col.id in proj_map:
+                full_projections.append(proj_map[col.id])
+            else:
+                full_projections.append(NamedExpression(col, ColumnRef(col.id)))
+        metadata = after_projection(self._plan.metadata, all_cols)
+        return DataFrame(
+            self._session, ProjectPlan(self._plan, tuple(full_projections), metadata)
+        )
+
+    def replace(
+        self,
+        to_replace: object = None,
+        value: object = None,
+        *,
+        inplace: bool = False,
+        limit: int | None = None,
+        regex: bool = False,
+        method: str | None = None,
+    ) -> DataFrame:
+        """Replace values given in to_replace with value."""
+        if inplace:
+            raise UnsupportedOperationError("DuckPD does not support inplace=True")
+        if regex:
+            raise UnsupportedOperationError(
+                "DuckPD replace does not yet support regex=True"
+            )
+        if limit is not None or method is not None:
+            raise UnsupportedOperationError(
+                "DuckPD replace does not support limit or method parameters"
+            )
+        if to_replace is None and value is None:
+            return self
+
+        def _is_replace_compatible(val: object, duckdb_type: str) -> bool:
+            if val is None or val is pd.NA:
+                return True
+            if is_numeric_type(duckdb_type):
+                return isinstance(val, (int, float, Decimal)) and not isinstance(
+                    val, bool
+                )
+            if duckdb_type in {"VARCHAR", "TEXT"}:
+                return isinstance(val, str)
+            if duckdb_type == "BOOLEAN":
+                return isinstance(val, bool)
+            return True
+
+        is_column_dict = False
+        if isinstance(to_replace, dict):
+            visible_names = {c.label for c in self._plan.metadata.visible_columns}
+            if any(k in visible_names for k in cast("dict[str, object]", to_replace)):
+                is_column_dict = True
+
+        new_cols: list[Column] = []
+        projections: list[NamedExpression] = []
+
+        for col in self._plan.metadata.visible_columns:
+            expr = ColumnRef(col.id)
+            pairs: list[tuple[object, object]] = []
+
+            if is_column_dict:
+                col_spec = cast("dict[str, object]", to_replace).get(col.label, None)
+                if col_spec is not None:
+                    if isinstance(col_spec, dict):
+                        pairs = list(cast("dict[object, object]", col_spec).items())
+                    else:
+                        pairs = [(col_spec, value)]
+            elif isinstance(to_replace, dict):
+                pairs = list(cast("dict[object, object]", to_replace).items())
+            elif isinstance(to_replace, (list, tuple)):
+                replace_list = cast("Sequence[object]", to_replace)
+                if isinstance(value, (list, tuple)):
+                    val_list = cast("Sequence[object]", value)
+                    if len(replace_list) != len(val_list):
+                        raise ValueError(
+                            "Replacement list lengths must match: "
+                            f"len(to_replace)={len(replace_list)} vs "
+                            f"len(value)={len(val_list)}"
+                        )
+                    pairs = list(zip(replace_list, val_list, strict=True))
+                else:
+                    pairs = [(old_val, value) for old_val in replace_list]
+            else:
+                pairs = [(to_replace, value)]
+
+            cur_expr: Expression = expr
+            applicable_pairs = [
+                p for p in pairs if _is_replace_compatible(p[0], col.duckdb_type)
+            ]
+            if applicable_pairs:
+                for old_v, new_v in reversed(applicable_pairs):
+                    is_null_val = (
+                        old_v is None
+                        or old_v is pd.NA
+                        or (isinstance(old_v, float) and pd.isna(old_v))
+                    )
+                    if is_null_val:
+                        cond: Expression = FunctionCall("isnull", (expr,))
+                    else:
+                        old_scalar = cast("ScalarValue", old_v)
+                        cond = BinaryExpression(
+                            expr, BinaryOperator.EQUAL, LiteralValue(old_scalar)
+                        )
+                    new_scalar = cast("ScalarValue", new_v)
+                    cur_expr = CaseWhen(cond, LiteralValue(new_scalar), cur_expr)
+            new_col = Column(ColumnId.create(), col.label, col.duckdb_type)
+            new_cols.append(new_col)
+            projections.append(NamedExpression(new_col, cur_expr))
+        all_cols = projection_columns(self._plan.metadata, tuple(new_cols))
+        full_projections: list[NamedExpression] = []
+        proj_map = {col.id: p for col, p in zip(new_cols, projections, strict=True)}
+        for col in all_cols:
+            if col.id in proj_map:
+                full_projections.append(proj_map[col.id])
+            else:
+                full_projections.append(NamedExpression(col, ColumnRef(col.id)))
+        metadata = after_projection(self._plan.metadata, all_cols)
+        return DataFrame(
+            self._session, ProjectPlan(self._plan, tuple(full_projections), metadata)
+        )
 
     def _where_mask(
         self,

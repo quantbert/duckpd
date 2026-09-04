@@ -400,11 +400,151 @@ def test_concat_different_sessions_raises_alignment_error(
 
 def test_concat_invalid_axis_raises(df1: pd.DataFrame) -> None:
     f1 = duckpd.from_pandas(df1)
-    with pytest.raises(UnsupportedOperationError, match="axis=0"):
-        duckpd.concat([f1, f1], axis=1)
+    with pytest.raises(ValueError, match="axis must be 0, 1"):
+        duckpd.concat([f1, f1], axis=2)
 
 
-def test_concat_invalid_join_raises(df1: pd.DataFrame) -> None:
+def test_concat_axis0_invalid_join_raises(df1: pd.DataFrame) -> None:
     f1 = duckpd.from_pandas(df1)
     with pytest.raises(UnsupportedOperationError, match="join='outer'"):
-        duckpd.concat([f1, f1], join="inner")
+        duckpd.concat([f1, f1], axis=0, join="inner")
+
+
+def test_concat_axis1_invalid_join_raises(df1: pd.DataFrame) -> None:
+    f1 = duckpd.from_pandas(df1)
+    with pytest.raises(ValueError, match=r"inner.*outer"):
+        duckpd.concat([f1, f1], axis=1, join="invalid")
+
+
+def test_concat_axis1_same_plan_series() -> None:
+    session = duckpd.connect()
+    pdf = pd.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+    df = session.from_pandas(pdf)
+    s1 = df["a"]
+    s2 = df["b"]
+
+    res = duckpd.concat([s1, s2], axis=1)
+    assert session.execution_count == 0
+    assert res.columns == ("a", "b")
+
+    expected = pd.concat([pdf["a"], pdf["b"]], axis=1)
+    assert_frame_equal(res.collect(), expected)
+    assert session.execution_count == 1
+
+
+def test_concat_axis1_same_plan_series_unnamed() -> None:
+    session = duckpd.connect()
+    pdf = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    df = session.from_pandas(pdf)
+    s1 = (df["a"] + 10).rename(None)
+    s2 = (df["b"] * 2).rename(None)
+
+    res = duckpd.concat([s1, s2], axis=1)
+    assert res.columns == ("0", "1")
+    collected = res.collect()
+    assert collected.columns.tolist() == ["0", "1"]
+    assert collected["0"].tolist() == [11, 12]
+    assert collected["1"].tolist() == [6, 8]
+
+
+def test_concat_axis1_same_plan_mixed_df_series() -> None:
+    session = duckpd.connect()
+    pdf = pd.DataFrame({"k": ["r1", "r2"], "a": [1, 2], "b": [3, 4], "c": [5, 6]})
+    df = session.from_pandas(pdf, index="k")
+    res = duckpd.concat([df[["a", "b"]], df["c"]], axis=1)
+    assert res.columns == ("a", "b", "c")
+    expected = pd.concat(
+        [pdf.set_index("k")[["a", "b"]], pdf.set_index("k")["c"]], axis=1
+    )
+    assert_frame_equal(res.collect(), expected)
+
+    res_ign = duckpd.concat([df[["a", "b"]], df["c"]], axis=1, ignore_index=True)
+    assert res_ign.columns == ("0", "1", "2")
+
+
+def test_concat_axis1_multi_frame_unnamed_series() -> None:
+    session = duckpd.connect()
+    p1 = pd.DataFrame({"k": ["r1", "r2"], "v1": [1, 2]})
+    p2 = pd.DataFrame({"k": ["r1", "r2"], "v2": [10, 20]})
+    f1 = session.from_pandas(p1, index="k")
+    f2 = session.from_pandas(p2, index="k")
+    s_unnamed = f2["v2"].rename(None)
+    res = duckpd.concat([f1, s_unnamed], axis=1)
+    assert res.columns == ("v1", "0")
+
+
+def test_concat_axis1_same_plan_duplicate_labels_raises() -> None:
+    session = duckpd.connect()
+    df = session.from_pandas(pd.DataFrame({"a": [1, 2]}))
+    with pytest.raises(ValueError, match="Duplicate column labels"):
+        duckpd.concat([df["a"], df["a"]], axis=1)
+
+
+def test_concat_axis1_multi_frame_outer_join() -> None:
+    session = duckpd.connect()
+    p1 = pd.DataFrame({"k": ["r1", "r2", "r3"], "v1": [1, 2, 3]})
+    p2 = pd.DataFrame({"k": ["r2", "r3", "r4"], "v2": [20, 30, 40]})
+
+    f1 = session.from_pandas(p1, index="k")
+    f2 = session.from_pandas(p2, index="k")
+
+    res = duckpd.concat([f1, f2], axis=1, join="outer", sort=True)
+    assert session.execution_count == 0
+
+    expected = pd.concat(
+        [p1.set_index("k"), p2.set_index("k")], axis=1, join="outer", sort=True
+    )
+    assert_frame_equal(res.collect(), expected)
+    assert session.execution_count == 1
+
+
+def test_concat_axis1_multi_frame_inner_join() -> None:
+    session = duckpd.connect()
+    p1 = pd.DataFrame({"k": ["r1", "r2", "r3"], "v1": [1, 2, 3]})
+    p2 = pd.DataFrame({"k": ["r2", "r3", "r4"], "v2": [20, 30, 40]})
+
+    f1 = session.from_pandas(p1, index="k")
+    f2 = session.from_pandas(p2, index="k")
+
+    res = duckpd.concat([f1, f2], axis=1, join="inner", sort=True)
+    assert session.execution_count == 0
+
+    expected = pd.concat(
+        [p1.set_index("k"), p2.set_index("k")], axis=1, join="inner", sort=True
+    )
+    assert_frame_equal(res.collect(), expected)
+    assert session.execution_count == 1
+
+
+def test_concat_axis1_ignore_index() -> None:
+    session = duckpd.connect()
+    p1 = pd.DataFrame({"k": ["r1", "r2"], "v1": [1, 2]})
+    p2 = pd.DataFrame({"k": ["r1", "r2"], "v2": [10, 20]})
+
+    f1 = session.from_pandas(p1, index="k")
+    f2 = session.from_pandas(p2, index="k")
+
+    res = duckpd.concat([f1, f2], axis=1, ignore_index=True)
+    assert res.columns == ("0", "1")
+    collected = res.collect()
+    assert collected.columns.tolist() == ["0", "1"]
+    assert collected["0"].tolist() == [1, 2]
+    assert collected["1"].tolist() == [10, 20]
+
+
+def test_concat_axis1_no_explicit_index_raises() -> None:
+    session = duckpd.connect()
+    f1 = session.from_pandas(pd.DataFrame({"a": [1, 2]}))
+    f2 = session.from_pandas(pd.DataFrame({"b": [3, 4]}))
+
+    with pytest.raises(AlignmentError, match="explicit index"):
+        duckpd.concat([f1, f2], axis=1)
+
+
+def test_concat_axis1_duplicate_columns_raises() -> None:
+    session = duckpd.connect()
+    f1 = session.from_pandas(pd.DataFrame({"k": ["r1"], "a": [1]}), index="k")
+    f2 = session.from_pandas(pd.DataFrame({"k": ["r1"], "a": [2]}), index="k")
+
+    with pytest.raises(ValueError, match="Duplicate column labels"):
+        duckpd.concat([f1, f2], axis=1)

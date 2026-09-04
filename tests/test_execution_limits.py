@@ -127,3 +127,35 @@ def test_explain_write(tmp_path: Path) -> None:
     assert "Compression: zstd" in info
     assert "Output columns:" in info
     assert "DuckDB physical plan:" in info
+
+
+def test_dataframe_profile() -> None:
+    from duckpd import ProfileResult
+
+    frame = duckpd.from_pandas(pd.DataFrame({"a": range(100), "b": range(100)}))
+    filtered = frame[frame["a"] > 50].assign(c=lambda f: f["a"] * 2)
+
+    prof = filtered.profile()
+    assert isinstance(prof, ProfileResult)
+    assert prof.latency > 0.0
+    assert prof.rows_scanned == 100
+    assert prof.rows_returned == 49
+    assert prof.bytes_read >= 0
+    assert prof.bytes_written >= 0
+    assert prof.peak_buffer_memory >= 0
+    assert prof.peak_temp_dir_size >= 0
+
+    summary = prof.summary()
+    assert "DuckPD Query Profile Summary" in summary
+    assert "Execution Latency:" in summary
+    assert "Rows Scanned:" in summary
+    assert repr(prof) == summary
+    assert str(prof) == summary
+
+    data = prof.to_dict()
+    assert isinstance(data, dict)
+    assert "cumulative_rows_scanned" in data
+
+    json_str = prof.to_json()
+    assert isinstance(json_str, str)
+    assert '"cumulative_rows_scanned": 100' in json_str

@@ -674,3 +674,197 @@ def test_isna_rename_drop_pipeline_matches_pandas(mixed_source: pd.DataFrame) ->
         mixed_source.rename(columns={"integer": "int"}).drop(columns="boolean").isna()
     )
     assert_frame_equal(result, expected, check_dtype=False)
+
+
+# --- clip and replace tests -------------------------------------------------
+
+
+def test_series_clip_matches_pandas() -> None:
+    source = pd.Series([1.0, 5.0, 10.0, None, -3.0, 20.0], name="x")
+    frame = duckpd.from_pandas(pd.DataFrame({"x": source}))
+    s = frame["x"]
+
+    # lower and upper
+    res1 = s.clip(lower=0, upper=10).collect()
+    exp1 = source.clip(lower=0, upper=10)
+    assert_series_equal(res1, exp1)
+
+    # lower only
+    res2 = s.clip(lower=2).collect()
+    exp2 = source.clip(lower=2)
+    assert_series_equal(res2, exp2)
+
+    # upper only
+    res3 = s.clip(upper=8).collect()
+    exp3 = source.clip(upper=8)
+    assert_series_equal(res3, exp3)
+
+    # invalid lower > upper
+    with pytest.raises(ValueError, match="Cannot set lower > upper"):
+        s.clip(lower=10, upper=5)
+
+    # inplace=True raises
+    with pytest.raises(UnsupportedOperationError, match="inplace=True"):
+        s.clip(lower=0, upper=10, inplace=True)
+
+
+def test_series_clip_with_series_bounds() -> None:
+    pdf = pd.DataFrame({"val": [10, 20, 30], "low": [15, 15, 15], "high": [25, 25, 25]})
+    df = duckpd.from_pandas(pdf)
+    res = df["val"].clip(lower=df["low"], upper=df["high"]).collect()
+    exp = pdf["val"].clip(lower=pdf["low"], upper=pdf["high"])
+    assert_series_equal(res, exp)
+
+    # different frame raises AlignmentError
+    df2 = duckpd.from_pandas(pdf)
+    with pytest.raises(AlignmentError, match="different frames"):
+        df["val"].clip(lower=df2["low"])
+
+
+def test_dataframe_clip_matches_pandas() -> None:
+    pdf = pd.DataFrame(
+        {
+            "a": [1, 5, 20, None, -3],
+            "b": [10.5, 20.0, 30.5, 40.0, 50.0],
+        }
+    )
+    df = duckpd.from_pandas(pdf)
+
+    # scalar bounds
+    res = df.clip(lower=2, upper=25).collect()
+    exp = pdf.clip(lower=2, upper=25)
+    assert_frame_equal(res, exp)
+
+    # dict bounds per column
+    res_dict = df.clip(lower={"a": 0, "b": 15}, upper={"a": 10, "b": 35}).collect()
+    exp_dict = pdf.clip(
+        lower=pd.Series({"a": 0, "b": 15}),
+        upper=pd.Series({"a": 10, "b": 35}),
+        axis=1,
+    )
+    assert_frame_equal(res_dict, exp_dict)
+
+    # invalid lower > upper
+    with pytest.raises(ValueError, match="Cannot set lower > upper"):
+        df.clip(lower=10, upper=5)
+
+    # inplace raises
+    with pytest.raises(UnsupportedOperationError, match="inplace=True"):
+        df.clip(lower=0, upper=10, inplace=True)
+
+
+def test_series_replace_matches_pandas() -> None:
+    source = pd.Series(["apple", "banana", "cherry", "banana", None], name="fruit")
+    df = duckpd.from_pandas(pd.DataFrame({"fruit": source}))
+    s = df["fruit"]
+
+    # dict mapping
+    res1 = s.replace({"banana": "BANANA", "cherry": "CHERRY"}).collect()
+    exp1 = source.replace({"banana": "BANANA", "cherry": "CHERRY"})
+    assert_series_equal(res1, exp1)
+
+    # scalar replacement
+    res2 = s.replace("apple", "APPLE").collect()
+    exp2 = source.replace("apple", "APPLE")
+    assert_series_equal(res2, exp2)
+
+    # list replacement to scalar
+    num_s = pd.Series([1, 2, 3, 2, 1], name="n")
+    num_df = duckpd.from_pandas(pd.DataFrame({"n": num_s}))
+    res3 = num_df["n"].replace([1, 2], 0).collect()
+    exp3 = num_s.replace([1, 2], 0)
+    assert_series_equal(res3, exp3)
+
+    # list replacement to list
+    res4 = num_df["n"].replace([1, 2], [10, 20]).collect()
+    exp4 = num_s.replace([1, 2], [10, 20])
+    assert_series_equal(res4, exp4)
+
+    # inplace raises
+    with pytest.raises(UnsupportedOperationError, match="inplace=True"):
+        s.replace("apple", "APPLE", inplace=True)
+
+
+def test_dataframe_replace_matches_pandas() -> None:
+    pdf = pd.DataFrame(
+        {
+            "a": [1, 2, 3],
+            "b": ["x", "y", "z"],
+            "c": [10, 20, 30],
+        }
+    )
+    df = duckpd.from_pandas(pdf)
+
+    # column-specific nested dict
+    res1 = df.replace({"a": {1: 100, 2: 200}, "b": {"x": "X"}}).collect()
+    exp1 = pdf.replace({"a": {1: 100, 2: 200}, "b": {"x": "X"}})
+    assert_frame_equal(res1, exp1)
+
+    # global dict across columns
+    res2 = df.replace({1: 100, 2: 200, "x": "XX"}).collect()
+    exp2 = pdf.replace({1: 100, 2: 200, "x": "XX"})
+    assert_frame_equal(res2, exp2)
+
+    # scalar replacement
+    res3 = df.replace(1, 999).collect()
+    exp3 = pdf.replace(1, 999)
+    assert_frame_equal(res3, exp3)
+
+    # list replacement to list mismatch error
+    with pytest.raises(ValueError, match="Replacement list lengths must match"):
+        df.replace([1, 2], [10])
+
+
+def test_clip_replace_and_rename_edge_cases() -> None:
+    pdf = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    df = duckpd.from_pandas(pdf)
+    s = df["a"]
+
+    # clip with no bounds
+    assert s.clip() is s
+    assert df.clip() is df
+
+    # clip invalid axis
+    with pytest.raises(UnsupportedOperationError, match="axis=0"):
+        s.clip(lower=0, axis=1)
+    with pytest.raises(UnsupportedOperationError, match="axis=0"):
+        df.clip(lower=0, axis=1)
+
+    # replace with no args
+    assert s.replace() is s
+    assert df.replace() is df
+
+    # replace unsupported parameters
+    with pytest.raises(UnsupportedOperationError, match="inplace=True"):
+        df.replace(1, 10, inplace=True)
+    with pytest.raises(UnsupportedOperationError, match="regex=True"):
+        s.replace(1, 10, regex=True)
+    with pytest.raises(UnsupportedOperationError, match="regex=True"):
+        df.replace(1, 10, regex=True)
+    with pytest.raises(UnsupportedOperationError, match="limit"):
+        s.replace(1, 10, limit=1)
+    with pytest.raises(UnsupportedOperationError, match="limit"):
+        df.replace(1, 10, limit=1)
+    with pytest.raises(UnsupportedOperationError, match="method"):
+        s.replace(1, 10, method="pad")
+    with pytest.raises(UnsupportedOperationError, match="method"):
+        df.replace(1, 10, method="pad")
+
+    # Series replace length mismatch
+    with pytest.raises(ValueError, match="lengths must match"):
+        s.replace([1, 2], [10])
+
+    # DataFrame replace column dict with scalar value
+    res_col_scalar = df.replace({"a": 1}, 99).collect()
+    assert res_col_scalar["a"].tolist() == [99, 2]
+    assert res_col_scalar["b"].tolist() == ["x", "y"]
+
+    # Series rename edge cases
+    with pytest.raises(UnsupportedOperationError, match="inplace=True"):
+        s.rename("new", inplace=True)
+    with pytest.raises(UnsupportedOperationError, match="copy=False"):
+        s.rename("new", copy=False)
+    with pytest.raises(UnsupportedOperationError, match="MultiIndex"):
+        s.rename("new", level=1)
+    with pytest.raises(UnsupportedOperationError, match="index labels"):
+        s.rename({0: 1})

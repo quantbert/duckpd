@@ -9,8 +9,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 
 - [Implementation roadmap](roadmap.md) — product contract, phased work, testing
   strategy, and release criteria.
-- [API Compatibility Matrix](COMPATIBILITY.md) — supported methods, parameters,
-  and behavioral guarantees versus pandas 3.0.
+- [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — comprehensive overview
+  of supported methods, DuckPD extensions, intentional deviations, and behavioral
+  guarantees versus pandas 3.0.
 - [Changelog](CHANGELOG.md) — unreleased changes and reconstructed, untagged development milestones.
 - [Release policy](RELEASES.md) — pre-`1.0` versioning, deprecation, and
   publishing rules.

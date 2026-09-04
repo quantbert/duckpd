@@ -2,6 +2,7 @@
 
 from importlib.metadata import version
 
+from duckpd._executor import ProfileResult
 from duckpd.errors import MergeError
 from duckpd.frame import DataFrame
 from duckpd.groupby import DataFrameGroupBy, SeriesGroupBy
@@ -15,6 +16,7 @@ __all__ = [
     "DataFrame",
     "DataFrameGroupBy",
     "MergeError",
+    "ProfileResult",
     "Series",
     "SeriesGroupBy",
     "Session",
