@@ -320,6 +320,34 @@ def test_loc_list_missing_key_raises_key_error() -> None:
         missing_lazy.collect()
 
 
+@pytest.mark.parametrize(
+    "index_label",
+    ["_loc_order_", "_loc_k_0", "__duckpd_matched__", 'odd " index'],
+)
+def test_loc_list_internal_names_cannot_collide(index_label: str) -> None:
+    source = pd.DataFrame({index_label: [10, 20], "value": ["a", "b"]})
+    frame = dp.from_pandas(source, index=index_label)
+
+    result = cast("dp.DataFrame", frame.loc[[20, 10]]).collect()
+    expected = source.set_index(index_label).loc[[20, 10]]
+
+    pd.testing.assert_frame_equal(result, expected)
+
+
+def test_loc_list_unordered_duplicate_source_does_not_claim_total_order(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "duplicate-index.csv"
+    pd.DataFrame({"id": [1, 1, 2], "value": ["a", "b", "c"]}).to_csv(path, index=False)
+    selected = cast("dp.DataFrame", dp.read_csv(path, index="id").loc[[1, 2]])
+
+    assert selected._plan.metadata.ordering.keys == ()
+    with pytest.raises(UnorderedOperationError):
+        selected.iloc[0:2]
+    with pytest.raises(UnorderedOperationError):
+        selected["value"].shift()
+
+
 def test_loc_list_multiindex_matches_pandas() -> None:
     pdf = pd.DataFrame(
         {

@@ -168,6 +168,48 @@ def test_concat_promotes_integer_width_without_using_float() -> None:
     assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    ("left_dtype", "right_dtype", "expected_dtype", "values"),
+    [
+        ("Int8", "UInt8", "Int16", [-1, None, 255, None]),
+        ("UInt8", "Int8", "Int16", [255, None, -1, None]),
+        ("Int16", "UInt16", "Int32", [-1, None, 65535, None]),
+        ("UInt16", "Int16", "Int32", [65535, None, -1, None]),
+    ],
+)
+def test_concat_mixed_nullable_integer_widths_are_lossless(
+    left_dtype: str,
+    right_dtype: str,
+    expected_dtype: str,
+    values: list[int | None],
+) -> None:
+    left = pd.DataFrame({"value": pd.Series(values[:2], dtype=left_dtype)})
+    right = pd.DataFrame({"value": pd.Series(values[2:], dtype=right_dtype)})
+
+    result = duckpd.concat(
+        [duckpd.from_pandas(left), duckpd.from_pandas(right)]
+    ).collect()
+
+    expected = pd.DataFrame({"value": pd.Series(values, dtype=expected_dtype)})
+    assert_frame_equal(result, expected)
+
+
+def test_concat_rejects_decimal_float_precision_loss_before_execution() -> None:
+    session = duckpd.connect()
+    decimal_frame = session.from_pandas(
+        pd.DataFrame({"value": [Decimal("9007199254740993.01")]})
+    )
+    float_frame = session.from_pandas(pd.DataFrame({"value": [1.5]}))
+
+    with pytest.raises(
+        UnsupportedOperationError,
+        match="cannot losslessly reconcile decimal and floating types",
+    ):
+        duckpd.concat([decimal_frame, float_frame])
+
+    assert session.execution_count == 0
+
+
 def test_concat_reconciles_decimal_precision_and_scale() -> None:
     first = pd.DataFrame({"value": [Decimal("1.25"), None]})
     second = pd.DataFrame({"value": [Decimal("123.4")]})

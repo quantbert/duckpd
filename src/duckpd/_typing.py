@@ -60,10 +60,11 @@ _UNSIGNED_INTEGER_TYPES = (
 
 
 def common_union_type(types: Iterable[str]) -> str:
-    """Return a lossless DuckDB type for a row-wise union.
+    """Return the supported DuckDB target type for a row-wise union.
 
-    DuckPD rejects heterogeneous non-numeric columns rather than coercing
-    values to strings and pretending to match pandas object semantics.
+    DuckPD follows pandas for integer/float promotion, preserves exact integer
+    and decimal-only unions, and rejects heterogeneous types without a defined
+    conversion contract.
     """
     unique = tuple(dict.fromkeys(types))
     if not unique:
@@ -87,9 +88,16 @@ def common_union_type(types: Iterable[str]) -> str:
     ):
         return _common_decimal_type(concrete, decimal_parts)
 
+    has_decimal = any(parts is not None for parts in decimal_parts)
+    has_float = any(dtype in {"FLOAT", "DOUBLE"} for dtype in concrete)
+    if has_decimal and has_float:
+        joined = ", ".join(concrete)
+        raise TypeError(
+            f"concat cannot losslessly reconcile decimal and floating types: {joined}"
+        )
+
     if all(
-        dtype in _INTEGER_BOUNDS or dtype in {"FLOAT", "DOUBLE"} or parts is not None
-        for dtype, parts in zip(concrete, decimal_parts, strict=True)
+        dtype in _INTEGER_BOUNDS or dtype in {"FLOAT", "DOUBLE"} for dtype in concrete
     ):
         return "DOUBLE"
 

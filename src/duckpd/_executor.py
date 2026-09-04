@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import duckdb
 import numpy as np
@@ -50,6 +50,18 @@ def _bytes_or_none(value: object) -> bytes | None:
     if not isinstance(value, (bytes, bytearray)):
         raise TypeError(f"Expected a binary value, got {type(value).__name__}")
     return bytes(value)
+
+
+_NULLABLE_INTEGER_DTYPE_BY_DUCKDB = {
+    "TINYINT": "Int8",
+    "SMALLINT": "Int16",
+    "INTEGER": "Int32",
+    "BIGINT": "Int64",
+    "UTINYINT": "UInt8",
+    "USMALLINT": "UInt16",
+    "UINTEGER": "UInt32",
+    "UBIGINT": "UInt64",
+}
 
 
 class Executor:
@@ -123,7 +135,7 @@ class Executor:
         }
         for label, orig_dtype in preserved_labels.items():
             if str(result[label].dtype) != orig_dtype:
-                result[label] = result[label].astype(cast("Any", orig_dtype))
+                result[label] = result[label].astype(orig_dtype)  # type: ignore[arg-type]
         for label in result.columns:
             dtype_name = str(result[label].dtype)
             if (
@@ -163,27 +175,19 @@ class Executor:
             right_dtypes = self._pandas_nullable_integer_dtypes(plan.right)
             return {**left_dtypes, **right_dtypes}
         if isinstance(plan, UnionPlan):
-            nullable_labels: dict[str, str] = {}
+            nullable_labels: set[str] = set()
             for input_plan in plan.inputs:
                 input_dtypes = self._pandas_nullable_integer_dtypes(input_plan)
-                for column in input_plan.metadata.columns:
-                    if column.id in input_dtypes:
-                        nullable_labels[column.label] = input_dtypes[column.id]
-            pandas_nullable_types = {
-                "TINYINT",
-                "SMALLINT",
-                "INTEGER",
-                "BIGINT",
-                "UTINYINT",
-                "USMALLINT",
-                "UINTEGER",
-                "UBIGINT",
-            }
+                nullable_labels.update(
+                    column.label
+                    for column in input_plan.metadata.columns
+                    if column.id in input_dtypes
+                )
             return {
-                column.id: nullable_labels[column.label]
+                column.id: _NULLABLE_INTEGER_DTYPE_BY_DUCKDB[column.duckdb_type]
                 for column in plan.metadata.columns
                 if column.label in nullable_labels
-                and column.duckdb_type in pandas_nullable_types
+                and column.duckdb_type in _NULLABLE_INTEGER_DTYPE_BY_DUCKDB
             }
         if isinstance(plan, LocIndexPlan):
             return self._pandas_nullable_integer_dtypes(plan.input)
@@ -325,98 +329,64 @@ class Executor:
         return reduced.infer_objects()
 
     def _validate_execution(self, plan: LogicalPlan) -> None:
-        self._validate_cardinalities(plan)
-        self._validate_loc_indices(plan)
-
-    def _validate_cardinalities(self, plan: LogicalPlan) -> None:
-        joins = self._find_join_plans(plan)
-        for join in joins:
-            if join.validate and join.validate not in {"m:m", "many_to_many"}:
-                self._validate_join(join)
-
-    def _validate_loc_indices(self, plan: LogicalPlan) -> None:
-        locs = self._find_loc_plans(plan)
-        for loc in locs:
-            self._validate_loc_plan(loc)
-
-    def _find_join_plans(self, plan: LogicalPlan) -> list[JoinPlan]:
-        joins: list[JoinPlan] = []
         if isinstance(plan, JoinPlan):
-            joins.extend(self._find_join_plans(plan.left))
-            joins.extend(self._find_join_plans(plan.right))
-            joins.append(plan)
-        elif isinstance(plan, UnionPlan):
+            self._validate_execution(plan.left)
+            self._validate_execution(plan.right)
+            if plan.validate and plan.validate not in {"m:m", "many_to_many"}:
+                self._validate_join(plan)
+            return
+        if isinstance(plan, UnionPlan):
             for input_plan in plan.inputs:
-                joins.extend(self._find_join_plans(input_plan))
-        elif isinstance(
-            plan,
-            (
-                FilterPlan,
-                ProjectPlan,
-                SortPlan,
-                LimitPlan,
-                AggregatePlan,
-                LocIndexPlan,
-            ),
-        ):
-            joins.extend(self._find_join_plans(plan.input))
-        return joins
-
-    def _find_loc_plans(self, plan: LogicalPlan) -> list[LocIndexPlan]:
-        locs: list[LocIndexPlan] = []
+                self._validate_execution(input_plan)
+            return
         if isinstance(plan, LocIndexPlan):
-            locs.extend(self._find_loc_plans(plan.input))
-            locs.append(plan)
-        elif isinstance(plan, JoinPlan):
-            locs.extend(self._find_loc_plans(plan.left))
-            locs.extend(self._find_loc_plans(plan.right))
-        elif isinstance(plan, UnionPlan):
-            for input_plan in plan.inputs:
-                locs.extend(self._find_loc_plans(input_plan))
-        elif isinstance(
+            self._validate_execution(plan.input)
+            self._validate_loc_plan(plan)
+            return
+        if isinstance(
             plan, (FilterPlan, ProjectPlan, SortPlan, LimitPlan, AggregatePlan)
         ):
-            locs.extend(self._find_loc_plans(plan.input))
-        return locs
+            self._validate_execution(plan.input)
 
     def _validate_loc_plan(self, plan: LocIndexPlan) -> None:
         compiled_input = self._compiler.compile(plan.input)
         index_ids = plan.input.metadata.index.columns
-        index_cols = [compiled_input.bindings[cid] for cid in index_ids]
+        index_labels = [compiled_input.bindings[column_id] for column_id in index_ids]
 
         keys_df = cast(
             "pd.DataFrame", self._session._get_registered_source(plan.source_key)
         )
-        keys_col_map = {col: f"_loc_k_{i}" for i, col in enumerate(index_cols)}
-        keys_df_renamed = keys_df.rename(columns=keys_col_map)
-        keys_rel = self._session._connection.from_df(keys_df_renamed).set_alias(
+        keys_relation = self._session._connection.from_df(keys_df).set_alias(
             "__duckpd_loc_keys__"
         )
 
-        input_alias = "__duckpd_loc_inp__"
+        input_alias = "__duckpd_loc_input__"
+        matched_label = f"__duckpd_loc_matched_{plan.source_key}__"
         flagged_input = compiled_input.relation.project(
-            "*, 1 AS __duckpd_matched__"
+            f"*, 1 AS {quote_identifier(matched_label)}"
         ).set_alias(input_alias)
 
-        cond_parts = [
-            f"__duckpd_loc_keys__._loc_k_{i} IS NOT DISTINCT FROM "
-            f"{input_alias}.{quote_identifier(col)}"
-            for i, col in enumerate(index_cols)
+        conditions = [
+            f"__duckpd_loc_keys__.{quote_identifier(key_label)} "
+            f"IS NOT DISTINCT FROM {input_alias}.{quote_identifier(index_label)}"
+            for key_label, index_label in zip(
+                plan.key_labels, index_labels, strict=True
+            )
         ]
-        joined = keys_rel.join(flagged_input, " AND ".join(cond_parts), how="left")
+        joined = keys_relation.join(flagged_input, " AND ".join(conditions), how="left")
         self._session._begin_execution()
 
-        key_proj = ", ".join(f"_loc_k_{i}" for i in range(len(index_ids)))
+        key_projection = ", ".join(quote_identifier(label) for label in plan.key_labels)
         missing_rows = (
-            joined.filter("__duckpd_matched__ IS NULL")
-            .project(key_proj)
+            joined.filter(f"{quote_identifier(matched_label)} IS NULL")
+            .project(key_projection)
             .limit(1)
             .fetchall()
         )
         if missing_rows:
             row = missing_rows[0]
-            missing_val = row[0] if len(row) == 1 else row
-            raise KeyError(f"[{missing_val!r}] not in index")
+            missing_value = row[0] if len(row) == 1 else row
+            raise KeyError(f"[{missing_value!r}] not in index")
 
     def _validate_join(self, join: JoinPlan) -> None:
         check_left = join.validate in {"1:1", "1:m", "one_to_one", "one_to_many"}

@@ -36,8 +36,8 @@ The benchmark runs an analytical workflow typical in quantitative finance and da
 | **DuckDB Version** | 1.5.5 |
 | **pandas Version** | 3.0.5 |
 | **PyArrow Version** | 25.0.1 |
-| **DuckPD Version** | 0.0.7 |
-| **Repository State** | Commit `765a029` with composition ordering, merge validation, and honest loc indexing |
+| **Package Version Reported** | 0.0.7 |
+| **Repository State** | Commit `d67dca2` (development state; later documentation-only changes excluded) |
 | **DuckPD Threads** | 4 |
 | **Measurement Method** | Three isolated worker subprocesses per engine (`spawn`), alternating engine order; median and observed range from `time.perf_counter()`; peak traced Python heap from `tracemalloc` |
 
@@ -45,7 +45,7 @@ The benchmark runs an analytical workflow typical in quantitative finance and da
 
 ## Benchmark Results
 
-### Current results: 2026-09-03
+### Current results: 2026-09-04
 
 | Dataset | Parquet Size | Rows | DuckPD Median (Range) | pandas Median (Range) | Median Speedup | DuckPD Traced Heap | pandas Traced Heap | Verification |
 |---|---|---|---|---|---|---|---|---|
@@ -60,9 +60,10 @@ Peak RSS, spill bytes, and bytes read remain future benchmark metrics.
 
 ### Historical comparison & trends
 
-Comparing previous benchmark runs against the current 0.0.7 release state:
+Comparing the previous measured development baseline against the current
+development state reporting package version 0.0.7:
 
-| Dataset | 0.0.5 Baseline | Current 0.0.7 | DuckPD Delta | pandas Median | Current Speedup |
+| Dataset | Previous Baseline | Current Development State | DuckPD Delta | pandas Median | Current Speedup |
 |---|---:|---:|---:|---:|---:|
 | Smoke | 0.0334 s | 0.0365 s | +0.0031 s | 0.0589 s | **1.61x** |
 | 100 MB | 0.0787 s | 0.0993 s | +0.0206 s | 0.2096 s | **2.11x** |
@@ -76,7 +77,7 @@ Execution times scale sub-linearly relative to input size: scanning and aggregat
 DuckPD's peak traced Python heap remains flat at **~358 KB** across all dataset sizes, from 4.99 MB up to 4.99 GB (over **13,600x** lower than pandas on the 5 GB dataset).
 
 - **Why Python heap stays flat**: DuckPD compiles lazy relational pipelines directly to DuckDB. Intermediate allocations—scanning columns, computing bar return/range expressions, grouping, and reducing—occur within DuckDB's C++ engine. Python materialization is deferred until the 1-row summary DataFrame is collected.
-- **Traced heap vs process RSS**: `tracemalloc` observes only Python object allocations and does not reflect DuckDB native memory or OS-level page cache. For out-of-core operations larger than available RAM, DuckPD supports configured `temp_directory` spilling (verified in `tests/test_execution_limits.py`).
+- **Traced heap vs process RSS**: `tracemalloc` observes only Python object allocations and does not reflect DuckDB native memory or OS-level page cache. `tests/test_execution_limits.py` exercises strict DuckDB memory settings, but does not measure RSS, spill files, or spill bytes.
 
 ### Dataset provenance
 

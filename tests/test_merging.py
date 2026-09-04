@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import pandas as pd
 import pytest
@@ -455,3 +455,23 @@ def test_merge_validate_on_all_execution_boundaries(tmp_path: Path) -> None:
     # reductions fail
     with pytest.raises(MergeError):
         merged["key"].count()
+
+
+def test_nested_validation_reports_upstream_loc_error_first() -> None:
+    session = duckpd.connect()
+    left = session.from_pandas(
+        pd.DataFrame({"id": [1, 2], "value": [10, 20]}), index="id"
+    )
+    right = session.from_pandas(
+        pd.DataFrame({"id": [1, 2], "other": [100, 200]}), index="id"
+    )
+    missing = cast("duckpd.DataFrame", left.loc[[99, 99]])
+    merged = missing.merge(
+        right,
+        left_index=True,
+        right_index=True,
+        validate="1:1",
+    )
+
+    with pytest.raises(KeyError, match="not in index"):
+        merged.collect()

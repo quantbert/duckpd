@@ -816,46 +816,53 @@ class DuckDBCompiler:
     def _compile_loc_index(self, plan: LocIndexPlan) -> CompiledFrame:
         compiled_input = self.compile(plan.input)
         index_ids = plan.input.metadata.index.columns
-        index_cols = [compiled_input.bindings[cid] for cid in index_ids]
+        index_cols = [compiled_input.bindings[column_id] for column_id in index_ids]
 
         keys_df = cast(
             "pd.DataFrame", self._session._get_registered_source(plan.source_key)
         )
-        keys_col_map = {col: f"_loc_k_{i}" for i, col in enumerate(index_cols)}
-        keys_df_renamed = keys_df.rename(columns=keys_col_map)
-        keys_rel = self._session._connection.from_df(keys_df_renamed).set_alias(
+        keys_rel = self._session._connection.from_df(keys_df).set_alias(
             "__duckpd_loc_keys__"
         )
 
-        input_alias = "__duckpd_loc_inp__"
+        input_alias = "__duckpd_loc_input__"
+        matched_label = f"__duckpd_loc_matched_{plan.source_key}__"
         flagged_input = compiled_input.relation.project(
-            "*, 1 AS __duckpd_matched__"
+            f"*, 1 AS {quote_identifier(matched_label)}"
         ).set_alias(input_alias)
 
-        cond_parts = [
-            f"__duckpd_loc_keys__._loc_k_{i} IS NOT DISTINCT FROM "
-            f"{input_alias}.{quote_identifier(col)}"
-            for i, col in enumerate(index_cols)
+        conditions = [
+            f"__duckpd_loc_keys__.{quote_identifier(key_label)} "
+            f"IS NOT DISTINCT FROM {input_alias}.{quote_identifier(index_col)}"
+            for key_label, index_col in zip(plan.key_labels, index_cols, strict=True)
         ]
-        joined = keys_rel.join(flagged_input, " AND ".join(cond_parts), how="left")
+        joined = keys_rel.join(flagged_input, " AND ".join(conditions), how="left")
 
-        final_proj: list[duckdb.Expression] = []
+        final_projection: list[duckdb.Expression] = []
         final_bindings: dict[ColumnId, str] = {}
-        for col in plan.input.columns:
-            bound_label = compiled_input.bindings[col.id]
-            final_proj.append(
-                duckdb.SQLExpression(quote_identifier(bound_label)).alias(col.label)
+        for column in plan.input.columns:
+            bound_label = compiled_input.bindings[column.id]
+            final_projection.append(
+                duckdb.SQLExpression(quote_identifier(bound_label)).alias(column.label)
             )
-            final_bindings[col.id] = col.label
+            final_bindings[column.id] = column.label
 
-        order_col = next(
-            c for c in plan.metadata.columns if c.id == plan.order_column_id
+        order_column = next(
+            column
+            for column in plan.metadata.columns
+            if column.id == plan.order_column_id
         )
-        final_proj.append(duckdb.SQLExpression("_loc_order_").alias(order_col.label))
-        final_bindings[plan.order_column_id] = order_col.label
+        final_projection.append(
+            duckdb.SQLExpression(quote_identifier(plan.source_order_label)).alias(
+                order_column.label
+            )
+        )
+        final_bindings[plan.order_column_id] = order_column.label
 
         sort_keys: list[duckdb.Expression] = [
-            duckdb.SQLExpression(quote_identifier(order_col.label)).asc().nulls_last()
+            duckdb.SQLExpression(quote_identifier(order_column.label))
+            .asc()
+            .nulls_last()
         ]
         for key in plan.input.metadata.ordering.keys:
             if key.column_id in final_bindings:
@@ -869,5 +876,5 @@ class DuckDBCompiler:
                         final_bindings,
                     )
                 )
-        result_rel = joined.project(*final_proj).sort(*sort_keys)
-        return CompiledFrame(result_rel, final_bindings)
+        result = joined.project(*final_projection).sort(*sort_keys)
+        return CompiledFrame(result, final_bindings)

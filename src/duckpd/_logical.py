@@ -500,10 +500,11 @@ class LocIndexPlan(LogicalPlanBase):
     """Reindex an input plan by an explicit sequence of index keys."""
 
     input: LogicalPlan
-    keys: tuple[object, ...]
     metadata: FrameMetadata
     order_column_id: ColumnId
     source_key: str
+    key_labels: tuple[str, ...]
+    source_order_label: str
 
 
 LogicalPlan: TypeAlias = (

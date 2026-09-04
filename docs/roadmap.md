@@ -340,7 +340,7 @@ Exit gate:
 
 - [x] Metadata unit tests cover every plan node and cannot leave dangling
       index/order column IDs.
-- [x] Differential tests match pandas for supported dtype/null/index cases.
+- [ ] Differential tests match pandas for supported dtype/null/index cases.
 
 ### Phase 3: core single-frame pandas API
 
@@ -509,8 +509,9 @@ Goal: make execution boundaries safe and explainable.
 
 Exit gate:
 
-- [x] A generated data test larger than the configured memory budget completes
-      with a configured spill directory and bounded process memory.
+- [ ] A generated data test larger than the configured memory budget completes
+      with a configured spill directory and measured bounded process memory.
+      The current constrained-memory smoke test does not measure RSS or spill bytes.
 - [x] A test forbids pandas conversion methods during every direct sink.
 
 ### Phase 9: lazy mutation and safe local commit

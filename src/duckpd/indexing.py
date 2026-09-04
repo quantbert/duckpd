@@ -107,8 +107,14 @@ class LocIndexer:
         from duckpd.frame import DataFrame as DataFrameClass
 
         index_ids = self._frame._plan.metadata.index.columns
+        source_key = uuid4().hex
+        key_labels = tuple(
+            f"__duckpd_loc_key_{source_key}_{position}__"
+            for position in range(len(index_ids))
+        )
+        source_order_label = f"__duckpd_loc_request_order_{source_key}__"
         order_col_id = ColumnId.create()
-        order_label = f"__duckpd_loc_order_{order_col_id.value.hex[:8]}__"
+        order_label = f"__duckpd_loc_order_{order_col_id.value.hex}__"
         order_col = Column(
             order_col_id,
             order_label,
@@ -117,36 +123,51 @@ class LocIndexer:
             row_identity=True,
         )
 
-        index_cols = [self._frame._column_by_id(cid).label for cid in index_ids]
-        if len(index_ids) == 1:
-            records: list[dict[str, object]] = [
-                {index_cols[0]: k, "_loc_order_": i} for i, k in enumerate(keys)
-            ]
-        else:
-            records: list[dict[str, object]] = []
-            for i, k in enumerate(keys):
-                tup = cast("tuple[object, ...]", k) if isinstance(k, tuple) else (k,)
-                if len(tup) != len(index_ids):
-                    raise KeyError("Index key has the wrong number of levels")
-                rec = {col: val for col, val in zip(index_cols, tup, strict=True)}
-                rec["_loc_order_"] = i
-                records.append(rec)
+        records: list[dict[str, object]] = []
+        for position, key in enumerate(keys):
+            values: tuple[object, ...]
+            if isinstance(key, tuple) and len(index_ids) > 1:
+                values = cast("tuple[object, ...]", key)
+            else:
+                values = (cast("object", key),)
+            if len(values) != len(index_ids):
+                raise KeyError("Index key has the wrong number of levels")
+            record = {
+                label: value for label, value in zip(key_labels, values, strict=True)
+            }
+            record[source_order_label] = position
+            records.append(record)
 
         keys_df = pd.DataFrame(records)
-        source_key = uuid4().hex
         self._frame._session._registered_sources[source_key] = keys_df
 
         columns = (*self._frame._plan.metadata.columns, order_col)
-        ordering = OrderSpec(
-            (OrderColumn(order_col_id, SortDirection.ASCENDING, NullPlacement.LAST),)
+        input_ordering = self._frame._plan.metadata.ordering
+        ordering = (
+            OrderSpec(
+                (
+                    OrderColumn(
+                        order_col_id,
+                        SortDirection.ASCENDING,
+                        NullPlacement.LAST,
+                    ),
+                )
+            )
+            if input_ordering.keys
+            else OrderSpec()
         )
-        metadata = FrameMetadata(columns, self._frame._plan.metadata.index, ordering)
+        metadata = FrameMetadata(
+            columns,
+            self._frame._plan.metadata.index,
+            ordering,
+        )
         plan = LocIndexPlan(
             input=self._frame._plan,
-            keys=tuple(keys),
             metadata=metadata,
             order_column_id=order_col_id,
             source_key=source_key,
+            key_labels=key_labels,
+            source_order_label=source_order_label,
         )
         return DataFrameClass(self._frame._session, plan)
 

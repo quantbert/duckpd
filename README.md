@@ -55,8 +55,8 @@ The long-term ambition is broad pandas API coverage **where those APIs can be im
   `outer`, and `cross` with suffix collision handling and cardinality validation
   (`validate="1:1"`, `"1:m"`, `"m:1"`, `"m:m"`).
 - Multi-DataFrame row-wise concatenation (`duckpd.concat`) with schema reconciliation,
-  null-padding, lossless numeric coercion, exact nullable integer preservation,
-  and stable sequence order synthesis.
+  null-padding, pandas-compatible integer/float promotion, exact nullable integer
+  preservation, decimal-only coercion, and stable sequence order synthesis.
 - Vectorized `.str` (e.g. `upper`, `lower`, `strip`, `len`, `contains`, `replace`)
   and `.dt` (e.g. `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime`,
   `to_period`) accessor pipelines.
@@ -67,7 +67,7 @@ The long-term ambition is broad pandas API coverage **where those APIs can be im
   boolean data, including `skipna`, `min_count`, and DataFrame `numeric_only` support.
 - Explicit lazy indexes with `set_index()`/`reset_index()` and source
   `index=`/`order_by=` declarations, MultiIndex exact/prefix matching, and
-  honest ordered label-list `.loc[[...]]` selection.
+  ordered label-list `.loc[[...]]` selection when source order is guaranteed.
 - Positional row slicing via `df.iloc[start:stop]`.
 - Stable snapshot order for pandas and Arrow inputs, synthesized order for
   ordered concatenation, and metadata-preserving `persist()`.
@@ -75,7 +75,7 @@ The long-term ambition is broad pandas API coverage **where those APIs can be im
   module-level helpers to participate in the same lazy plan.
 - Explicit execution boundaries: pandas collection (`collect`, `to_pandas`),
   bounded `head`, Arrow tables and streaming record batches (`to_arrow_batches`),
-  plan inspection (`explain`, `explain_write`), and direct zero-copy Parquet
+  plan inspection (`explain`, `explain_write`), and direct DuckDB Parquet
   (`write_parquet`) and CSV (`write_csv`, `to_csv`) writes.
 ## Supported pandas API Coverage
 
@@ -83,15 +83,15 @@ DuckPD maps pandas semantics directly to DuckDB's vectorized analytical engine:
 
 | API Category | Supported Methods & Operations | Execution Model |
 | :--- | :--- | :--- |
-| **I/O & Data Loading** | `read_parquet()`, `read_csv()`, `read_sql()`, `from_pandas()`, `from_arrow()`, `sql()`, `connect()` | **Lazy** (scans metadata / registers source) |
+| **I/O & Data Loading** | `read_parquet()`, `read_csv()`, `from_pandas()`, `from_arrow()`, `Session.sql()`, `connect()` | **Lazy** (scans metadata / registers source) |
 | **Transformations & Projections** | `df[cols]`, `df[bool_filter]`, `assign()`, `sort_values()`, `limit()`, `drop_duplicates()`, `set_index()`, `reset_index()`, `df.loc[]`, `df.iloc[]` | **Lazy** (appends to logical query graph) |
 | **Joins & Merges** | `merge()`, `join()` (`inner`, `left`, `right`, `outer`, `cross`, custom suffixes, `validate=`) | **Lazy** (relational hash join, pre-flight cardinality check) |
-| **Concatenation** | `duckpd.concat()` (multi-frame row union, schema alignment, null padding, lossless numeric coercion, stable order synthesis) | **Lazy** (union with projection padding) |
+| **Concatenation** | `duckpd.concat()` (multi-frame row union, schema alignment, null padding, defined numeric coercion, stable order synthesis) | **Lazy** (union with projection padding) |
 | **String Accessor (`.str`)** | `upper()`, `lower()`, `strip()`, `len()`, `startswith()`, `endswith()`, `contains()`, `replace()` | **Lazy** (DuckDB SQL functions) |
 | **Datetime Accessor (`.dt`)** | `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime()`, `to_period()` | **Lazy** (DuckDB timestamp extractors) |
 | **GroupBy Aggregations** | `groupby().agg()`, `.sum()`, `.mean()`, `.min()`, `.max()`, `.std()`, `.var()`, `.count()` (`as_index=True/False`) | **Lazy** for `.agg()`, **Eager** for reductions |
 | **Statistical Reductions** | `sum()`, `mean()`, `min()`, `max()`, `count()`, `size`, `std()`, `var()`, `median()`, `quantile()`, `any()`, `all()`, `nunique()` | **Eager** (single aggregate SQL pushdown) |
-| **Collection, Output & State** | `collect()`, `to_pandas()`, `head(n)`, `explain()`, `explain_write()`, `write_parquet()`, `write_csv()`, `to_csv()`, `to_arrow_table()`, `to_arrow_batches()`, `persist()` | **Explicit Execution Boundary** |
+| **Collection, Output & State** | `collect()`, `to_pandas()`, `head(n)`, `explain()`, `explain_write()`, `write_parquet()`, `write_csv()`, `to_csv()`, `to_arrow()`, `to_arrow_batches()`, `persist()` | **Explicit Execution Boundary** |
 
 ## Example
 
@@ -138,10 +138,10 @@ positional work must sort by enough columns to break ties.
 Label selections remain lazy and therefore return DuckPD `DataFrame` or
 `Series` handles. Exact pandas return-type switching for `df.loc[label]`
 depends on runtime index uniqueness and is intentionally deferred to a bounded
-eager scalar/row API. MultiIndex exact and prefix keys and honest ordered
-label-list selections are supported (preserving duplicates and requested order,
-raising KeyError on missing labels); cross-frame assignment alignment remains
-unsupported.
+eager scalar/row API. MultiIndex exact and prefix keys and label-list selections
+are supported. Label lists preserve requested key order and duplicates; duplicate
+matches require guaranteed source ordering before positional or window operations.
+Cross-frame assignment alignment remains unsupported.
 
 Module-level readers reuse a context-local implicit session, so independently
 created helper frames can be combined. Explicit `Session` context managers are

@@ -11,7 +11,7 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
   strategy, and release criteria.
 - [API Compatibility Matrix](COMPATIBILITY.md) — supported methods, parameters,
   and behavioral guarantees versus pandas 3.0.
-- [Changelog](CHANGELOG.md) — notable changes by release.
+- [Changelog](CHANGELOG.md) — unreleased changes and reconstructed, untagged development milestones.
 - [Release policy](RELEASES.md) — pre-`1.0` versioning, deprecation, and
   publishing rules.
 - [Benchmark results](BENCHMARK.md) — reproducible DuckPD and pandas performance

@@ -2,30 +2,36 @@
 
 All notable changes to DuckPD will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-and [PEP 440](https://peps.python.org/pep-0440/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
+the [release policy](RELEASES.md).
 
 ## Unreleased
 
 ### Added
 
 - Cardinality validation (`validate="1:1"`, `"1:m"`, `"m:1"`, `"m:m"`, and verbose aliases) for `DataFrame.merge` and `DataFrame.join`, executed as bounded pre-flight relational checks raising `MergeError` before result production.
-- Honest relational label-list selection for `df.loc[[...]]`: preserves exact requested key order, retains duplicate requested keys, raises `KeyError` on missing labels (at execution boundaries), rejects sets with `TypeError`, and establishes a guaranteed row order for subsequent positional and window operations.
-- Direct-sink invariant tests ensuring `DataFrame.write_csv` and `DataFrame.to_csv` avoid pandas materialization.
-- Streaming verification asserting `DataFrame.to_arrow_batches` streams chunks incrementally without accumulating pandas DataFrames.
-- Memory-constrained out-of-core sorting and aggregation test verifying DuckDB's `temp_directory` spill path under strict buffer limits without process OOM.
-- Hypothesis property-based differential test suite (`tests/test_property_dtypes.py`) verifying round-trip fidelity and reductions across numeric, boolean, string, missing-value, and concat transformations against pandas 3.0.
+- Relational label-list selection for `df.loc[[...]]`: preserves requested keys, duplicate requests, and key-group order; raises `KeyError` on missing labels at execution boundaries; and rejects sets with `TypeError`. It establishes a total order only when the input already has guaranteed order.
+- Direct-sink tests ensure `DataFrame.write_csv` and `DataFrame.to_csv` avoid pandas materialization.
+- Streaming tests ensure `DataFrame.to_arrow_batches` yields bounded record batches without constructing pandas DataFrames.
+- A constrained-memory smoke test exercises sorting, aggregation, and Parquet output under strict DuckDB resource settings; it does not measure RSS or prove that spill occurred.
+- Hypothesis differential tests cover selected nullable-integer and float round trips, reductions, string accessors, missing-value transformations, and concatenation against pandas 3.0.
 
 ### Changed
 
-- `duckpd.concat` now uses lossless numeric dtype reconciliation, preserves nullable integer values through union collection, and rejects incompatible heterogeneous columns before execution instead of coercing them to strings.
+- `duckpd.concat` now uses defined numeric reconciliation, preserves nullable integer values through union collection, rejects decimal/float precision loss, and rejects incompatible heterogeneous columns instead of coercing them to strings.
 - Pandas collection preserves exact decimal, binary, and date values rather than accepting DuckDB's lossy/default pandas conversions.
 - Row-wise concat now preserves input sequence and ordered-input row identity; persistence retains index and order metadata. Joins explicitly clear total ordering guarantees so positional and window operations fail early until an explicit stable sort is applied.
 
-## [0.0.7] - 2026-08-15
+## Untagged development milestones
 
-### Added
+The repository has no `v<version>` tags. The snapshots below were reconstructed
+from package-version commits and are historical development milestones, not
+formal release records. Versions without attributable release notes are omitted.
+
+### Package version 0.0.7 snapshot — 2026-08-15
+
+#### Added
 
 - Window expressions (`WindowExpression`) and compiler translation to DuckDB `OVER (...)` window clauses.
 - Lazy cumulative operations on `DataFrame` and `Series`: `cumsum`, `cummin`, `cummax`, and `cumprod` with `skipna` support and explicit `OrderSpec` validation.
@@ -38,9 +44,9 @@ and [PEP 440](https://peps.python.org/pep-0440/).
 - Write strategy inspection via `DataFrame.explain_write(path)`.
 - Calibrated synthetic OHLC Parquet benchmark generator and demo notebook.
 
-## [0.0.5] - 2026-08-14
+### Package version 0.0.5 snapshot — 2026-08-14
 
-### Added
+#### Added
 
 - Relational DataFrame joins (`DataFrame.merge`) supporting `inner`, `left`, `right`, `outer`, and `cross` joins with column collision suffix management and pandas null-key semantics (`IS NOT DISTINCT FROM`).
 - Index-based join convenience method (`DataFrame.join`).
@@ -51,9 +57,9 @@ and [PEP 440](https://peps.python.org/pep-0440/).
 - Vectorized string accessors (`Series.str`) and datetime accessors (`Series.dt`).
 - Missing-value transformations: `fillna`, `dropna`, `where`, `mask`, `isna`, and `notna`.
 
-## [0.0.1] - 2026-08-14
+### Package version 0.0.1 snapshot — 2026-08-14
 
-### Added
+#### Added
 
 - Initial walking vertical slice: `Session`, `DataFrame`, and `Series` wrappers.
 - Lazy data sources: Parquet, CSV, pandas, Arrow, DuckDB table, and read-only SQL scans.

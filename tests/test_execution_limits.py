@@ -52,8 +52,8 @@ def test_resource_limits_and_spill_directory_execution() -> None:
             assert session.execution_count == 2
 
 
-def test_constrained_memory_spill_stress_without_oom() -> None:
-    """A generated data workload exceeding memory_limit completes with spill."""
+def test_constrained_memory_execution_completes() -> None:
+    """A generated workload completes with strict DuckDB resource settings."""
     with tempfile.TemporaryDirectory() as tmpdir:
         spill_dir = Path(tmpdir) / "spill_strict"
         spill_dir.mkdir(parents=True, exist_ok=True)
