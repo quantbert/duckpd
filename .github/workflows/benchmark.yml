@@ -1,0 +1,46 @@
+name: Benchmark
+
+# Automatic execution is disabled. Trigger manually via GitHub Actions UI or gh CLI.
+on:
+  workflow_dispatch:
+    inputs:
+      sizes:
+        description: "File sizes to benchmark (e.g., '5mb 50mb', '500m', '5g', or 'all')"
+        required: false
+        default: "5mb 50mb 500m"
+      repetitions:
+        description: "Repetitions per engine"
+        required: false
+        default: "3"
+      threads:
+        description: "DuckPD thread count"
+        required: false
+        default: "4"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run Benchmarks
+        run: |
+          uv run python -m benchmark.runner \
+            --sizes ${{ inputs.sizes }} \
+            --repetitions ${{ inputs.repetitions }} \
+            --threads ${{ inputs.threads }} \
+            --report benchmark/REPORT.md
+
+      - name: Upload Benchmark Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: benchmark/REPORT.md

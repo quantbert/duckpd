@@ -1,8 +1,9 @@
 name: CI
 
+# Automatic CI runs on push/pull_request are temporarily disabled.
+# Trigger manually via the GitHub Actions UI or gh CLI.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:

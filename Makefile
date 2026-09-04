@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test lint format format-check typecheck check build demos-smoke release-check clean publish
+.PHONY: help install test lint format format-check typecheck check build demos-smoke benchmark benchmark-all release-check clean publish
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -34,6 +34,17 @@ demos-smoke: ## Run the inexpensive executable demos
 	uv run python demo/parquet_pipeline.py
 	uv run python demo/reduction_pipeline.py
 	uv run python demo/generate_market_data.py smoke
+
+SIZES ?= 5mb 50mb 500m
+REPETITIONS ?= 3
+THREADS ?= 4
+REPORT ?= benchmark/REPORT.md
+
+benchmark: ## Run benchmarks across file sizes and generate Markdown report
+	uv run python -m benchmark --sizes $(SIZES) --repetitions $(REPETITIONS) --threads $(THREADS) --report $(REPORT)
+
+benchmark-all: ## Run benchmarks across all preset sizes including 5GB and 50GB
+	uv run python -m benchmark --sizes 5mb 50mb 500m 5g 50g --repetitions $(REPETITIONS) --threads $(THREADS) --report $(REPORT)
 
 release-check: check build ## Validate source and build release artifacts
 

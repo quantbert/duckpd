@@ -54,7 +54,7 @@ dev = [
 packages = ["src/duckpd"]
 
 [tool.pyright]
-include = ["demo", "src", "tests"]
+include = ["benchmark", "demo", "src", "tests"]
 pythonVersion = "3.11"
 reportPrivateUsage = false
 typeCheckingMode = "strict"
