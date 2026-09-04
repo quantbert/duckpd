@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Concatenate, Literal, ParamSpec, TypeVar, cast
 from uuid import uuid4
 
 import duckdb
@@ -40,6 +42,7 @@ from duckpd._logical import (
     SourceKind,
     TopKPlan,
     UnionPlan,
+    sanitize_source_location,
 )
 from duckpd._optimizer import plan_to_dict
 from duckpd._quoting import quote_identifier
@@ -101,8 +104,21 @@ class CommitReport:
     staging_path: str
     backup_path: str | None
     rows_written: int
+    files_written: int
+    columns_written: int
+    row_groups_written: int
     bytes_written: int
     duration_seconds: float
+
+
+@dataclass(frozen=True)
+class MaterializationReport:
+    """Measured contract for one explicit Python materialization."""
+
+    reason: str
+    estimated_bytes: int | None
+    actual_bytes: int
+    limit_bytes: int | None
 
 
 @dataclass(frozen=True)
@@ -121,6 +137,8 @@ class ProfileResult:
     planning_seconds: float = 0.0
     execution_seconds: float = 0.0
     optimization: dict[str, Any] | None = None
+    fallback_boundaries: tuple[dict[str, object], ...] = ()
+    materialization_boundaries: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return DuckDB metrics plus DuckPD planning and optimizer details."""
@@ -130,6 +148,9 @@ class ProfileResult:
                 "planning_seconds": self.planning_seconds,
                 "execution_seconds": self.execution_seconds,
                 "optimization": self.optimization,
+                "fallback_policy": "error",
+                "fallback_boundaries": list(self.fallback_boundaries),
+                "materialization_boundaries": list(self.materialization_boundaries),
             },
         }
 
@@ -193,6 +214,189 @@ def _is_null_safe_pandas_dtype(dtype: str) -> bool:
     )
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _execution_context(
+    operation: str,
+) -> Callable[
+    [Callable[Concatenate[Executor, LogicalPlan, _P], _R]],
+    Callable[Concatenate[Executor, LogicalPlan, _P], _R],
+]:
+    """Attach credential-safe DuckPD context to DuckDB execution failures."""
+
+    def decorate(
+        function: Callable[Concatenate[Executor, LogicalPlan, _P], _R],
+    ) -> Callable[Concatenate[Executor, LogicalPlan, _P], _R]:
+        @wraps(function)
+        def wrapped(
+            self: Executor,
+            plan: LogicalPlan,
+            *args: _P.args,
+            **kwargs: _P.kwargs,
+        ) -> _R:
+            try:
+                return function(self, plan, *args, **kwargs)
+            except duckdb.Error:
+                provenance = plan.metadata.provenance
+                locations = tuple(
+                    sanitize_source_location(location)
+                    for location in provenance.locations
+                )
+                context = (
+                    f"plan={type(plan).__name__}, "
+                    f"source_kind={provenance.kind.value}, "
+                    f"locations={locations}"
+                )
+                raise MaterializationError(
+                    f"DuckPD operation {operation!r} failed ({context})"
+                ) from None
+
+        return wrapped
+
+    return decorate
+
+
+def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
+    """Yield a plan tree without compiling or executing it."""
+    yield plan
+    if isinstance(plan, JoinPlan):
+        yield from _plan_nodes(plan.left)
+        yield from _plan_nodes(plan.right)
+    elif isinstance(plan, UnionPlan):
+        for input_plan in plan.inputs:
+            yield from _plan_nodes(input_plan)
+    elif isinstance(
+        plan,
+        (
+            FilterPlan,
+            ProjectPlan,
+            SortPlan,
+            LimitPlan,
+            TopKPlan,
+            AggregatePlan,
+            SamplePlan,
+            LocIndexPlan,
+        ),
+    ):
+        yield from _plan_nodes(plan.input)
+
+
+def _redact_plan_text(text: str, plan: LogicalPlan) -> str:
+    """Remove credentials and query parameters from engine plan text."""
+    for location in plan.metadata.provenance.locations:
+        text = text.replace(location, sanitize_source_location(location))
+    return text
+
+
+def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
+    """Prove a conservative pandas-memory bound for a narrow plan subset."""
+    if _fallback_boundaries(plan):
+        return None
+
+    fixed_width_types = {
+        "BOOLEAN",
+        "TINYINT",
+        "UTINYINT",
+        "SMALLINT",
+        "USMALLINT",
+        "INTEGER",
+        "UINTEGER",
+        "BIGINT",
+        "UBIGINT",
+        "HUGEINT",
+        "UHUGEINT",
+        "FLOAT",
+        "REAL",
+        "DOUBLE",
+        "TIMESTAMP",
+        "TIMESTAMP_S",
+        "TIMESTAMP_MS",
+        "TIMESTAMP_NS",
+        "TIMESTAMP WITH TIME ZONE",
+        "INTERVAL",
+    }
+    index_ids = set(plan.metadata.index.columns)
+    materialized_columns = tuple(
+        column
+        for column in plan.metadata.columns
+        if not column.hidden or column.id in index_ids
+    )
+    if any(
+        column.duckdb_type.upper() not in fixed_width_types
+        for column in materialized_columns
+    ):
+        return None
+
+    def row_upper_bound(node: LogicalPlan) -> int | None:
+        if isinstance(node, ScanPlan):
+            if not isinstance(node.source, ParquetSource):
+                return None
+            total_rows = 0
+            for location in node.source.paths:
+                if "://" in location or any(char in location for char in "*?[]"):
+                    return None
+                path = Path(location)
+                if not path.is_file():
+                    return None
+                total_rows += pq.ParquetFile(path).metadata.num_rows
+            return total_rows
+        if isinstance(node, (FilterPlan, ProjectPlan, SortPlan)):
+            return row_upper_bound(node.input)
+        if isinstance(node, (LimitPlan, TopKPlan)):
+            input_rows = row_upper_bound(node.input)
+            return None if input_rows is None else min(input_rows, node.count)
+        if isinstance(node, AggregatePlan):
+            input_rows = row_upper_bound(node.input)
+            if input_rows is None:
+                return None
+            return input_rows if node.keys else 1
+        if isinstance(node, SamplePlan):
+            input_rows = row_upper_bound(node.input)
+            if input_rows is None:
+                return None
+            if node.n is not None:
+                return min(input_rows, node.n)
+            if node.frac is not None:
+                return min(input_rows, math.ceil(input_rows * node.frac))
+        return None
+
+    rows = row_upper_bound(plan)
+    if rows is None:
+        return None
+    label_bytes = sum(
+        len(str(column.label).encode()) for column in materialized_columns
+    )
+    per_row = 64 * (len(materialized_columns) + max(len(index_ids), 1))
+    return 65_536 + label_bytes * 4 + rows * per_row
+
+
+def _fallback_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
+    """Describe explicit Python execution encoded in a logical plan."""
+    found: dict[str, dict[str, object]] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            mapping = cast("dict[str, object]", value)
+            if mapping.get("is_arrow_udf") is True:
+                name = str(mapping["name"])
+                found[name] = {
+                    "kind": "arrow_udf",
+                    "name": name,
+                    "batch_independent": True,
+                    "estimated_transfer_bytes": None,
+                }
+            for child in mapping.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in cast("list[object]", value):
+                visit(child)
+
+    visit(plan_to_dict(plan))
+    return tuple(found.values())
+
+
 class Executor:
     """Execute compiled plans and track observable execution boundaries."""
 
@@ -200,6 +404,7 @@ class Executor:
         self._session = session
         self._compiler = compiler
 
+    @_execution_context("collect")
     def collect(self, plan: LogicalPlan) -> pd.DataFrame:
         self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
@@ -298,6 +503,43 @@ class Executor:
         ]
         if hidden_labels:
             result = result.drop(columns=hidden_labels)
+        self._session._last_materialization_report = MaterializationReport(
+            reason="explicit collect",
+            estimated_bytes=_materialization_upper_bound(plan),
+            actual_bytes=int(result.memory_usage(index=True, deep=True).sum()),
+            limit_bytes=None,
+        )
+        return result
+
+    def collect_small(self, plan: LogicalPlan, *, max_bytes: int) -> pd.DataFrame:
+        """Collect only when plan shape and fixed-width types prove a byte bound."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        estimate = _materialization_upper_bound(plan)
+        if estimate is None:
+            raise UnsupportedOperationError(
+                "collect_small() requires a non-expanding local Parquet plan "
+                "with fixed-width output types and no Python UDF"
+            )
+        if estimate > max_bytes:
+            raise MaterializationError(
+                f"collect_small() estimated {estimate:,} bytes, exceeding "
+                f"the {max_bytes:,}-byte limit"
+            )
+        result = self.collect(plan)
+        actual = int(result.memory_usage(index=True, deep=True).sum())
+        report = MaterializationReport(
+            reason="explicit collect_small",
+            estimated_bytes=estimate,
+            actual_bytes=actual,
+            limit_bytes=max_bytes,
+        )
+        self._session._last_materialization_report = report
+        if actual > max_bytes:
+            raise MaterializationError(
+                f"collect_small() materialized {actual:,} bytes, exceeding "
+                f"the {max_bytes:,}-byte limit"
+            )
         return result
 
     def _pandas_dtypes(self, plan: LogicalPlan) -> dict[ColumnId, str]:
@@ -337,12 +579,23 @@ class Executor:
             return self._pandas_dtypes(plan.input)
         return self._pandas_dtypes(plan.input)
 
+    @_execution_context("to_arrow")
     def to_arrow(self, plan: LogicalPlan) -> pa.Table:
         self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
-        return self._compiler.project_visible(compiled, plan).relation.to_arrow_table()
+        result = self._compiler.project_visible(
+            compiled, plan
+        ).relation.to_arrow_table()
+        self._session._last_materialization_report = MaterializationReport(
+            reason="explicit to_arrow",
+            estimated_bytes=_materialization_upper_bound(plan),
+            actual_bytes=result.nbytes,
+            limit_bytes=None,
+        )
+        return result
 
+    @_execution_context("to_arrow_batches")
     def to_arrow_batches(
         self, plan: LogicalPlan, *, batch_size: int
     ) -> pa.RecordBatchReader:
@@ -353,6 +606,7 @@ class Executor:
             batch_size
         )
 
+    @_execution_context("write_parquet")
     def write_parquet(
         self,
         plan: LogicalPlan,
@@ -370,6 +624,7 @@ class Executor:
             overwrite=overwrite,
         )
 
+    @_execution_context("write_csv")
     def write_csv(
         self,
         plan: LogicalPlan,
@@ -387,6 +642,7 @@ class Executor:
             header=header,
         )
 
+    @_execution_context("persist")
     def persist(
         self,
         plan: LogicalPlan,
@@ -397,6 +653,7 @@ class Executor:
         self._session._begin_execution()
         compiled.relation.create(name)
 
+    @_execution_context("save_as_table")
     def save_as_table(
         self,
         plan: LogicalPlan,
@@ -499,6 +756,7 @@ class Executor:
             con.execute("ROLLBACK")
             raise
 
+    @_execution_context("commit")
     def commit(
         self,
         plan: LogicalPlan,
@@ -583,17 +841,15 @@ class Executor:
         initial_stat = source_path.stat()
         initial_mtime_ns = initial_stat.st_mtime_ns
         initial_size = initial_stat.st_size
-        source_arrow_schema = pq.ParquetFile(source_path).schema_arrow
+        source_parquet = pq.ParquetFile(source_path)
+        source_arrow_schema = source_parquet.schema_arrow
 
-        # 3. Inspect original source schema, columns, and row count
+        # 3. Inspect schema and row count from Parquet metadata without scanning rows.
         con = self._session._connection
         orig_rel = con.read_parquet(str(source_path))
         orig_columns = list(orig_rel.columns)
         orig_types = [str(t).upper() for t in orig_rel.dtypes]
-        orig_count_row = orig_rel.count("*").fetchone()
-        if orig_count_row is None:
-            raise MaterializationError("Failed to count rows in source Parquet file")
-        orig_count = int(cast("int", orig_count_row[0]))
+        orig_count = source_parquet.metadata.num_rows
 
         # 3. Validate plan columns preserve schema (including hidden index columns)
         col_by_label = {col.label: col for col in plan.metadata.columns}
@@ -648,20 +904,31 @@ class Executor:
         replaced = False
 
         try:
-            # 7. Stream Arrow batches while retaining Parquet/Arrow metadata.
-            arrow_compression = None if compression == "uncompressed" else compression
-            reader = commit_rel.to_arrow_reader()
-            with pq.ParquetWriter(
-                staging_path,
-                source_arrow_schema,
-                compression=cast("Any", arrow_compression),
-            ) as writer:
-                injected_during_write = False
-                for batch in reader:
-                    writer.write_batch(batch.cast(source_arrow_schema))
-                    if _failure_injector is not None and not injected_during_write:
-                        injected_during_write = True
-                        _failure_injector("during_write")
+            # 7. Stream through DuckDB COPY and retain Arrow key/value metadata.
+            metadata = source_arrow_schema.metadata or {}
+            metadata_fields = ", ".join(
+                f"{quote_identifier(key.decode('utf-8'))}: ?" for key in metadata
+            )
+            metadata_option = (
+                f", KV_METADATA {{{metadata_fields}}}" if metadata_fields else ""
+            )
+            copy_sql = (
+                f"COPY ({commit_rel.sql_query()}) TO ? "
+                f"(FORMAT PARQUET, COMPRESSION ?, RETURN_STATS{metadata_option})"
+            )
+            copy_parameters: list[object] = [
+                str(staging_path),
+                compression,
+                *metadata.values(),
+            ]
+            if _failure_injector is not None:
+                _failure_injector("during_write")
+            copy_row = con.execute(copy_sql, copy_parameters).fetchone()
+            if copy_row is None:
+                raise MaterializationError("DuckDB COPY returned no write statistics")
+            copy_rows_written = int(cast("int", copy_row[1]))
+            copy_bytes_written = int(cast("int", copy_row[2]))
+            copy_column_stats = cast("dict[str, object]", copy_row[4])
             if _failure_injector is not None:
                 _failure_injector("after_staging_write")
 
@@ -669,13 +936,9 @@ class Executor:
                 _failure_injector("during_validation")
 
             # 8. Validate output readability, row-preservation, and schema
+            staging_parquet = pq.ParquetFile(staging_path)
             staging_rel = con.read_parquet(str(staging_path))
-            staging_count_row = staging_rel.count("*").fetchone()
-            if staging_count_row is None:
-                raise MaterializationError(
-                    "Failed to count rows in staging Parquet file"
-                )
-            staging_count = int(cast("int", staging_count_row[0]))
+            staging_count = copy_rows_written
             if staging_count != orig_count:
                 msg = (
                     f"commit() requires a row-preserving plan; "
@@ -690,7 +953,7 @@ class Executor:
                     f"does not match original {orig_columns}"
                 )
                 raise ValueError(msg)
-            staging_arrow_schema = pq.ParquetFile(staging_path).schema_arrow
+            staging_arrow_schema = staging_parquet.schema_arrow
             if not staging_arrow_schema.equals(
                 source_arrow_schema, check_metadata=True
             ):
@@ -736,7 +999,7 @@ class Executor:
                 _failure_injector("before_replace")
             _replace_file(source_path, staging_path)
             replaced = True
-            bytes_written = source_path.stat().st_size
+            bytes_written = copy_bytes_written
             t1 = time.perf_counter()
 
             return CommitReport(
@@ -744,6 +1007,9 @@ class Executor:
                 staging_path=str(staging_path),
                 backup_path=backup_path,
                 rows_written=staging_count,
+                files_written=1,
+                columns_written=len(copy_column_stats),
+                row_groups_written=staging_parquet.metadata.num_row_groups,
                 bytes_written=bytes_written,
                 duration_seconds=t1 - t0,
             )
@@ -753,6 +1019,7 @@ class Executor:
             if not replaced and backup_file is not None and backup_file.exists():
                 backup_file.unlink(missing_ok=True)
 
+    @_execution_context("explain")
     def explain(
         self,
         plan: LogicalPlan,
@@ -762,30 +1029,51 @@ class Executor:
         optimization = self._compiler.optimize(plan)
         logical = json.dumps(plan_to_dict(plan), indent=2)
         optimized = json.dumps(plan_to_dict(optimization.plan), indent=2)
+        fallback_boundaries = _fallback_boundaries(plan)
+        fallback_text = (
+            f"explicit typed Arrow UDFs {fallback_boundaries}"
+            if fallback_boundaries
+            else "none"
+        )
+        boundaries = (
+            f"Fallback boundaries: {fallback_text} (policy=error)\n"
+            "Materialization boundaries: none in the logical plan"
+        )
         if mode == "logical":
-            return f"DuckPD logical plan:\n{logical}"
+            return f"{boundaries}\nDuckPD logical plan:\n{logical}"
         if mode == "optimized":
-            return f"DuckPD optimized logical plan:\n{optimized}"
+            return f"{boundaries}\nDuckPD optimized logical plan:\n{optimized}"
         if mode == "json":
-            return json.dumps(optimization.to_dict(), indent=2)
+            payload = optimization.to_dict()
+            payload["execution_boundaries"] = {
+                "fallback_policy": "error",
+                "fallback": list(fallback_boundaries),
+                "materialization": [],
+            }
+            return json.dumps(payload, indent=2)
 
         compiled = self._compiler.compile(optimization.plan, optimize=False)
         relation = compiled.relation
         self._session._begin_execution()
         if mode == "sql":
-            return f"DuckDB SQL:\n{relation.sql_query()}"
+            sql = _redact_plan_text(relation.sql_query(), plan)
+            return f"{boundaries}\nDuckDB SQL:\n{sql}"
         if mode == "physical":
-            return f"DuckDB physical plan:\n{relation.explain()}"
+            physical = _redact_plan_text(relation.explain(), plan)
+            return f"{boundaries}\nDuckDB physical plan:\n{physical}"
         if mode == "all":
             changed = [
                 snapshot.name for snapshot in optimization.snapshots if snapshot.changed
             ]
+            sql = _redact_plan_text(relation.sql_query(), plan)
+            physical = _redact_plan_text(relation.explain(), plan)
             return (
+                f"{boundaries}\n"
                 f"DuckPD logical plan:\n{logical}\n\n"
                 f"DuckPD optimized logical plan:\n{optimized}\n"
                 f"Applied rewrites: {changed}\n\n"
-                f"DuckDB SQL:\n{relation.sql_query()}\n\n"
-                f"DuckDB physical plan:\n{relation.explain()}"
+                f"DuckDB SQL:\n{sql}\n\n"
+                f"DuckDB physical plan:\n{physical}"
             )
         msg = (
             f"Unknown explain mode: {mode!r}; expected 'all', 'logical', "
@@ -793,6 +1081,7 @@ class Executor:
         )
         raise ValueError(msg)
 
+    @_execution_context("explain_write")
     def explain_write(
         self,
         plan: LogicalPlan,
@@ -800,17 +1089,54 @@ class Executor:
         *,
         compression: ParquetCompression = "snappy",
     ) -> str:
-        """Inspect write strategy and execution plan without writing rows."""
+        """Inspect write strategy and estimates without counting or writing rows."""
         compiled = self._compiler.compile(plan)
         visible_rel = self._compiler.project_visible(compiled, plan).relation
         self._session._begin_execution()
+        nodes = tuple(_plan_nodes(plan))
+        blocking_types = (SortPlan, TopKPlan, AggregatePlan, JoinPlan, LocIndexPlan)
+        blocking = tuple(
+            dict.fromkeys(
+                type(node).__name__
+                for node in nodes
+                if isinstance(node, blocking_types)
+            )
+        )
+        locations = plan.metadata.provenance.locations
+        local_paths = tuple(
+            Path(location)
+            for location in locations
+            if "://" not in location and not any(char in location for char in "*?[]")
+        )
+        estimate = (
+            sum(local_path.stat().st_size for local_path in local_paths)
+            if locations
+            and len(local_paths) == len(locations)
+            and all(local_path.is_file() for local_path in local_paths)
+            else None
+        )
+        estimate_text = f"{estimate:,} bytes" if estimate is not None else "unknown"
+        extra_disk = (
+            estimate_text if blocking and estimate is not None else "engine-dependent"
+        )
+        physical = _redact_plan_text(visible_rel.explain(), plan)
+        target = sanitize_source_location(path)
         return (
-            f"Write target: {path}\n"
+            "Fallback boundaries: none (policy=error)\n"
+            "Materialization boundary: explicit Parquet write sink\n"
+            f"Write target: {target}\n"
             f"Compression: {compression}\n"
             f"Output columns: {list(plan.metadata.visible_columns)}\n"
-            f"DuckDB physical plan:\n{visible_rel.explain()}"
+            f"Estimated input bytes: {estimate_text} "
+            "(estimate from local file metadata; no row count executed)\n"
+            f"Blocking operators: {blocking or ('none',)}\n"
+            "Known non-spillable aggregate states: none; "
+            "list/string_agg are rejected before execution\n"
+            f"Expected extra disk use: {extra_disk} (estimate)\n"
+            f"DuckDB physical plan:\n{physical}"
         )
 
+    @_execution_context("profile")
     def profile(self, plan: LogicalPlan) -> ProfileResult:
         """Execute plan and separate planning from engine execution time."""
         self._validate_execution(plan)
@@ -857,6 +1183,7 @@ class Executor:
             planning_seconds=planning_seconds,
             execution_seconds=execution_seconds,
             optimization=optimization.to_dict(),
+            fallback_boundaries=_fallback_boundaries(plan),
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:

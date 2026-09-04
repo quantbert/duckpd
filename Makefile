@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all release-check clean publish
+.PHONY: help install test lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all benchmark-tracks optimizer-gate release-check clean publish
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -32,8 +32,13 @@ build: ## Build the wheel and source distribution
 	rm -rf dist
 	uv build
 
-package-smoke: build ## Inspect and install release artifacts in a clean environment
-	uv run python scripts/package_smoke.py dist
+PYTHONS ?= 3.11 3.12 3.13 3.14
+
+package-smoke: build ## Inspect artifacts and clean-install on supported Python versions
+	uv run python scripts/package_smoke.py dist --artifacts-only
+	@for python in $(PYTHONS); do \
+		uv run python scripts/package_smoke.py dist --python $$python || exit 1; \
+	done
 
 demos-smoke: ## Run the inexpensive executable demos
 	uv run python demo/basic_pipeline.py
@@ -51,6 +56,12 @@ benchmark: ## Run benchmarks across file sizes and generate Markdown report
 
 benchmark-all: ## Run benchmarks across all preset sizes including 5GB and 50GB
 	uv run python -m benchmark --sizes 5mb 50mb 500m 5g 50g --repetitions $(REPETITIONS) --threads $(THREADS) --report $(REPORT)
+
+benchmark-tracks: ## Run validated TPC-H, GroupBy/join, and OHLC tracks
+	uv run python -m benchmark.tracks --rows 100000 --output benchmark/TRACKS.json
+
+optimizer-gate: ## Verify optimizer correctness and regression threshold
+	uv run python scripts/benchmark_optimizer.py --rows 250000 --iterations 7
 
 release-check: check package-smoke ## Validate source and clean-installed artifacts
 

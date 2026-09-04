@@ -4,12 +4,16 @@ import json
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pytest
 
 import duckpd
+from duckpd._logical import SourceKind, SourceProvenance
+from duckpd.errors import MaterializationError
 
 
 def test_resource_limits_and_spill_directory_execution() -> None:
@@ -153,6 +157,8 @@ def test_explain_modes() -> None:
 
     logical = frame.explain(mode="logical")
     assert "DuckPD logical plan:" in logical
+    assert "Fallback boundaries: none (policy=error)" in logical
+    assert "Materialization boundaries: none" in logical
     assert "DuckDB SQL:" not in logical
 
     sql = frame.explain(mode="sql")
@@ -181,6 +187,39 @@ def test_explain_write(tmp_path: Path) -> None:
     assert "Compression: zstd" in info
     assert "Output columns:" in info
     assert "DuckDB physical plan:" in info
+    assert "Estimated input bytes: unknown (estimate" in info
+    assert "no row count executed" in info
+    assert "Known non-spillable aggregate states:" in info
+    assert "Expected extra disk use:" in info
+
+
+def test_execution_error_context_redacts_source_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = duckpd.from_pandas(pd.DataFrame({"x": [1]}))
+    uri = "https://user:password@example.com/data.parquet?token=secret#fragment"
+    metadata = replace(
+        frame._plan.metadata,
+        provenance=SourceProvenance(
+            kind=SourceKind.PARQUET,
+            locations=(uri,),
+        ),
+    )
+    frame._plan = replace(frame._plan, metadata=metadata)
+
+    def fail_compile(*_args: object, **_kwargs: object) -> object:
+        raise duckdb.InvalidInputException("engine leaked password and secret")
+
+    monkeypatch.setattr(frame._session._compiler, "compile", fail_compile)
+    with pytest.raises(MaterializationError) as captured:
+        frame.collect()
+
+    message = str(captured.value)
+    assert "operation 'collect'" in message
+    assert "plan=ScanPlan" in message
+    assert "https://example.com/data.parquet" in message
+    assert "password" not in message
+    assert "secret" not in message
 
 
 def test_dataframe_profile() -> None:

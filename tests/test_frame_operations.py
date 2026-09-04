@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from pandas.testing import assert_frame_equal, assert_series_equal
 
 import duckpd
-from duckpd.errors import AlignmentError, MergeError
+from duckpd.errors import AlignmentError, MergeError, UnsupportedOperationError
 
 InvalidOperation = Callable[[duckpd.DataFrame], object]
 
@@ -375,3 +377,61 @@ def test_invalid_projection_and_assignment_fail_early(source: pd.DataFrame) -> N
         frame.to_arrow_batches(0)
     with pytest.raises(ValueError, match=r"truth value.*ambiguous"):
         bool(frame["value"])
+
+
+def _plus_one_arrow(values: Any) -> Any:
+    return pc.add(values, 1)
+
+
+def _identity_arrow(values: Any) -> Any:
+    return values
+
+
+def test_registered_arrow_udf_is_typed_lazy_and_batch_independent() -> None:
+    with duckpd.connect() as session:
+        spec = session.register_arrow_udf(
+            "plus_one",
+            _plus_one_arrow,
+            ["BIGINT"],
+            "BIGINT",
+            null_handling="special",
+        )
+        frame = session.from_pandas(
+            pd.DataFrame({"value": pd.Series([1, 2, None], dtype="Int64")})
+        )
+        result = frame.assign(mapped=frame["value"].map_arrow("plus_one"))
+
+        assert spec.deterministic is True
+        assert spec.batch_independent is True
+        assert session.execution_count == 0
+        explained = json.loads(result.explain("json"))
+        boundaries = explained["execution_boundaries"]["fallback"]
+        assert boundaries == [
+            {
+                "kind": "arrow_udf",
+                "name": "plus_one",
+                "batch_independent": True,
+                "estimated_transfer_bytes": None,
+            }
+        ]
+        collected = result.collect()["mapped"]
+        assert collected.tolist()[:2] == [2.0, 3.0]
+        assert pd.isna(collected.iloc[2])
+        profiled = result.profile().to_dict()["duckpd"]
+        assert profiled["fallback_boundaries"] == boundaries
+
+
+def test_arrow_udf_contract_rejects_unsafe_fallback_before_execution() -> None:
+    with duckpd.connect() as session:
+        frame = session.from_pandas(pd.DataFrame({"value": [1]}))
+        with pytest.raises(UnsupportedOperationError, match="independent"):
+            session.register_arrow_udf(
+                "stateful",
+                _identity_arrow,
+                ["BIGINT"],
+                "BIGINT",
+                batch_independent=False,
+            )
+        with pytest.raises(KeyError, match="not registered"):
+            frame["value"].map_arrow("missing")
+        assert session.execution_count == 0

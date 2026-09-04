@@ -11,7 +11,11 @@ import pytest
 from pandas.testing import assert_frame_equal
 
 import duckpd
-from duckpd.errors import SessionClosedError, UnsupportedOperationError
+from duckpd.errors import (
+    MaterializationError,
+    SessionClosedError,
+    UnsupportedOperationError,
+)
 
 
 def test_from_pandas_is_lazy_until_collect() -> None:
@@ -240,3 +244,72 @@ def test_session_resource_configuration(tmp_path: Path) -> None:
 
     assert settings.loc[0, "threads"] == 1
     assert settings.loc[0, "temp_directory"] == str(tmp_path / "spill")
+
+
+def test_collect_small_enforces_metadata_limit_and_reports_bytes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bounded.parquet"
+    pd.DataFrame({"value": range(100)}).to_parquet(path)
+
+    with duckpd.connect() as session:
+        frame = session.read_parquet(path)
+        with pytest.raises(MaterializationError, match="estimated"):
+            frame.collect_small(1)
+        assert session.execution_count == 0
+
+        result = frame.collect_small(1_000_000)
+        report = session.last_materialization_report
+        assert result["value"].tolist() == list(range(100))
+        assert report is not None
+        assert report.estimated_bytes is not None
+        assert report.limit_bytes is not None
+        assert 0 < report.estimated_bytes <= report.limit_bytes
+        assert 0 < report.actual_bytes <= report.limit_bytes
+        assert report.reason == "explicit collect_small"
+        assert session.execution_count == 1
+
+
+def test_collect_small_rejects_expanding_plan_before_execution(
+    tmp_path: Path,
+) -> None:
+    left_path = tmp_path / "left.parquet"
+    right_path = tmp_path / "right.parquet"
+    pd.DataFrame({"left": range(10)}).to_parquet(left_path)
+    pd.DataFrame({"right": range(10)}).to_parquet(right_path)
+
+    with duckpd.connect() as session:
+        expanded = session.read_parquet(left_path).merge(
+            session.read_parquet(right_path),
+            how="cross",
+        )
+        with pytest.raises(UnsupportedOperationError, match="non-expanding"):
+            expanded.collect_small(1_000_000)
+        assert session.execution_count == 0
+
+
+def test_collect_small_rejects_dictionary_strings_before_execution(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "strings.parquet"
+    pd.DataFrame({"value": ["repeated"] * 1_000}).to_parquet(path)
+
+    with duckpd.connect() as session:
+        frame = session.read_parquet(path)
+        with pytest.raises(UnsupportedOperationError, match="fixed-width"):
+            frame.collect_small(100_000_000)
+        assert session.execution_count == 0
+
+
+def test_collect_small_rejects_unknown_estimates_before_execution() -> None:
+    with duckpd.connect() as session:
+        frame = session.from_pandas(pd.DataFrame({"value": [1]}))
+        with pytest.raises(UnsupportedOperationError, match="non-expanding"):
+            frame.collect_small(1_000_000)
+        assert session.execution_count == 0
+
+
+def test_fallback_policy_is_always_error() -> None:
+    assert duckpd.connect().fallback == "error"
+    with pytest.raises(ValueError, match="fallback must be 'error'"):
+        duckpd.connect(fallback="pandas")  # type: ignore[arg-type]

@@ -107,6 +107,11 @@ def test_explain_json_exports_rewrites_and_optimized_plan() -> None:
     data = json.loads(frame.explain("json"))
 
     assert data["plan"]["node"] == "TopKPlan"
+    assert data["execution_boundaries"] == {
+        "fallback_policy": "error",
+        "fallback": [],
+        "materialization": [],
+    }
     assert [snapshot["name"] for snapshot in data["snapshots"]] == [
         "predicate_pushdown",
         "required_column_liveness",

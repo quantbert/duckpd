@@ -288,6 +288,12 @@ def test_groupby_invalid_arguments_raise_early(sample_sales: pd.DataFrame) -> No
     with pytest.raises(UnsupportedOperationError, match="requires numeric or boolean"):
         g.agg(out=("region", "sum"))
 
+    execution_count = frame._session.execution_count
+    for function in ("list", "string_agg"):
+        with pytest.raises(UnsupportedOperationError, match="non-spillable"):
+            g.agg(out=("revenue", function))
+    assert frame._session.execution_count == execution_count
+
 
 def test_series_groupby_various_key_types(sample_sales: pd.DataFrame) -> None:
     session = duckpd.connect()

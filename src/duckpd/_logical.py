@@ -188,6 +188,8 @@ class FunctionCall:
 
     name: str
     arguments: tuple[Expression, ...]
+    return_type: str | None = None
+    is_arrow_udf: bool = False
 
 
 @dataclass(frozen=True)

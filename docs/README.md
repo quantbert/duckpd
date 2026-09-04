@@ -5,6 +5,14 @@ supporting research. User-facing installation and quick-start information stays
 in the repository [README](../README.md), while contribution instructions stay
 in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automatically.
 
+
+## User guides
+
+- [Getting started](GETTING_STARTED.md) — installation, the supported acceptance
+  workflow, execution boundaries, ordering, and resource-bounded sessions.
+- [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
+  supported arguments, intentional deviations, and unsupported behavior.
+
 ## Project status
 
 - [Implementation roadmap](roadmap.md) — product contract, phased work, testing

@@ -322,6 +322,31 @@ class Series:
             self.name,
         )
 
+    def map_arrow(self, name: str) -> Series:
+        """Apply a registered typed Arrow UDF inside DuckDB."""
+        spec = self._session._arrow_udf(name)
+        if len(spec.input_types) != 1:
+            raise ValueError(
+                f"Arrow UDF {name!r} expects {len(spec.input_types)} inputs; "
+                "Series.map_arrow() requires exactly one"
+            )
+        input_type = expression_type(self._plan, self._expression)
+        if input_type != spec.input_types[0]:
+            raise TypeError(
+                f"Arrow UDF {name!r} expects {spec.input_types[0]}, got {input_type}"
+            )
+        return Series(
+            self._session,
+            self._plan,
+            FunctionCall(
+                name,
+                (self._expression,),
+                return_type=spec.return_type,
+                is_arrow_udf=True,
+            ),
+            self.name,
+        )
+
     def fillna(
         self,
         value: object = None,

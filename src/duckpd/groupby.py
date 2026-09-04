@@ -349,6 +349,11 @@ class DataFrameGroupBy:
                 )
 
             func_lower = func_name.lower()
+            if func_lower in {"list", "string_agg"}:
+                raise UnsupportedOperationError(
+                    f"Aggregate {func_name!r} has an unbounded, non-spillable "
+                    "state and is rejected by DuckPD's resource policy"
+                )
             if func_lower == "size":
                 op = AggregateOperator.SIZE
                 target_expr = None

@@ -36,16 +36,18 @@ These functions and methods exist exclusively in DuckPD to control query plannin
 | DuckPD Extension | Return Type | Nearest pandas Workflow | Description & Semantic Purpose |
 | :--- | :--- | :--- | :--- |
 | **`df.collect()`** / **`s.collect()`** | `pd.DataFrame` / `pd.Series` | *(Already in memory)* | Compiles and executes the relational query plan, returning the final result as a real in-memory pandas object. |
+| **`df.collect_small(max_bytes)`** | `pd.DataFrame` | `df.memory_usage(deep=True)` followed by a size check | Explicitly opts into pandas materialization only when a local-Parquet, non-expanding plan with fixed-width output types has a conservative row/type memory upper bound below the strict byte limit. Joins, unions, Python UDFs, strings, binary, nested, and other variable-width output reject before execution. The measured result must also fit. `session.last_materialization_report` records reason, upper bound, actual bytes, and limit. |
 | **`df.limit(count, offset=0)`** | `duckpd.DataFrame` | `df.iloc[offset:offset+count]` | Appends a lazy `LIMIT count OFFSET offset` node to the query plan without reading rows or executing. |
 | **`df.persist(name=None)`** | `duckpd.DataFrame` | `df.copy()` *(in Python heap)* | Materializes the plan into a temporary (or named) DuckDB table. Caches intermediate results in complex DAGs without transferring rows into Python heap memory. |
 | **`df.profile()`** | `ProfileResult` | `%timeit` / `cProfile` | Executes the plan with native DuckDB JSON profiling enabled (`PRAGMA enable_profiling = 'json'`). Returns a structured `ProfileResult` containing execution latency, CPU time, rows scanned/returned, bytes read/written, peak buffer memory, peak temp spill size, and physical operator timings. |
-| **`df.explain(mode="all"\|"logical"\|"sql"\|"physical")`** | `str` | *(Not available)* | Inspects the query plan without scanning or reading data. Displays DuckPD's typed logical plan, the generated DuckDB SQL, and DuckDB's physical execution plan. |
-| **`df.explain_write(path, compression=...)`** | `str` | *(Not available)* | Inspects the physical write plan, target path, compression codec, and output schema for direct file sinks without writing rows to disk. |
+| **`df.explain(mode="all"\|"logical"\|"optimized"\|"json"\|"sql"\|"physical")`** | `str` | *(Not available)* | Inspects plans without collecting result rows. Optimized and JSON modes expose DuckPD rewrite passes; physical mode asks DuckDB for its plan. |
+| **`session.register_arrow_udf(...)`** / **`s.map_arrow(name)`** | `ArrowUDFSpec` / `duckpd.Series` | `Series.map()` | Registers declared input/output types, null and exception handling, determinism, side-effect metadata, and the required batch-independence contract. Execution remains inside DuckDB's Arrow UDF batches; no DuckDB relation `map()` or implicit pandas fallback is used. Explain/profile output exposes the boundary and unknown engine-batched transfer estimate. |
+| **`df.explain_write(path, compression=...)`** | `str` | *(Not available)* | Inspects the direct-write strategy, target, compression, output schema, blocking operators, ordering, and spill configuration without writing rows. Any sizes are explicitly estimates. |
 | **`df.write_parquet(path, ...)`** | `None` | `df.to_parquet(path)` | Executes a direct DuckDB `COPY (query) TO ... (FORMAT PARQUET)` sink. Streams directly from DuckDB's C++ engine to disk without constructing an intermediate pandas DataFrame. |
 | **`df.write_csv(path, ...)`** | `None` | `df.to_csv(path)` | Direct DuckDB `COPY ... TO ... (FORMAT CSV)` export without pandas intermediate heap allocation. |
 | **`df.to_arrow()`** | `pa.Table` | `pa.Table.from_pandas(df)` | Executes plan and returns an in-memory PyArrow `Table` directly from DuckDB. |
 | **`df.to_arrow_batches(batch_size=1_000_000)`** | `pa.RecordBatchReader` | `pd.read_csv(..., chunksize=N)` | Streams results as PyArrow `RecordBatch` chunks directly from DuckDB's query reader, enabling bounded-memory chunk processing on larger-than-RAM datasets. `batch_size` must be a positive integer. |
-| **`duckpd.connect(...)`** | `Session` | *(OS / cgroups)* | Configures an isolated DuckDB execution session with strict resource limits: `memory_limit`, `temp_directory`, `max_temp_directory_size`, `threads`, and `read_only`. |
+| **`duckpd.connect(...)`** | `Session` | *(OS / cgroups)* | Configures an isolated DuckDB execution session with strict resource limits: `memory_limit`, `temp_directory`, `max_temp_directory_size`, `threads`, and `read_only`. `fallback` is fixed to `"error"`; any other value is rejected before a connection or scan. |
 | **`session.sql(query)`** | `duckpd.DataFrame` | `pd.read_sql(query, con)` | Compiles a raw SQL `SELECT` statement into a lazy DuckPD `DataFrame`. |
 | **`session.table(name)`** | `duckpd.DataFrame` | `pd.read_sql_table(name, con)` | Scans an existing DuckDB catalog table as a lazy DuckPD `DataFrame`. |
 | **`from_pandas(df, ...)`** | `duckpd.DataFrame` | `pd.DataFrame(...)` | Copies a snapshot into an isolated session, appending a hidden stable row ordinal column (`__duckpd_row_ordinal_...__`) to track original row sequence. |
@@ -242,12 +244,13 @@ native = result.to_native()  # duckpd.DataFrame; still not executed
 
 Narwhals is an interoperability layer, not a new execution engine. It does not
 increase pandas compatibility, make unsupported DuckPD operations available,
-or guarantee that every Narwhals consumer works with the current prototype.
-The prototype intentionally supports only operations marked supported in the
-generated table. Its expression subset covers aliases, scalar broadcasting,
-arithmetic, comparisons, boolean composition, casts, null predicates, supported
-global and grouped aggregations, and the documented string and datetime accessor
-methods. Joins and other accessor methods are not yet part of the contract.
+or guarantee that every Narwhals consumer works with the current adapter.
+The adapter supports only operations marked supported in the generated table,
+including the documented expression, relational, equi/cross join, schema,
+collection, and sink subsets. As-of/semi/anti joins, reshape operations, nested
+types, arbitrary Python `map_batches`, and public `backend="duckpd"` scans are
+explicit exclusions. For the scan workaround, use a DuckPD reader and pass the
+result to `narwhals.from_native()`; this remains lazy.
 
 
 ---
@@ -259,3 +262,27 @@ methods. Joins and other accessor methods are not yet part of the contract.
 * **Stable Identity Operations**: `drop_duplicates`, `rank(method="first")`, top-N ties, and `groupby(sort=False)` use stable row identity where available.
 * **Join Ordering Destruction**: Joins do not claim a total order, including with `sort=True`, because duplicate merge keys lack a stable tie-breaker. Ordering-sensitive follow-up operations must explicitly sort by enough columns to break ties.
 * **Explicit Session Isolation**: Module-level helpers share a weak context-local implicit session. Explicit sessions created via `duckpd.connect(...)` remain isolated, configurable, and authoritative for resource management and cleanup.
+
+---
+
+## 11. Intentional exclusions
+
+The following are unsupported contracts, not implicit future behavior:
+
+- arbitrary row-wise Python `apply` and invisible pandas or DuckDB `map()`
+  fallback;
+- `GroupBy.apply`, categorical grouping, categorical metadata, and `.cat`;
+- time-based rolling windows, timezone transformations, and temporal
+  floor/ceil/round;
+- nested list, array, struct, map, union, and enum collection;
+- duplicate displayed column labels and implicit positional cross-frame
+  alignment;
+- unbounded eager collection except through an explicit collection API;
+- partition-aware or remote in-place commit and multi-writer commit locking;
+- Narwhals eager-frame protocols, arbitrary `map_batches`, as-of/semi/anti
+  joins, unpivot/explode, nested schemas, and public plugin-dispatched scans.
+
+Unsupported methods and argument combinations raise
+`UnsupportedOperationError`, `UnorderedOperationError`, `AlignmentError`, or a
+more specific validation error before result execution. DuckPD does not silently
+materialize a pandas object as a fallback.

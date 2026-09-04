@@ -57,9 +57,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=250_000)
     parser.add_argument("--iterations", type=int, default=7)
+    parser.add_argument(
+        "--max-regression-ratio",
+        type=float,
+        default=1.5,
+        help="Fail when optimized median execution exceeds this baseline ratio",
+    )
     args = parser.parse_args()
     if args.iterations < 3:
         raise ValueError("--iterations must be at least 3")
+    if args.rows <= 0:
+        raise ValueError("--rows must be positive")
+    if args.max_regression_ratio < 1:
+        raise ValueError("--max-regression-ratio must be at least 1")
 
     with duckpd.connect() as session:
         frame = session.sql(
@@ -126,6 +136,7 @@ def main() -> None:
                 ),
             }
 
+        execution_ratio = median(optimized_times) / median(baseline_times)
         print(
             json.dumps(
                 {
@@ -136,9 +147,7 @@ def main() -> None:
                     "optimizer": _summary(optimization_times),
                     "unoptimized_execution": _summary(baseline_times),
                     "optimized_execution": _summary(optimized_times),
-                    "optimized_to_unoptimized_median_ratio": (
-                        median(optimized_times) / median(baseline_times)
-                    ),
+                    "optimized_to_unoptimized_median_ratio": execution_ratio,
                     "changed_passes": changed_passes,
                     "ablations": ablations,
                     "results_equal": True,
@@ -148,6 +157,11 @@ def main() -> None:
                 indent=2,
             )
         )
+        if execution_ratio > args.max_regression_ratio:
+            raise SystemExit(
+                "optimizer regression gate failed: "
+                f"{execution_ratio:.3f} > {args.max_regression_ratio:.3f}"
+            )
 
 
 if __name__ == "__main__":

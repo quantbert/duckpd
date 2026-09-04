@@ -28,6 +28,7 @@ from benchmark.metrics import (
 )
 from benchmark.report import generate_markdown_report
 from benchmark.runner import parse_args, resolve_sizes, resolve_workloads
+from benchmark.tracks import results_json, run_tracks
 from benchmark.workloads import WORKLOADS
 
 
@@ -231,3 +232,32 @@ def test_cli_parsing_and_resolvers() -> None:
 
     assert resolve_workloads(["all"]) == list(WORKLOADS.keys())
     assert resolve_workloads(["full_scan_agg"]) == ["full_scan_agg"]
+
+
+def test_validated_release_tracks(tmp_path: Path) -> None:
+    results = run_tracks(1_000, tmp_path)
+
+    assert [result.track for result in results] == [
+        "tpch_q1",
+        "db_groupby_join",
+        "synthetic_ohlc",
+    ]
+    for result in results:
+        engines = {engine.engine: engine for engine in result.engines}
+        for name in ("duckdb_sql", "duckpd", "pandas"):
+            assert engines[name].status == "success"
+            assert engines[name].correct is True
+            execution_seconds = engines[name].execution_seconds
+            peak_rss_bytes = engines[name].peak_rss_bytes
+            assert execution_seconds is not None
+            assert execution_seconds >= 0
+            assert peak_rss_bytes is not None
+            assert peak_rss_bytes > 0
+        assert engines["duckpd"].planning_seconds is not None
+        assert engines["duckpd"].spill_bytes is not None
+        assert engines["polars"].status in {"unavailable", "unsupported"}
+        assert engines["fireducks"].status in {"unavailable", "unsupported"}
+
+    encoded = results_json(results)
+    assert '"track": "tpch_q1"' in encoded
+    assert '"correct": true' in encoded

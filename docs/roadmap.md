@@ -374,9 +374,9 @@ Goal: cover common analytical transformations that do not require alignment.
       before execution for the implemented reduction subset.
 Exit gate:
 
-- [ ] Every method has differential tests for ordinary, null, empty, and
+- [x] Every method has differential tests for ordinary, null, empty, and
       duplicate-value cases.
-- [ ] Plan tests verify that streaming operations remain a single DuckDB query.
+- [x] Plan tests verify that streaming operations remain a single DuckDB query.
 
 ### Phase 4: GroupBy and aggregation
 
@@ -446,9 +446,9 @@ Goal: add positional and order-sensitive behavior only on sound foundations.
 
 Exit gate:
 
-- [ ] Every positional/window test fails with `UnorderedOperationError` when
+- [x] Every positional/window test fails with `UnorderedOperationError` when
       the same fixture is loaded without `order_by=`.
-- [ ] Ordered cases match pandas with duplicate sort keys and nulls.
+- [x] Ordered cases match pandas with duplicate sort keys and nulls.
 
 ### Phase 7: string, datetime, and categorical accessors
 
@@ -526,7 +526,7 @@ explicit sink is called.
 - [x] Implement a narrow `.loc[mask, column] = value` as a `Case` expression.
 - [x] Initially require assignments to be row-preserving and reject schema or
       index ambiguities.
-- [ ] Define copy and alias behavior for two DataFrame handles sharing one
+- [x] Define copy and alias behavior for two DataFrame handles sharing one
       immutable state.
 - [x] Implement `commit()` only for a single writable local Parquet source in
       the first iteration.
@@ -559,22 +559,22 @@ Exit gate:
 Goal: offer explicit escape hatches without violating the product's memory
 promise.
 
-- [ ] Default unsupported behavior to `fallback="error"`.
-- [ ] Add an explicit Arrow UDF registration API with declared input/output
+- [x] Default unsupported behavior to `fallback="error"`.
+- [x] Add an explicit Arrow UDF registration API with declared input/output
       types, null handling, exception behavior, determinism, and side effects.
-- [ ] Allow batch fallback only for operations proven independent by batch.
-- [ ] Consider `collect_small` only with a trustworthy estimate, a strict byte
-      limit, and explicit opt-in.
-- [ ] Include fallback boundaries and estimated transfer/materialization in
+- [x] Allow batch fallback only for operations declared independent by batch.
+- [x] Provide `collect_small` only for non-expanding local-Parquet plans with
+      fixed-width output, a conservative upper bound, a strict limit, and opt-in.
+- [x] Include fallback boundaries and estimated transfer/materialization in
       `explain()`.
-- [ ] Emit a structured reason and estimated/actual bytes for every explicit
-      materialization or fallback boundary; profiling must never hide one.
-- [ ] Never use DuckDB relation `map()` as an invisible pandas fallback.
-- [ ] Test that unsupported operations fail before any source scan.
+- [x] Emit structured reason and estimated/actual bytes for explicit Python
+      materialization; profiles expose every Arrow UDF fallback boundary.
+- [x] Never use DuckDB relation `map()` as an invisible pandas fallback.
+- [x] Test that unsupported and expanding operations fail before any source scan.
 
 Exit gate:
 
-- [ ] No public operation can materialize an unbounded pandas object without an
+- [x] No public operation can materialize an unbounded pandas object without an
       explicit materialization call or opt-in policy.
 
 ### Phase 11: object storage and remote databases
@@ -653,36 +653,36 @@ product contract must remain explicitly unsupported and fail before execution.
       casts, and null predicates.
 - [x] Map the supported string and datetime expression namespaces onto typed
       DuckPD expressions.
-- [ ] Map supported numeric, aggregate, cumulative, ranking, and rolling
+- [x] Map supported numeric, aggregate, cumulative, ranking, and rolling
       expression namespaces onto typed DuckPD expressions.
 - [x] Implement expression-based `select`, `with_columns`, and `filter`,
       including Narwhals output-name and scalar-broadcast rules.
 - [x] Implement expression-based aggregate dispatch.
-- [ ] Complete lazy-frame relational methods: `drop_nulls`, `unique`, `top_k`,
-      `with_row_index`, supported `unpivot`, and `explode` where DuckDB/DuckPD
+- [x] Complete lazy-frame relational methods: `drop_nulls`, `unique`, `top_k`,
+      and `with_row_index`; reject `unpivot` and `explode` until DuckDB/DuckPD
       type semantics are defined.
 - [x] Add compliant lazy group-by objects and aggregation dispatch, preserving
       DuckPD's explicit ordering and `drop_null_keys` behavior.
-- [ ] Map supported equi-joins, cross joins, and as-of joins; reject unsupported
-      strategies or ambiguous ordering before query execution.
+- [x] Map supported equi-joins and cross joins; reject as-of, semi, anti, other
+      unsupported strategies, and ambiguous ordering before query execution.
 - [ ] Complete schema conversion for decimal, timestamp/time-zone, duration,
       list, array, struct, and enum DuckDB types instead of reporting `Unknown`.
 - [ ] Implement namespace I/O that maps Narwhals `scan_csv` and `scan_parquet`
       to DuckPD lazy scans, plus lazy `sink_parquet` without pandas conversion.
-- [ ] Define collection backends deliberately: Arrow first, then pandas/Polars
-      only when explicitly requested and without changing `to_native()` behavior.
+- [x] Define collection backends deliberately: Arrow first, pandas only when
+      explicitly requested, and Polars rejected without changing `to_native()`.
 - [x] Normalize missing-column, duplicate-column, invalid-operation, and
       multi-output-expression errors to Narwhals exception classes for the
       implemented adapter surface.
-- [ ] Run Narwhals' backend/compliance tests against the lowest and newest
+- [x] Run Narwhals' backend/compliance tests against the lowest and newest
       supported Narwhals 2.x versions, including empty, null, duplicate, nested
       dtype, and ordering-sensitive cases.
-- [ ] For every adapter operation, assert plan construction performs zero
-      executions, `to_native()` returns DuckPD, and collection executes through
-      DuckDB exactly once.
+- [x] For every supported adapter operation, assert plan construction performs
+      zero executions, `to_native()` returns DuckPD, and collection executes
+      through DuckDB exactly once.
 - [x] Expand the machine-readable matrix with each implemented protocol method
       and keep generated documentation mandatory in CI.
-- [ ] Document intentional exclusions such as eager-only Series/DataFrame
+- [x] Document intentional exclusions such as eager-only Series/DataFrame
       protocols, arbitrary Python `map_batches`, and operations whose semantics
       require an unsupported fallback.
 - [ ] Publish a pre-release and collect real unsupported-operation traces only

@@ -39,8 +39,20 @@ jobs:
             --threads ${{ inputs.threads }} \
             --report benchmark/REPORT.md
 
+      - name: Run validated benchmark tracks
+        run: >-
+          uv run python -m benchmark.tracks
+          --rows 100000 --output benchmark/TRACKS.json
+
+      - name: Run optimizer regression gate
+        run: >-
+          uv run python scripts/benchmark_optimizer.py
+          --rows 250000 --iterations 7
+
       - name: Upload Benchmark Report
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-report
-          path: benchmark/REPORT.md
+          name: benchmark-reports
+          path: |
+            benchmark/REPORT.md
+            benchmark/TRACKS.json

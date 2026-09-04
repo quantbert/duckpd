@@ -15,6 +15,34 @@ The benchmark runs an analytical workflow typical in quantitative finance and da
    - `total_bars = ("close", "count")`
 4. **Semantic Validation**: Both engines must produce numerically and structurally identical output (`assert_frame_equal`).
 
+## Validated release tracks
+
+`python -m benchmark.tracks` generates deterministic inputs and runs three
+separate result-validated tracks:
+
+- `tpch_q1`: the TPC-H Q1 grouping and pricing-expression shape;
+- `db_groupby_join`: a db-benchmark-style customer/order join followed by
+  regional aggregation;
+- `synthetic_ohlc`: the existing market-data GroupBy workload.
+
+Each DuckPD run records planning time, execution time, process peak RSS, spill
+directory bytes, and result equality against direct DuckDB SQL. Direct DuckDB
+SQL and pandas are timed baselines. Polars and FireDucks are recorded as
+`unavailable` when not installed and `unsupported` when installed without a
+validated adapter; unavailable, unsupported, failed, and OOM outcomes remain in
+the JSON instead of being removed.
+
+```bash
+make benchmark-tracks
+make optimizer-gate
+```
+
+The first command writes `benchmark/TRACKS.json`. The second warms and
+alternates optimized/unoptimized plans, checks Arrow result equality, measures
+each optimizer pass by ablation, and fails if optimized median execution exceeds
+the configured regression ratio.
+
+
 ### Why this workload favors DuckPD
 
 - **Predicate & Projection Pushdown**: DuckPD compiles the lazy plan directly to DuckDB's vectorized query engine. Rather than deserializing all columns and rows into Python heap memory, DuckDB scans only the requested columns (`ticker`, `open`, `close`, `high`, `low`) and pushes filtering into the Parquet reader.
@@ -54,9 +82,9 @@ The benchmark runs an analytical workflow typical in quantitative finance and da
 | **1 GB** | 997.18 MB | 64,723,528 | **0.4965 s** (0.4890-0.5005) | 1.5497 s (1.4535-1.7710) | **3.12x** | **358.00 KB** | 981.49 MB | 3/3 identical |
 | **5 GB** | 4.99 GB | 323,617,641 | **2.3876 s** (2.3177-2.6055) | 9.4497 s (7.6746-12.9861) | **3.96x** | **357.88 KB** | 4.90 GB | 3/3 identical |
 
-`tracemalloc` does not observe DuckDB or Arrow native allocations. The heap
-columns must not be interpreted as total RAM usage or larger-than-memory proof.
-Peak RSS, spill bytes, and bytes read remain future benchmark metrics.
+Peak RSS and spill bytes are process-level observations recorded by the current
+benchmark harness. They are not guarantees for other data distributions,
+operators, filesystems, or DuckDB versions.
 
 ### Historical comparison & trends
 

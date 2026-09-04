@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Sequence
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import duckdb
 import pandas as pd
 import pyarrow as pa
+from _duckdb._func import FunctionNullHandling, PythonUDFType
 
 from duckpd._compiler import DuckDBCompiler
-from duckpd._executor import Executor
+from duckpd._executor import Executor, MaterializationReport
 from duckpd._logical import (
     ArrowSource,
     ColumnRef,
@@ -39,9 +41,28 @@ from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
 from duckpd.errors import SessionClosedError, UnsupportedOperationError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from duckpd.frame import DataFrame
+
+    ArrowUDF = Callable[
+        ...,
+        pa.Table | pa.Array[Any] | pa.ChunkedArray[Any],
+    ]
+else:
+    ArrowUDF = Callable[..., object]
+
+
+@dataclass(frozen=True)
+class ArrowUDFSpec:
+    """Validated Arrow UDF contract registered with one Session."""
+
+    name: str
+    input_types: tuple[str, ...]
+    return_type: str
+    null_handling: Literal["default", "special"]
+    exception_handling: Literal["default", "return_null"]
+    deterministic: bool
+    side_effects: bool
+    batch_independent: bool
 
 
 class Session:
@@ -56,7 +77,10 @@ class Session:
         temp_directory: str | Path | None = None,
         max_temp_directory_size: str | None = None,
         threads: int | None = None,
+        fallback: Literal["error"] = "error",
     ) -> None:
+        if fallback != "error":
+            raise ValueError("fallback must be 'error'; implicit fallback is forbidden")
         config: dict[str, str | bool | int | float | list[str]] = {}
         if memory_limit is not None:
             config["memory_limit"] = memory_limit
@@ -73,6 +97,9 @@ class Session:
             config=config,
         )
         self._registered_sources: dict[str, object] = {}
+        self._fallback: Literal["error"] = fallback
+        self._arrow_udfs: dict[str, ArrowUDFSpec] = {}
+        self._last_materialization_report: MaterializationReport | None = None
         self._closed = False
         self._execution_count = 0
         self._compiler = DuckDBCompiler(self)
@@ -87,6 +114,89 @@ class Session:
     def closed(self) -> bool:
         """Whether this session has released its connection."""
         return self._closed
+
+    @property
+    def fallback(self) -> Literal["error"]:
+        """Unsupported operations fail instead of materializing a fallback."""
+        return self._fallback
+
+    @property
+    def last_materialization_report(self) -> MaterializationReport | None:
+        """Metrics for the latest explicit bounded materialization."""
+        return self._last_materialization_report
+
+    def register_arrow_udf(
+        self,
+        name: str,
+        function: ArrowUDF,
+        input_types: Sequence[str],
+        return_type: str,
+        *,
+        null_handling: Literal["default", "special"] = "default",
+        exception_handling: Literal["default", "return_null"] = "default",
+        deterministic: bool = True,
+        side_effects: bool = False,
+        batch_independent: bool = True,
+    ) -> ArrowUDFSpec:
+        """Register an explicitly typed, batch-independent Arrow scalar UDF."""
+        self._ensure_open()
+        if not name or not name.isidentifier():
+            raise ValueError("Arrow UDF name must be a non-empty identifier")
+        declared_inputs = tuple(item.strip().upper() for item in input_types)
+        declared_return = return_type.strip().upper()
+        if not declared_inputs or any(not item for item in declared_inputs):
+            raise ValueError("Arrow UDF input_types must not be empty")
+        if not declared_return:
+            raise ValueError("Arrow UDF return_type must not be empty")
+        if not batch_independent:
+            raise UnsupportedOperationError(
+                "Arrow UDF fallback must be independent for every input batch"
+            )
+        if deterministic and side_effects:
+            raise ValueError("A deterministic Arrow UDF cannot declare side effects")
+        registry_name = name.casefold()
+        if registry_name in self._arrow_udfs:
+            raise ValueError(f"Arrow UDF {name!r} is already registered")
+        spec = ArrowUDFSpec(
+            name=name,
+            input_types=declared_inputs,
+            return_type=declared_return,
+            null_handling=null_handling,
+            exception_handling=exception_handling,
+            deterministic=deterministic,
+            side_effects=side_effects,
+            batch_independent=batch_independent,
+        )
+        null_option = (
+            FunctionNullHandling.SPECIAL
+            if null_handling == "special"
+            else FunctionNullHandling.DEFAULT
+        )
+        exception_option = (
+            duckdb.PythonExceptionHandling.RETURN_NULL
+            if exception_handling == "return_null"
+            else duckdb.PythonExceptionHandling.DEFAULT
+        )
+        self._connection.create_function(  # pyright: ignore[reportUnknownMemberType]
+            name,
+            function,
+            list(declared_inputs),
+            declared_return,
+            type=PythonUDFType.ARROW,
+            null_handling=null_option,
+            exception_handling=exception_option,
+            side_effects=side_effects or not deterministic,
+        )
+        self._arrow_udfs[registry_name] = spec
+        return spec
+
+    def _arrow_udf(self, name: str) -> ArrowUDFSpec:
+        try:
+            return self._arrow_udfs[name.casefold()]
+        except KeyError:
+            raise KeyError(
+                f"Arrow UDF {name!r} is not registered in this session"
+            ) from None
 
     def from_pandas(
         self,
@@ -433,6 +543,7 @@ def connect(
     temp_directory: str | Path | None = None,
     max_temp_directory_size: str | None = None,
     threads: int | None = None,
+    fallback: Literal["error"] = "error",
 ) -> Session:
     """Create a DuckPD session."""
     return Session(
@@ -442,4 +553,5 @@ def connect(
         temp_directory=temp_directory,
         max_temp_directory_size=max_temp_directory_size,
         threads=threads,
+        fallback=fallback,
     )

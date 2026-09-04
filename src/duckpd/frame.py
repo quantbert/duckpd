@@ -134,6 +134,13 @@ class DataFrame:
         """Execute the complete plan and return a pandas DataFrame."""
         return self._session._executor.collect(self._plan)
 
+    def collect_small(self, max_bytes: int) -> pd.DataFrame:
+        """Explicitly collect a local Parquet plan under a strict byte limit."""
+        return self._session._executor.collect_small(
+            self._plan,
+            max_bytes=max_bytes,
+        )
+
     def to_pandas(self) -> pd.DataFrame:
         """Alias for :meth:`collect`."""
         return self.collect()

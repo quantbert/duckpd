@@ -85,6 +85,8 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
             return binary_numeric_type(value_type, otherwise_type, "add")
         return "UNKNOWN"
     if isinstance(expression, FunctionCall):
+        if expression.return_type is not None:
+            return expression.return_type
         func_name = expression.name.lower()
         if func_name in {"length", "year", "month", "day", "hour", "minute", "second"}:
             return "BIGINT"

@@ -5,14 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
-import duckdb
 import pandas as pd
 import pytest
 
 import duckpd as dp
 from duckpd import CommitReport, ConcurrentModificationError
 from duckpd._executor import CommitFailurePoint
-from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
+from duckpd.errors import (
+    MaterializationError,
+    UnorderedOperationError,
+    UnsupportedOperationError,
+)
 
 
 def test_csv_read_write_differential(tmp_path: Path) -> None:
@@ -489,7 +492,7 @@ def test_save_as_table_failed_overwrite_rolls_back() -> None:
         session.from_pandas(original).save_as_table("rollback_target")
         failing = session.sql("SELECT CAST(error('boom') AS BIGINT) AS a")
 
-        with pytest.raises(duckdb.InvalidInputException, match="boom"):
+        with pytest.raises(MaterializationError, match="save_as_table"):
             failing.save_as_table("rollback_target", mode="overwrite")
 
         pd.testing.assert_frame_equal(
@@ -512,6 +515,9 @@ def test_parquet_atomic_commit_with_index_preservation(tmp_path: Path) -> None:
     assert isinstance(report, CommitReport)
     assert report.rows_written == 3
     assert report.bytes_written > 0
+    assert report.files_written == 1
+    assert report.columns_written == 2
+    assert report.row_groups_written >= 1
     assert report.backup_path is not None
     assert Path(report.backup_path).exists()
     pd.testing.assert_frame_equal(pd.read_parquet(report.backup_path), pdf)

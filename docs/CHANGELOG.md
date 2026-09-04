@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
 the [release policy](RELEASES.md).
 
-## Unreleased
+## 0.1.0a1 - 2026-09-04
 
 ### Added
 
@@ -32,6 +32,7 @@ the [release policy](RELEASES.md).
 - A named idempotent logical optimizer adds safe predicate pushdown, required-column/source liveness, combined limits, top-k plans, redundant project/sort removal, and common-subplan persist recommendations.
 - `explain("optimized")` and `explain("json")` expose optimized plans and per-pass before/after snapshots. Profiles separate DuckPD planning and execution timings; `scripts/benchmark_optimizer.py` warms and alternates variants, asserts Arrow-result equality, reports median/range statistics, and ablates each retained pass on Linux.
 - Release artifact verification: generated Narwhals compatibility documentation, wheel/sdist content checks, and clean-environment wheel installation smoke tests are configured for the CI Python 3.11–3.14 matrix; local Linux verification passes on all four Python versions.
+- Controlled Python escape hatches: sessions enforce `fallback="error"`; typed, batch-independent Arrow UDFs are registered explicitly and applied with `Series.map_arrow()`; `DataFrame.collect_small()` accepts only non-expanding local-Parquet plans with fixed-width output and a proven conservative memory upper bound, rejecting expanding or variable-width plans before execution; materialization reports and explain/profile output expose their boundaries.
 
 ### Changed
 
