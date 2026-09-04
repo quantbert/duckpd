@@ -2,8 +2,8 @@
 
 from importlib.metadata import version
 
-from duckpd._executor import ProfileResult
-from duckpd.errors import MergeError
+from duckpd._executor import CommitReport, ProfileResult
+from duckpd.errors import ConcurrentModificationError, MergeError
 from duckpd.frame import DataFrame
 from duckpd.groupby import DataFrameGroupBy, SeriesGroupBy
 from duckpd.io import concat, from_arrow, from_pandas, read_csv, read_parquet
@@ -13,6 +13,8 @@ from duckpd.session import Session, connect
 __version__ = version("duckpd")
 
 __all__ = [
+    "CommitReport",
+    "ConcurrentModificationError",
     "DataFrame",
     "DataFrameGroupBy",
     "MergeError",

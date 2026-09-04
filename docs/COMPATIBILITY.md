@@ -110,6 +110,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `df.replace(to_replace, val)` | **`[Intentional Deviation]`** | `to_replace`, `value=None` | Replaces values lazily via typed `CASE WHEN` branches. Filters replacement rules per column to enforce SQL type compatibility. |
 | `df.isna()`, `df.notna()` | **`[Pandas-API Subset]`** | None | Returns lazy boolean DataFrame. |
 | `df.sort_values(by, ...)` | **`[Pandas-API Subset]`** | `by`, `ascending`, `na_position` | Returns lazy sorted DataFrame. |
+| `df.sample(...)` | **`[Pandas-API Subset]`** | `n=None`, `frac=None`, `random_state=None`, `ignore_index=False` | Deterministic lazy row sampling via DuckDB `reservoir(n ROWS)` or `reservoir(pct PERCENT)` with repeatable seed. |
 | `df.limit(count, offset)` | **`[DuckPD Extension]`** | `count`, `offset` | Lazy limit plan node (`LIMIT count OFFSET offset`). |
 | `df.head(count=5)` | **`[Intentional Deviation]`** | `count` | Bounded eager preview (`limit(count).collect()`). |
 | `df.drop_duplicates(...)` | **`[Pandas-API Subset]`** | `subset`, `keep='first'\|'last'\|False` | Deduplicates rows (aggregate or window-based). |
@@ -135,6 +136,8 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `df.explain(mode=...)` | **`[DuckPD Extension]`** | `mode='all'\|'logical'\|'sql'\|'physical'` | Detailed plan inspection without reading rows. |
 | `df.explain_write(path, ...)` | **`[DuckPD Extension]`** | `path`, `compression` | Write execution strategy inspection. |
 | `df.profile()` | **`[DuckPD Extension]`** | None | Executes plan with DuckDB profiling enabled and returns structured `ProfileResult` metrics. |
+| `df.save_as_table(name, ...)` | **`[DuckPD Extension]`** | `name`, `mode='error'\|'overwrite'\|'append'` | Direct DuckDB table persistence with schema validation and transactional failure rollback. |
+| `df.commit(...)` | **`[DuckPD Extension]`** | `compression='snappy'`, `retain_previous=False` | Atomic in-place commit of transformations back to a single local Parquet source with schema and row preservation. |
 
 ---
 
@@ -153,7 +156,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `s.nsmallest(n)` | **`[Pandas-API Subset]`** | `n=5`, `keep='first'` | Returns bottom `n` values lazily. |
 | `s.collect()` / `to_pandas()` | **`[DuckPD Extension]`** | None | Executes plan and returns pandas Series. |
 
-All transformation, cumulative, window, and reduction methods listed for DataFrames (`astype`, `fillna`, `dropna`, `where`, `mask`, `clip`, `replace`, `isna`, `notna`, `cumsum`, `shift`, `diff`, `pct_change`, `rank`, `rolling`, `expanding`, `groupby`) are also supported on `Series`.
+All transformation, cumulative, window, and reduction methods listed for DataFrames (`astype`, `fillna`, `dropna`, `where`, `mask`, `clip`, `replace`, `sample`, `isna`, `notna`, `cumsum`, `shift`, `diff`, `pct_change`, `rank`, `rolling`, `expanding`, `groupby`) are also supported on `Series`.
 
 ---
 

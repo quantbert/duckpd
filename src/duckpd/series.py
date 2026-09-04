@@ -19,10 +19,14 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     FilterPlan,
+    FrameMetadata,
     FunctionCall,
+    IndexSpec,
     LiteralValue,
     NullPlacement,
     OrderColumn,
+    OrderSpec,
+    SamplePlan,
     SortDirection,
     SortKey,
     SortPlan,
@@ -31,6 +35,7 @@ from duckpd._logical import (
     WindowExpression,
 )
 from duckpd._metadata import after_aggregate, after_sort
+from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._reductions import (
     aggregate_plan,
     expression_type,
@@ -95,6 +100,75 @@ class Series:
             )
         new_name = str(index) if index is not None else None
         return Series(self._session, self._plan, self._expression, new_name)
+
+    def sample(
+        self,
+        n: int | None = None,
+        frac: float | None = None,
+        replace: bool = False,
+        weights: object = None,
+        random_state: int | None = None,
+        axis: int | str | None = None,
+        ignore_index: bool = False,
+    ) -> Series:
+        """Return a random sample of items from the Series."""
+        if axis not in (0, "index", None):
+            raise UnsupportedOperationError(
+                "DuckPD sample supports only axis=0 or axis='index'"
+            )
+        if replace is not False:
+            raise UnsupportedOperationError(
+                "DuckPD sample does not currently support replace=True"
+            )
+        if weights is not None:
+            raise UnsupportedOperationError(
+                "DuckPD sample does not currently support weights"
+            )
+        if n is not None and frac is not None:
+            raise ValueError("Only one of 'n' or 'frac' can be specified")
+        if n is None and frac is None:
+            n = 1
+        if n is not None:
+            if isinstance(n, bool) or not isinstance(cast("object", n), int):
+                raise ValueError(f"'n' must be an integer, got {type(n).__name__}")
+            if n < 0:
+                raise ValueError("A negative number of rows was requested")
+        if frac is not None:
+            if isinstance(frac, bool) or not isinstance(
+                cast("object", frac), (int, float)
+            ):
+                raise ValueError(f"'frac' must be a float, got {type(frac).__name__}")
+            if frac < 0.0:
+                raise ValueError("A negative fraction of rows was requested")
+        if random_state is not None and (
+            isinstance(random_state, bool)
+            or not isinstance(cast("object", random_state), int)
+        ):
+            raise ValueError("random_state must be an integer seed or None")
+
+        metadata = FrameMetadata(
+            columns=self._plan.metadata.columns,
+            index=self._plan.metadata.index,
+            ordering=OrderSpec(),
+        )
+        if ignore_index:
+            if metadata.index.columns:
+                metadata = reset_index_metadata(metadata, drop=True)
+            else:
+                metadata = FrameMetadata(
+                    columns=self._plan.metadata.columns,
+                    index=IndexSpec(),
+                    ordering=OrderSpec(),
+                )
+
+        plan = SamplePlan(
+            input=self._plan,
+            n=n,
+            frac=float(frac) if frac is not None else None,
+            seed=random_state,
+            metadata=metadata,
+        )
+        return Series(self._session, plan, self._expression, self.name)
 
     def to_frame(self, name: str | None = None) -> DataFrame:
         """Convert Series to a DataFrame."""

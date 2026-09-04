@@ -478,7 +478,7 @@ Goal: make execution boundaries safe and explainable.
 - [x] Implement `to_pandas()`, `to_arrow()`, `to_arrow_batches()`, and optional
       pandas-batch iteration with explicit memory behavior.
 - [x] Implement `persist()` to temporary and named DuckDB tables.
-- [ ] Implement `save_as_table()` and append behavior with schema validation.
+- [x] Implement `save_as_table()` and append behavior with schema validation.
 - [x] Implement direct CSV and Parquet sinks using relation writers or
       `COPY (query) TO`; request `RETURN_STATS` where a report is needed.
 - [ ] Keep sink paths and options parameterized or safely escaped.
@@ -532,15 +532,15 @@ explicit sink is called.
       index ambiguities.
 - [ ] Define copy and alias behavior for two DataFrame handles sharing one
       immutable state.
-- [ ] Implement `commit()` only for a single writable local Parquet source in
+- [x] Implement `commit()` only for a single writable local Parquet source in
       the first iteration.
-- [ ] Capture source path, size, modification time, and optional content hash.
-- [ ] Write to a unique staging file in the destination directory.
+- [x] Capture source path, size, modification time, and optional content hash.
+- [x] Write to a unique staging file in the destination directory.
 - [ ] Collect DuckDB `COPY` row/file/column statistics without collecting rows.
-- [ ] Validate schema, expected row-preservation, output readability, and
+- [x] Validate schema, expected row-preservation, output readability, and
       source fingerprint.
-- [ ] Atomically replace the source with `os.replace()` only after validation.
-- [ ] Support retaining the previous version and return a structured report.
+- [x] Atomically replace the source with `os.replace()` only after validation.
+- [x] Support retaining the previous version and return a structured report.
 - [ ] Add failure injection at each commit step and prove the original remains
       readable before atomic replacement.
 - [ ] Add a process-level lock or explicitly document single-writer behavior
@@ -552,7 +552,7 @@ Exit gate:
 - [ ] Assignment performs zero I/O until a sink.
 - [ ] A 100 GB-equivalent generated workload can be rewritten with memory tied
       to active batches/operator state rather than result size.
-- [ ] Concurrent source modification raises `ConcurrentModificationError` and
+- [x] Concurrent source modification raises `ConcurrentModificationError` and
       does not replace the source.
 
 ### Phase 10: controlled Python functions and fallback policy
@@ -686,7 +686,7 @@ Implement in this order. Each increment should be independently testable.
        benchmarks and execution limits.
    - [ ] Add cross-platform memory sampling (`psutil` or Windows peak working set)
          so Windows CI asserts bounded RSS instead of skipping when returning 0.
-16. [ ] Local Parquet atomic `commit()` workflow (staging file, validation,
+16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
 17. [ ] Narwhals lazy frame compliance plugin prototype, compatibility matrix
        documentation generation, and clean wheel build/install smoke test across
@@ -709,12 +709,12 @@ graph TD
 2. **Stream 2: High-Value Analytical Transformations (Phase 3)**
    - `clip(lower, upper)` for Series and DataFrame via bounded `CASE WHEN` expression compilation.
    - `replace(to_replace, value)` for scalar, list, and dictionary value replacements.
-   - `sample(n=..., frac=..., random_state=...)` row sampling with deterministic seed behavior.
+   - [x] `sample(n=..., frac=..., random_state=...)` row sampling with deterministic seed behavior.
 3. **Stream 3: Observability & Memory Profiling (Phase 8)**
    - `df.profile()` exposing DuckDB structured JSON profiling (operator timings, spill, I/O).
    - Augment benchmark suite and `test_execution_limits.py` to capture true process peak RSS (`getrusage`/`psutil`) and verify DuckDB temporary spill files.
    - Follow-up: implement cross-platform memory sampling (`psutil` or Windows working set) so Windows CI asserts bounded RSS rather than skipping when returning 0.
-4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9)**
+4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9) [Completed]**
    - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
    - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.
 5. **Stream 5: Ecosystem & Release Readiness (Phase 12)**

@@ -21,6 +21,10 @@ the [release policy](RELEASES.md).
 - Value replacement (`Series.replace` and `DataFrame.replace`): compiles replacements lazily via typed `CASE WHEN` branches supporting scalars, lists, mappings, and column-specific dictionaries with type-compatibility filtering and NULL detection.
 - Series renaming (`Series.rename`): alters Series name metadata lazily without execution.
 - Query profiling (`DataFrame.profile` and `ProfileResult`): executes queries with DuckDB structured JSON profiling enabled and returns typed performance metrics (execution latency, CPU time, rows scanned, rows returned, bytes read/written, peak buffer memory, peak spill directory size, JSON serialization, and human-readable summary).
+- Deterministic row sampling (`DataFrame.sample` and `Series.sample`): compiles lazily to DuckDB `reservoir(n ROWS)` and exact-percentage `reservoir(pct PERCENT)` clauses with optional repeatable integer seed (`random_state`) and `ignore_index` RangeIndex resetting.
+- Persistent table sinks (`DataFrame.save_as_table`): persists visible columns to DuckDB tables with `"error"`, `"overwrite"`, and schema-validated `"append"` modes, wrapped in transactional rollback to ensure table integrity on failure.
+- Local Parquet atomic commit (`DataFrame.commit` and `CommitReport`): atomically rewrites lazy modifications back to a single local Parquet source file via sibling staging, validates source schema preservation (including hidden index columns) and row-count preservation, guards against concurrent modification via source fingerprints, supports optional backup retention, and performs atomic `os.replace`.
+- Cross-platform process RSS sampling (`get_peak_rss_bytes` in `benchmark.metrics`): unifies Linux `/proc/self/status` VmHWM, macOS `getrusage`, and Windows `ctypes` peak working set sampling without unconditional `resource` imports.
 
 ### Changed
 

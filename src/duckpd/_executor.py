@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import uuid4
 
 import duckdb
 import numpy as np
@@ -24,7 +27,9 @@ from duckpd._logical import (
     LimitPlan,
     LocIndexPlan,
     PandasSource,
+    ParquetSource,
     ProjectPlan,
+    SamplePlan,
     ScanPlan,
     SortKey,
     SortPlan,
@@ -32,12 +37,29 @@ from duckpd._logical import (
 )
 from duckpd._quoting import quote_identifier
 from duckpd._typing import ParquetCompression
-from duckpd.errors import MaterializationError, MergeError
+from duckpd.errors import (
+    ConcurrentModificationError,
+    MaterializationError,
+    MergeError,
+    UnsupportedOperationError,
+)
 
 if TYPE_CHECKING:
     from duckpd._compiler import DuckDBCompiler
     from duckpd._logical import LogicalPlan
     from duckpd.session import Session
+
+
+@dataclass(frozen=True)
+class CommitReport:
+    """Structured report returned by DataFrame.commit()."""
+
+    source_path: str
+    staging_path: str
+    backup_path: str | None
+    rows_written: int
+    bytes_written: int
+    duration_seconds: float
 
 
 @dataclass(frozen=True)
@@ -298,6 +320,315 @@ class Executor:
         self._session._begin_execution()
         compiled.relation.create(name)
 
+    def save_as_table(
+        self,
+        plan: LogicalPlan,
+        name: str,
+        *,
+        mode: Literal["error", "overwrite", "append"] = "error",
+    ) -> None:
+        """Save the plan to a DuckDB table with mode and schema validation."""
+        valid_modes = {"error", "overwrite", "append"}
+        if mode not in valid_modes:
+            raise ValueError(
+                f"Unknown mode: {mode!r}; expected one of {sorted(valid_modes)}"
+            )
+
+        self._validate_execution(plan)
+        compiled = self._compiler.compile(plan)
+        visible = self._compiler.project_visible(compiled, plan)
+        visible_rel = visible.relation
+
+        con = self._session._connection
+        self._session._begin_execution()
+
+        escaped_table = quote_identifier(name)
+        tables_query = (
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'"
+        )
+        existing_tables = {row[0] for row in con.sql(tables_query).fetchall()}
+        table_exists = name in existing_tables
+
+        con.execute("BEGIN TRANSACTION")
+        try:
+            if mode == "error":
+                if table_exists:
+                    raise ValueError(f"Table '{name}' already exists in DuckDB session")
+                visible_rel.create(name)
+            elif mode == "overwrite":
+                if table_exists:
+                    con.execute(f"DROP TABLE {escaped_table}")
+                visible_rel.create(name)
+            else:  # mode == "append"
+                if not table_exists:
+                    visible_rel.create(name)
+                else:
+                    info_rows = con.sql(
+                        f"PRAGMA table_info({escaped_table})"
+                    ).fetchall()
+                    existing_columns = [str(row[1]) for row in info_rows]
+                    existing_types = {
+                        str(row[1]): str(row[2]).upper() for row in info_rows
+                    }
+
+                    incoming_columns = list(visible_rel.columns)
+                    incoming_types = {
+                        str(col): str(dtype).upper()
+                        for col, dtype in zip(
+                            visible_rel.columns, visible_rel.dtypes, strict=True
+                        )
+                    }
+
+                    if set(existing_columns) != set(incoming_columns):
+                        missing = set(existing_columns) - set(incoming_columns)
+                        extra = set(incoming_columns) - set(existing_columns)
+                        details: list[str] = []
+                        if missing:
+                            details.append(f"missing columns {sorted(missing)}")
+                        if extra:
+                            details.append(f"extra columns {sorted(extra)}")
+                        msg = (
+                            f"Schema mismatch when appending to table '{name}': "
+                            f"{', '.join(details)}"
+                        )
+                        raise ValueError(msg)
+
+                    type_mismatches = [
+                        f"column '{col}': expected {existing_types[col]}, "
+                        f"got {incoming_types[col]}"
+                        for col in existing_columns
+                        if existing_types[col] != incoming_types[col]
+                    ]
+                    if type_mismatches:
+                        msg = (
+                            f"Schema mismatch when appending to table '{name}': "
+                            f"{', '.join(type_mismatches)}"
+                        )
+                        raise ValueError(msg)
+
+                    if existing_columns != incoming_columns:
+                        project_exprs = [
+                            duckdb.SQLExpression(quote_identifier(col))
+                            for col in existing_columns
+                        ]
+                        insert_rel = visible_rel.project(*project_exprs)
+                    else:
+                        insert_rel = visible_rel
+
+                    insert_rel.insert_into(name)
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+    def commit(
+        self,
+        plan: LogicalPlan,
+        *,
+        compression: ParquetCompression = "snappy",
+        retain_previous: bool = False,
+        _before_replace: Callable[[], None] | None = None,
+    ) -> CommitReport:
+        import shutil
+        import time
+
+        t0 = time.perf_counter()
+
+        # 1. Find the single Parquet source scan
+        scans: list[ScanPlan] = []
+
+        def _walk(p: LogicalPlan) -> None:
+            if isinstance(p, ScanPlan):
+                scans.append(p)
+                return
+            if isinstance(
+                p,
+                (
+                    FilterPlan,
+                    ProjectPlan,
+                    SortPlan,
+                    LimitPlan,
+                    AggregatePlan,
+                    SamplePlan,
+                    LocIndexPlan,
+                ),
+            ):
+                _walk(p.input)
+                return
+            if isinstance(p, JoinPlan):
+                _walk(p.left)
+                _walk(p.right)
+                return
+            for inp in p.inputs:
+                _walk(inp)
+            return
+
+        _walk(plan)
+        if len(scans) != 1:
+            raise UnsupportedOperationError(
+                f"commit() requires exactly one source scan, found {len(scans)}"
+            )
+        scan = scans[0]
+        if not isinstance(scan.source, ParquetSource):
+            msg = (
+                f"commit() only supports ParquetSource, "
+                f"got {type(scan.source).__name__}"
+            )
+            raise UnsupportedOperationError(msg)
+        if len(scan.source.paths) != 1:
+            msg = (
+                "commit() currently requires a single Parquet file, "
+                "not multi-file paths"
+            )
+            raise UnsupportedOperationError(msg)
+
+        source_path_str = scan.source.paths[0]
+        if any(c in source_path_str for c in "*?[]"):
+            raise UnsupportedOperationError(
+                "commit() does not support wildcard or glob paths"
+            )
+
+        source_path = Path(source_path_str).resolve()
+        if not source_path.is_file():
+            raise FileNotFoundError(
+                f"Source Parquet file does not exist: {source_path}"
+            )
+        # 2. Capture initial source fingerprint before reading and compilation
+        initial_stat = source_path.stat()
+        initial_mtime_ns = initial_stat.st_mtime_ns
+        initial_size = initial_stat.st_size
+
+        # 3. Inspect original source schema, columns, and row count
+        con = self._session._connection
+        orig_rel = con.read_parquet(str(source_path))
+        orig_columns = list(orig_rel.columns)
+        orig_types = [str(t).upper() for t in orig_rel.dtypes]
+        orig_count_row = orig_rel.count("*").fetchone()
+        if orig_count_row is None:
+            raise MaterializationError("Failed to count rows in source Parquet file")
+        orig_count = int(cast("int", orig_count_row[0]))
+
+        # 3. Validate plan columns preserve schema (including hidden index columns)
+        col_by_label = {col.label: col for col in plan.metadata.columns}
+        missing_cols = set(orig_columns) - set(col_by_label.keys())
+        extra_cols = set(col_by_label.keys()) - set(orig_columns)
+        if missing_cols or extra_cols:
+            details: list[str] = []
+            if missing_cols:
+                details.append(f"missing {sorted(missing_cols)}")
+            if extra_cols:
+                details.append(f"extra {sorted(extra_cols)}")
+            raise UnsupportedOperationError(
+                f"commit() requires schema preservation; {', '.join(details)}"
+            )
+
+        # 4. Compile plan and project in the original source-column order
+        self._validate_execution(plan)
+        compiled = self._compiler.compile(plan)
+        self._session._begin_execution()
+
+        project_exprs = [
+            duckdb.SQLExpression(
+                quote_identifier(compiled.bindings[col_by_label[col].id])
+            ).alias(col)
+            for col in orig_columns
+        ]
+        commit_rel = compiled.relation.project(*project_exprs)
+
+        # Check types match original source types
+        commit_types = [str(t).upper() for t in commit_rel.dtypes]
+        type_mismatches = [
+            f"column '{col}': expected {orig_t}, got {cur_t}"
+            for col, orig_t, cur_t in zip(
+                orig_columns, orig_types, commit_types, strict=True
+            )
+            if orig_t != cur_t
+        ]
+        if type_mismatches:
+            msg = (
+                f"commit() cannot alter source column types: "
+                f"{', '.join(type_mismatches)}"
+            )
+            raise UnsupportedOperationError(msg)
+
+        # 6. Create unique staging file in the same directory
+        dest_dir = source_path.parent
+        staging_name = f".duckpd_staging_{source_path.stem}_{uuid4().hex}.parquet"
+        staging_path = dest_dir / staging_name
+
+        try:
+            # 7. Write to staging file directly via DuckDB
+            commit_rel.write_parquet(
+                str(staging_path),
+                compression=compression,
+                overwrite=True,
+            )
+
+            # 8. Validate output readability, row-preservation, and schema
+            staging_rel = con.read_parquet(str(staging_path))
+            staging_count_row = staging_rel.count("*").fetchone()
+            if staging_count_row is None:
+                raise MaterializationError(
+                    "Failed to count rows in staging Parquet file"
+                )
+            staging_count = int(cast("int", staging_count_row[0]))
+            if staging_count != orig_count:
+                msg = (
+                    f"commit() requires a row-preserving plan; "
+                    f"row count changed from {orig_count} to {staging_count}"
+                )
+                raise UnsupportedOperationError(msg)
+
+            staging_columns = list(staging_rel.columns)
+            if staging_columns != orig_columns:
+                msg = (
+                    f"Committed schema {staging_columns} "
+                    f"does not match original {orig_columns}"
+                )
+                raise ValueError(msg)
+
+            if _before_replace is not None:
+                _before_replace()
+
+            # 9. Concurrency guard: verify source has not been modified
+            current_stat = source_path.stat()
+            if (
+                current_stat.st_mtime_ns != initial_mtime_ns
+                or current_stat.st_size != initial_size
+            ):
+                msg = (
+                    f"Source file '{source_path}' was modified concurrently "
+                    "during commit"
+                )
+                raise ConcurrentModificationError(msg)
+
+            # 10. Optional retention of previous version
+            backup_path: str | None = None
+            if retain_previous:
+                backup_file = (
+                    dest_dir / f"{source_path.stem}_backup_{uuid4().hex[:8]}.parquet"
+                )
+                shutil.copy2(source_path, backup_file)
+                backup_path = str(backup_file)
+
+            # 11. Atomic replacement
+            os.replace(staging_path, source_path)
+            bytes_written = source_path.stat().st_size
+            t1 = time.perf_counter()
+
+            return CommitReport(
+                source_path=str(source_path),
+                staging_path=str(staging_path),
+                backup_path=backup_path,
+                rows_written=staging_count,
+                bytes_written=bytes_written,
+                duration_seconds=t1 - t0,
+            )
+        finally:
+            if staging_path.exists():
+                staging_path.unlink(missing_ok=True)
+
     def explain(
         self,
         plan: LogicalPlan,
@@ -427,7 +758,15 @@ class Executor:
             self._validate_loc_plan(plan)
             return
         if isinstance(
-            plan, (FilterPlan, ProjectPlan, SortPlan, LimitPlan, AggregatePlan)
+            plan,
+            (
+                FilterPlan,
+                ProjectPlan,
+                SortPlan,
+                LimitPlan,
+                AggregatePlan,
+                SamplePlan,
+            ),
         ):
             self._validate_execution(plan.input)
 

@@ -868,3 +868,104 @@ def test_clip_replace_and_rename_edge_cases() -> None:
         s.rename("new", level=1)
     with pytest.raises(UnsupportedOperationError, match="index labels"):
         s.rename({0: 1})
+
+
+def test_dataframe_and_series_sample() -> None:
+    pdf = pd.DataFrame(
+        {
+            "a": range(50),
+            "b": [f"val_{i}" for i in range(50)],
+        }
+    )
+    df = duckpd.from_pandas(pdf)
+    s = df["a"]
+
+    # Lazy plan building
+    from duckpd._logical import SamplePlan
+
+    sampled_df = df.sample(n=5, random_state=42)
+    assert isinstance(sampled_df._plan, SamplePlan)
+    assert sampled_df._plan.n == 5
+    assert sampled_df._plan.seed == 42
+
+    # Execution with n
+    res_df = sampled_df.collect()
+    assert len(res_df) == 5
+    assert list(res_df.columns) == ["a", "b"]
+
+    # Series sample with n
+    res_s = s.sample(n=7, random_state=42).collect()
+    assert len(res_s) == 7
+    assert isinstance(res_s, pd.Series)
+
+    # Determinism with same random_state
+    res_df2 = df.sample(n=5, random_state=42).collect()
+    assert res_df.equals(res_df2)
+    res_s2 = s.sample(n=7, random_state=42).collect()
+    assert res_s.equals(res_s2)
+
+    # frac exact count matching pandas on small/empty inputs
+    empty_pdf = pd.DataFrame({"x": [], "y": []})
+    empty_df = duckpd.from_pandas(empty_pdf)
+    assert len(empty_df.sample(0).collect()) == len(empty_pdf.sample(0))
+    assert len(empty_df.sample(frac=0.5).collect()) == len(empty_pdf.sample(frac=0.5))
+
+    small_pdf = pd.DataFrame({"x": range(7)})
+    small_df = duckpd.from_pandas(small_pdf)
+    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        assert len(small_df.sample(frac=frac).collect()) == len(
+            small_pdf.sample(frac=frac)
+        )
+        assert len(small_df["x"].sample(frac=frac).collect()) == len(
+            small_pdf["x"].sample(frac=frac)
+        )
+
+    # ignore_index True vs False
+    indexed_pdf = pd.DataFrame({"k": ["row1", "row2", "row3"], "v": [10, 20, 30]})
+    indexed_df = duckpd.from_pandas(indexed_pdf).set_index("k")
+    # With explicit index preserved
+    sample_idx_preserved = indexed_df.sample(
+        2, random_state=1, ignore_index=False
+    ).collect()
+    assert all(idx in ["row1", "row2", "row3"] for idx in sample_idx_preserved.index)
+    assert sample_idx_preserved.index.name == "k"
+    # With ignore_index
+    sample_idx_ignored = indexed_df.sample(
+        2, random_state=1, ignore_index=True
+    ).collect()
+    assert list(sample_idx_ignored.index) == [0, 1]
+
+    # Series ignore_index
+    s_indexed = indexed_df["v"]
+    s_sample_preserved = s_indexed.sample(
+        2, random_state=1, ignore_index=False
+    ).collect()
+    assert all(idx in ["row1", "row2", "row3"] for idx in s_sample_preserved.index)
+    s_sample_ignored = s_indexed.sample(2, random_state=1, ignore_index=True).collect()
+    assert list(s_sample_ignored.index) == [0, 1]
+
+    # Validation and error handling
+    with pytest.raises(UnsupportedOperationError, match="axis"):
+        df.sample(axis=1)
+    with pytest.raises(UnsupportedOperationError, match="axis"):
+        s.sample(axis="columns")
+    with pytest.raises(UnsupportedOperationError, match="replace=True"):
+        df.sample(replace=True)
+    with pytest.raises(UnsupportedOperationError, match="replace=True"):
+        s.sample(replace=True)
+    with pytest.raises(UnsupportedOperationError, match="weights"):
+        df.sample(weights=[1] * 50)
+    with pytest.raises(UnsupportedOperationError, match="weights"):
+        s.sample(weights=[1] * 50)
+    with pytest.raises(ValueError, match="Only one of 'n' or 'frac'"):
+        df.sample(n=5, frac=0.5)
+    with pytest.raises(ValueError, match="negative number"):
+        df.sample(n=-1)
+    with pytest.raises(ValueError, match="negative fraction"):
+        df.sample(frac=-0.1)
+    with pytest.raises(ValueError, match="integer"):
+        df.sample(n="5")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="float"):
+        df.sample(frac="0.5")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="random_state"):
+        df.sample(random_state="invalid")  # type: ignore[arg-type]

@@ -11,7 +11,7 @@ from uuid import uuid4
 import pandas as pd
 import pyarrow as pa
 
-from duckpd._executor import ProfileResult
+from duckpd._executor import CommitReport, ProfileResult
 from duckpd._logical import (
     AggregateExpression,
     AggregateOperator,
@@ -26,11 +26,15 @@ from duckpd._logical import (
     FilterPlan,
     FrameMetadata,
     FunctionCall,
+    IndexSpec,
     LimitPlan,
     LiteralValue,
     NamedExpression,
     NullPlacement,
+    OrderSpec,
+    ParquetSource,
     ProjectPlan,
+    SamplePlan,
     ScanPlan,
     SortDirection,
     SortKey,
@@ -189,6 +193,58 @@ class DataFrame:
             self._session,
             ScanPlan(TableSource(table_name), self._plan.metadata),
         )
+
+    def save_as_table(
+        self,
+        name: str,
+        *,
+        mode: Literal["error", "overwrite", "append"] = "error",
+    ) -> None:
+        """Save the DataFrame to a persistent DuckDB table in the current session.
+
+        Parameters
+        ----------
+        name : str
+            Table name to create or update.
+        mode : {'error', 'overwrite', 'append'}, default 'error'
+            - 'error': raise ValueError if table already exists.
+            - 'overwrite': drop existing table and create new table.
+            - 'append': append rows to existing table with schema validation.
+        """
+        self._session._executor.save_as_table(self._plan, name, mode=mode)
+
+    def commit(
+        self,
+        *,
+        compression: ParquetCompression = "snappy",
+        retain_previous: bool = False,
+        _before_replace: Callable[[], None] | None = None,
+    ) -> CommitReport:
+        """Atomically commit transformations back to a single Parquet source.
+
+        Parameters
+        ----------
+        compression : ParquetCompression, default 'snappy'
+            Parquet compression codec for the committed file.
+        retain_previous : bool, default False
+            If True, preserve previous version as a backup file in source directory.
+
+        Returns
+        -------
+        CommitReport
+            Structured summary of the commit operation.
+        """
+        report = self._session._executor.commit(
+            self._plan,
+            compression=compression,
+            retain_previous=retain_previous,
+            _before_replace=_before_replace,
+        )
+        self._plan = ScanPlan(
+            ParquetSource((report.source_path,)),
+            self._plan.metadata,
+        )
+        return report
 
     def explain(
         self,
@@ -1355,6 +1411,78 @@ class DataFrame:
             self._session,
             LimitPlan(self._plan, count, offset, self._plan.metadata),
         )
+
+    def sample(
+        self,
+        n: int | None = None,
+        frac: float | None = None,
+        replace: bool = False,
+        weights: object = None,
+        random_state: int | None = None,
+        axis: int | str | None = None,
+        ignore_index: bool = False,
+    ) -> DataFrame:
+        """Return a random sample of items from the DataFrame.
+
+        Builds an immutable lazy plan using DuckDB reservoir or Bernoulli sampling.
+        """
+        if axis not in (0, "index", None):
+            raise UnsupportedOperationError(
+                "DuckPD sample supports only axis=0 or axis='index'"
+            )
+        if replace is not False:
+            raise UnsupportedOperationError(
+                "DuckPD sample does not currently support replace=True"
+            )
+        if weights is not None:
+            raise UnsupportedOperationError(
+                "DuckPD sample does not currently support weights"
+            )
+        if n is not None and frac is not None:
+            raise ValueError("Only one of 'n' or 'frac' can be specified")
+        if n is None and frac is None:
+            n = 1
+        if n is not None:
+            if isinstance(n, bool) or not isinstance(cast("object", n), int):
+                raise ValueError(f"'n' must be an integer, got {type(n).__name__}")
+            if n < 0:
+                raise ValueError("A negative number of rows was requested")
+        if frac is not None:
+            if isinstance(frac, bool) or not isinstance(
+                cast("object", frac), (int, float)
+            ):
+                raise ValueError(f"'frac' must be a float, got {type(frac).__name__}")
+            if frac < 0.0:
+                raise ValueError("A negative fraction of rows was requested")
+        if random_state is not None and (
+            isinstance(random_state, bool)
+            or not isinstance(cast("object", random_state), int)
+        ):
+            raise ValueError("random_state must be an integer seed or None")
+
+        metadata = FrameMetadata(
+            columns=self._plan.metadata.columns,
+            index=self._plan.metadata.index,
+            ordering=OrderSpec(),
+        )
+        if ignore_index:
+            if metadata.index.columns:
+                metadata = reset_index_metadata(metadata, drop=True)
+            else:
+                metadata = FrameMetadata(
+                    columns=self._plan.metadata.columns,
+                    index=IndexSpec(),
+                    ordering=OrderSpec(),
+                )
+
+        plan = SamplePlan(
+            input=self._plan,
+            n=n,
+            frac=float(frac) if frac is not None else None,
+            seed=random_state,
+            metadata=metadata,
+        )
+        return DataFrame(self._session, plan)
 
     def set_index(self, keys: str | Sequence[str], *, drop: bool = True) -> DataFrame:
         """Set one or more existing columns as an explicit lazy index."""

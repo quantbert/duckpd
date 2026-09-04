@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import multiprocessing
 import platform
-import resource
 import statistics
 import sys
 import time
@@ -21,7 +20,6 @@ from benchmark.workloads import Workload
 
 def get_peak_rss_bytes() -> int:
     """Return peak resident set size (RSS) in bytes for current process."""
-    # Check /proc/self/status on Linux for exact VmHWM if possible
     if sys.platform.startswith("linux"):
         try:
             with open("/proc/self/status") as f:
@@ -33,11 +31,53 @@ def get_peak_rss_bytes() -> int:
         except OSError:
             pass
 
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss is in KiB on Linux, in bytes on macOS/BSD
-    if platform.system() == "Darwin":
-        return usage.ru_maxrss
-    return usage.ru_maxrss * 1024
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(
+                handle, ctypes.byref(counters), counters.cb
+            ):
+                return int(counters.PeakWorkingSetSize)
+        except Exception:
+            pass
+
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        if platform.system() == "Darwin":
+            return usage.ru_maxrss
+        return usage.ru_maxrss * 1024
+    except ImportError:
+        pass
+
+    try:
+        import psutil
+
+        return int(psutil.Process().memory_info().rss)
+    except ImportError:
+        pass
+
+    return 0
 
 
 def human_bytes(size: float | int) -> str:

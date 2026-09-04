@@ -35,6 +35,7 @@ from duckpd._logical import (
     PandasSource,
     ParquetSource,
     ProjectPlan,
+    SamplePlan,
     ScanPlan,
     SortDirection,
     SortKey,
@@ -186,8 +187,26 @@ class DuckDBCompiler:
             return CompiledFrame(
                 compiled_input.relation.sort(*keys), compiled_input.bindings
             )
+        if isinstance(plan, SamplePlan):
+            clause = self._compile_sample_clause(plan)
+            query = f"SELECT * FROM _subquery_to_sample USING SAMPLE {clause}"
+            relation = compiled_input.relation.query("_subquery_to_sample", query)
+            return CompiledFrame(relation, compiled_input.bindings)
         relation = compiled_input.relation.limit(plan.count, offset=plan.offset)
         return CompiledFrame(relation, compiled_input.bindings)
+
+    def _compile_sample_clause(self, plan: SamplePlan) -> str:
+        if plan.n is not None:
+            clause = f"reservoir({plan.n} ROWS)"
+        elif plan.frac is not None:
+            pct = plan.frac * 100.0
+            clause = f"reservoir({pct} PERCENT)"
+        else:
+            clause = "reservoir(1 ROWS)"
+
+        if plan.seed is not None:
+            clause += f" REPEATABLE ({plan.seed})"
+        return clause
 
     def compile_expression(
         self, expression: Expression, bindings: dict[ColumnId, str]

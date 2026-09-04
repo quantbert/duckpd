@@ -101,36 +101,12 @@ def test_constrained_memory_spill_and_isolated_rss() -> None:
     """Validate DuckDB spills to disk and child RSS is bounded under memory limits."""
     child_code = """
 import json
-import os
-import platform
 import sys
 import tempfile
 from pathlib import Path
 
 import duckpd
-
-def get_rss():
-    if sys.platform.startswith("linux"):
-        try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmHWM:"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            return int(parts[1]) * 1024
-        except OSError:
-            pass
-
-    try:
-        import resource
-
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        if platform.system() == "Darwin":
-            return usage.ru_maxrss
-        return usage.ru_maxrss * 1024
-    except ImportError:
-        return 0
-
+from benchmark.metrics import get_peak_rss_bytes
 with tempfile.TemporaryDirectory() as tmpdir:
     spill_dir = Path(tmpdir) / "spill"
     spill_dir.mkdir(parents=True, exist_ok=True)
@@ -154,7 +130,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         print(json.dumps({
             "peak_temp_dir_size": prof.peak_temp_dir_size,
             "peak_buffer_memory": prof.peak_buffer_memory,
-            "child_rss_bytes": get_rss(),
+            "child_rss_bytes": get_peak_rss_bytes(),
             "rows_returned": prof.rows_returned,
         }))
 """

@@ -507,6 +507,17 @@ class LocIndexPlan(LogicalPlanBase):
     source_order_label: str
 
 
+@dataclass(frozen=True)
+class SamplePlan(LogicalPlanBase):
+    """Sample a subset of rows from an input plan."""
+
+    input: LogicalPlan
+    n: int | None
+    frac: float | None
+    seed: int | None
+    metadata: FrameMetadata
+
+
 LogicalPlan: TypeAlias = (
     ScanPlan
     | FilterPlan
@@ -517,4 +528,5 @@ LogicalPlan: TypeAlias = (
     | JoinPlan
     | UnionPlan
     | LocIndexPlan
+    | SamplePlan
 )

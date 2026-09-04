@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 
 import duckpd as dp
-from duckpd.errors import UnorderedOperationError
+from duckpd import CommitReport, ConcurrentModificationError
+from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
 
 
 def test_csv_read_write_differential(tmp_path: Path) -> None:
@@ -394,3 +395,140 @@ def test_loc_list_enables_deterministic_positional_and_window_operations() -> No
     cumsum = reordered["val"].cumsum().collect()
     expected_cumsum = pdf.set_index("id").loc[[4, 2, 1]]["val"].cumsum()
     pd.testing.assert_series_equal(cumsum, expected_cumsum)
+
+
+def test_save_as_table() -> None:
+    with dp.connect() as session:
+        pdf = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+        df = session.from_pandas(pdf)
+
+        # 1. Default mode is "error", creates new table
+        df.save_as_table("tbl_test")
+        read1 = session.table("tbl_test").collect()
+        pd.testing.assert_frame_equal(read1, pdf)
+
+        # 2. Saving again with mode="error" raises ValueError
+        with pytest.raises(ValueError, match="already exists"):
+            df.save_as_table("tbl_test", mode="error")
+
+        # 3. Overwrite mode replaces content
+        pdf_over = pd.DataFrame({"a": [10], "b": ["z"]})
+        session.from_pandas(pdf_over).save_as_table("tbl_test", mode="overwrite")
+        read2 = session.table("tbl_test").collect()
+        pd.testing.assert_frame_equal(read2, pdf_over)
+
+        # 4. Append mode appends rows (even if columns are reordered)
+        pdf_app = pd.DataFrame({"b": ["w"], "a": [20]})
+        session.from_pandas(pdf_app).save_as_table("tbl_test", mode="append")
+        read3 = session.table("tbl_test").collect()
+        expected_app = pd.DataFrame({"a": [10, 20], "b": ["z", "w"]})
+        pd.testing.assert_frame_equal(read3, expected_app)
+
+        # 5. Append mode to non-existent table creates it
+        session.from_pandas(pdf).save_as_table("tbl_new", mode="append")
+        pd.testing.assert_frame_equal(session.table("tbl_new").collect(), pdf)
+
+        # 6. Append mode with missing/extra columns raises ValueError
+        pdf_extra = pd.DataFrame({"a": [1], "b": ["x"], "c": [99]})
+        with pytest.raises(ValueError, match="Schema mismatch when appending"):
+            session.from_pandas(pdf_extra).save_as_table("tbl_test", mode="append")
+
+        # 7. Append mode with same column names but incompatible type raises ValueError
+        pdf_bad_type = pd.DataFrame({"a": ["not_an_int"], "b": ["valid_str"]})
+        with pytest.raises(ValueError, match="column 'a': expected"):
+            session.from_pandas(pdf_bad_type).save_as_table("tbl_test", mode="append")
+
+        # 8. Failed append leaves original table intact
+        read_after_fail = session.table("tbl_test").collect()
+        pd.testing.assert_frame_equal(read_after_fail, expected_app)
+        # 9. Invalid mode raises ValueError
+        with pytest.raises(ValueError, match="Unknown mode"):
+            df.save_as_table("tbl_test", mode="invalid")  # type: ignore[arg-type]
+
+
+def test_parquet_atomic_commit_with_index_preservation(tmp_path: Path) -> None:
+    src_file = tmp_path / "data.parquet"
+    pdf = pd.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+    pdf.to_parquet(src_file)
+
+    df = dp.read_parquet(src_file, index="id")
+    df["val"] = df["val"] * 2
+
+    report = df.commit(retain_previous=True)
+    assert isinstance(report, CommitReport)
+    assert report.rows_written == 3
+    assert report.bytes_written > 0
+    assert report.backup_path is not None
+    assert Path(report.backup_path).exists()
+
+    # File on disk preserves original column order (including index) and updated values
+    disk_pdf = pd.read_parquet(src_file)
+    assert list(disk_pdf.columns) == ["id", "val"]
+    assert disk_pdf["val"].tolist() == [20, 40, 60]
+    assert disk_pdf["id"].tolist() == [1, 2, 3]
+
+    # DataFrame handle reflects committed state and continues working
+    res = df.collect()
+    assert res["val"].tolist() == [20, 40, 60]
+    assert res.index.name == "id"
+
+
+def test_parquet_atomic_commit_rejections(tmp_path: Path) -> None:
+    src_file = tmp_path / "source.parquet"
+    pdf = pd.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+    pdf.to_parquet(src_file)
+
+    df = dp.read_parquet(src_file, index="id")
+
+    # 1. Filtered plans are rejected (must be row-preserving)
+    filtered = df[df["val"] > 10]
+    with pytest.raises(UnsupportedOperationError, match="row-preserving plan"):
+        filtered.commit()
+
+    # 2. Schema-altering plans (extra columns) are rejected
+    extra = df.assign(extra=100)
+    with pytest.raises(UnsupportedOperationError, match="schema preservation"):
+        extra.commit()
+
+    # 3. Non-Parquet source is rejected
+    mem_df = dp.from_pandas(pdf)
+    with pytest.raises(UnsupportedOperationError, match="only supports ParquetSource"):
+        mem_df.commit()
+
+
+def test_parquet_atomic_commit_concurrency_and_failure_injection(
+    tmp_path: Path,
+) -> None:
+    import os
+    import time
+
+    src_file = tmp_path / "concurrency.parquet"
+    pdf = pd.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+    pdf.to_parquet(src_file)
+
+    df = dp.read_parquet(src_file, index="id")
+    df["val"] = df["val"] + 100
+
+    # 1. Concurrent modification raises ConcurrentModificationError
+    def touch_concurrent() -> None:
+        time.sleep(0.01)
+        os.utime(src_file, None)
+
+    with pytest.raises(ConcurrentModificationError, match="modified concurrently"):
+        df.commit(_before_replace=touch_concurrent)
+
+    # 2. Failure injection leaves original file intact and staging cleaned up
+    def blow_up() -> None:
+        raise RuntimeError("Simulated failure")
+
+    with pytest.raises(RuntimeError, match="Simulated failure"):
+        df.commit(_before_replace=blow_up)
+
+    # Original file is intact and readable
+    disk_pdf = pd.read_parquet(src_file)
+    assert disk_pdf["val"].tolist() == [10, 20, 30]
+    assert disk_pdf["id"].tolist() == [1, 2, 3]
+
+    # Staging files are cleaned up
+    staging_files = list(tmp_path.glob(".duckpd_staging_*"))
+    assert len(staging_files) == 0
