@@ -356,7 +356,9 @@ class Executor:
             self._session._begin_execution()
             compiled = self._compiler.compile(plan)
             visible_rel = self._compiler.project_visible(compiled, plan).relation
-            visible_rel.fetchall()
+            reader = visible_rel.to_arrow_reader()
+            for _ in reader:
+                pass
         finally:
             con.execute("PRAGMA disable_profiling")
 

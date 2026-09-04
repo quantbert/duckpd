@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -92,6 +95,81 @@ def test_constrained_memory_execution_completes() -> None:
                 .collect()
             )
             assert len(reduced) == 50
+
+
+def test_constrained_memory_spill_and_isolated_rss() -> None:
+    """Validate DuckDB spills to disk and child RSS is bounded under memory limits."""
+    child_code = """
+import json
+import os
+import platform
+import sys
+import tempfile
+from pathlib import Path
+
+import duckpd
+
+def get_rss():
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmHWM:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return int(parts[1]) * 1024
+        except OSError:
+            pass
+
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        if platform.system() == "Darwin":
+            return usage.ru_maxrss
+        return usage.ru_maxrss * 1024
+    except ImportError:
+        return 0
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    spill_dir = Path(tmpdir) / "spill"
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    with duckpd.connect(
+        memory_limit="20MB",
+        temp_directory=spill_dir,
+        max_temp_directory_size="1GB",
+        threads=1,
+    ) as session:
+        frame = session.sql(\"\"\"
+            SELECT
+                i as id,
+                (i * 1.5)::DOUBLE as val,
+                repeat('x', 100) as payload
+            FROM range(500000) t(i)
+        \"\"\")
+        sorted_frame = frame.sort_values("val", ascending=False)
+        agg = sorted_frame.groupby("id", as_index=False).agg(cnt=("val", "count"))
+        prof = agg.profile()
+
+        print(json.dumps({
+            "peak_temp_dir_size": prof.peak_temp_dir_size,
+            "peak_buffer_memory": prof.peak_buffer_memory,
+            "child_rss_bytes": get_rss(),
+            "rows_returned": prof.rows_returned,
+        }))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", child_code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    result = json.loads(proc.stdout.strip())
+    assert result["rows_returned"] == 500000
+    assert result["peak_temp_dir_size"] > 0, "DuckDB must spill to disk"
+    assert result["peak_buffer_memory"] > 0
+    if result["child_rss_bytes"] > 0:
+        assert result["child_rss_bytes"] < 350 * 1024 * 1024
 
 
 def test_explain_modes() -> None:

@@ -509,12 +509,15 @@ Goal: make execution boundaries safe and explainable.
 
 Exit gate:
 
-- [ ] A generated data test larger than the configured memory budget completes
+- [x] A generated data test larger than the configured memory budget completes
       with a configured spill directory and measured bounded process memory.
-      The current constrained-memory smoke test does not measure RSS or spill bytes.
-- [ ] Augment benchmark reporting and `test_execution_limits.py` to capture true
-      process peak RSS (`getrusage`/`psutil`) and verify DuckDB temporary spill file
+- [x] Augment benchmark reporting and `test_execution_limits.py` to capture true
+      process peak RSS (`getrusage`/`/proc/self/status`) and verify DuckDB temporary spill file
       generation during constrained-memory sorts and joins.
+- [ ] Windows CI cross-platform memory sampling: Windows CI currently returns `0`
+      and skips the RSS assertion because `resource` is unavailable; add true
+      cross-platform sampling (e.g. `psutil` or Windows peak working set) so bounded
+      RSS is explicitly verified on Windows CI.
 - [x] A test forbids pandas conversion methods during every direct sink.
 
 ### Phase 9: lazy mutation and safe local commit
@@ -681,6 +684,8 @@ Implement in this order. Each increment should be independently testable.
 15. [x] Structured profiling (`df.profile()`) exposing DuckDB operator and I/O
        timings, plus native process RSS and DuckDB spill byte metrics in
        benchmarks and execution limits.
+   - [ ] Add cross-platform memory sampling (`psutil` or Windows peak working set)
+         so Windows CI asserts bounded RSS instead of skipping when returning 0.
 16. [ ] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
 17. [ ] Narwhals lazy frame compliance plugin prototype, compatibility matrix
@@ -708,6 +713,7 @@ graph TD
 3. **Stream 3: Observability & Memory Profiling (Phase 8)**
    - `df.profile()` exposing DuckDB structured JSON profiling (operator timings, spill, I/O).
    - Augment benchmark suite and `test_execution_limits.py` to capture true process peak RSS (`getrusage`/`psutil`) and verify DuckDB temporary spill files.
+   - Follow-up: implement cross-platform memory sampling (`psutil` or Windows working set) so Windows CI asserts bounded RSS rather than skipping when returning 0.
 4. **Stream 4: Atomic Commit & Persistent Sinks (Phases 8 & 9)**
    - Local Parquet atomic `commit()`: staging file -> validate row count/schema/fingerprint -> atomic `os.replace`.
    - Persistent DuckDB sinks: `save_as_table(name, mode="overwrite"|"append")`.
