@@ -82,6 +82,10 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | Function | Classification | Supported Parameters | Returns | Notes / Status |
 | :--- | :--- | :--- | :--- | :--- |
 | `duckpd.connect(...)` | **`[DuckPD Extension]`** | `memory_limit`, `threads`, `temp_directory`, `max_temp_directory_size`, `read_only` | `Session` | Configures isolated DuckDB connection & resource limits. |
+| `Session.attach_postgres(alias, ...)` | **`[DuckPD Extension]`** | Structured `host`, `database`, `user`, `password`, optional `port`, `schema`, `sslmode`; or a caller-managed DuckDB `secret`; `unbounded_scan` | `AttachedDatabase` | Installs/loads DuckDB's PostgreSQL extension and creates a `READ_ONLY` attachment. Credentials are excluded from frame plans, explanations, errors, and reprs. |
+| `Session.attach_mysql(alias, ...)` | **`[DuckPD Extension]`** | Structured `host`, `database`, `user`, `password`, optional `port`; or a caller-managed DuckDB `secret`; `unbounded_scan` | `AttachedDatabase` | Installs/loads DuckDB's MySQL extension and creates a `READ_ONLY` attachment. |
+| `AttachedDatabase.table(name, ...)` | **`[DuckPD Extension]`** | `schema`, `index`, `order_by`, `unbounded_scan` | `DataFrame` | Creates a lazy remote-table frame. Each execution sees data committed before that execution; `persist()` is the explicit snapshot boundary. |
+| `AttachedDatabase.refresh_schema()` / `.detach()` | **`[DuckPD Extension]`** | None | `None` | Clears the extension schema cache or explicitly releases the attachment. Session shutdown also detaches and removes DuckPD-owned temporary secrets. |
 | `duckpd.read_parquet(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `hive_partitioning`, `union_by_name`, `index`, `order_by` | `DataFrame` | Lazy Parquet scan. Supports `order_by` and `index` declarations. |
 | `duckpd.read_csv(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `header`, `delimiter`, `auto_detect`, `index`, `order_by` | `DataFrame` | Lazy CSV scan via DuckDB reader. Supports `order_by` and `index` declarations. |
 | `duckpd.from_pandas(df, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a snapshot into a session, tracking hidden source row identity. |
@@ -128,6 +132,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `df.rolling(window, ...)` | **`[Intentional Deviation]`** | `window`, `min_periods`, `center=False` | Rolling window object (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`) (requires `OrderSpec`). |
 | `df.expanding(...)` | **`[Intentional Deviation]`** | `min_periods` | Expanding window object (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`) (requires `OrderSpec`). |
 | `df.groupby(by, ...)` | **`[Pandas-API Subset]`** | `by`, `as_index`, `sort`, `dropna` | Creates `DataFrameGroupBy` builder. |
+| `df.groupby(...).rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False` | Row-based `DataFrameGroupBy` and `SeriesGroupBy` windows (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`). Group keys compile to window partitions; source `OrderSpec` defines order within each group. Results preserve pandas grouped index layout, and direct assignment to the originating frame uses row-preserving lazy alignment. |
 | `df.merge(right, ...)` | **`[Intentional Deviation]`** | `how`, `on`, `left_on`, `right_on`, `left_index`, `right_index`, `suffixes`, `sort`, `validate` | Relational join with pandas null-key semantics (`IS NOT DISTINCT FROM`) and lazy cardinality validation. Clears total ordering guarantees. |
 | `df.join(other, ...)` | **`[Intentional Deviation]`** | `how`, `lsuffix`, `rsuffix`, `sort`, `validate` | Index-based join convenience method supporting cardinality validation. Clears total ordering guarantees. |
 | `df.collect()` / `to_pandas()` | **`[DuckPD Extension]`** | None | Executes plan and returns pandas DataFrame. |
@@ -142,6 +147,13 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `df.profile()` | **`[DuckPD Extension]`** | None | Executes plan with DuckDB profiling enabled and returns structured `ProfileResult` metrics. |
 | `df.save_as_table(name, ...)` | **`[DuckPD Extension]`** | `name`, `mode='error'\|'overwrite'\|'append'` | Direct DuckDB table persistence with schema validation and transactional failure rollback. |
 | `df.commit(...)` | **`[DuckPD Extension]`** | `compression='snappy'`, `retain_previous=False` | Atomic in-place commit to one canonical local Parquet source with row count, DuckDB logical types, and Arrow schema/pandas metadata preservation. POSIX mode and available extended attributes are copied; Windows replacement metadata is preserved by `ReplaceFileW`. Owner/group, Parquet encodings, and physical layout are not guaranteed. Single-writer only; unrelated writers are not locked. |
+
+Grouped rolling collection is a narrow exception to DuckPD's general
+MultiIndex non-goal: `as_index=True` returns pandas' group-key-prefixed
+MultiIndex, while `as_index=False` keeps group keys as columns and retains the
+source index. Assignment does not align through that collected index; it keeps
+the uncollected window expression attached to source row identity, so duplicate
+source indexes cannot cause a join or Cartesian expansion.
 
 ---
 
@@ -259,7 +271,7 @@ result to `narwhals.from_native()`; this remains lazy.
 
 * **Hidden Row Identity**: Pandas and Arrow snapshots carry a hidden stable row identity. It is never exposed in columns, indexes, Arrow output, or file sinks.
 * **Deterministic Tie-Breaking**: User sorts append row identity only as a final tie-breaker. External scans do not acquire an artificial order.
-* **Stable Identity Operations**: `drop_duplicates`, `rank(method="first")`, top-N ties, and `groupby(sort=False)` use stable row identity where available.
+* **Stable Identity Operations**: `drop_duplicates`, `rank(method="first")`, top-N ties, `groupby(sort=False)`, and grouped rolling alignment use stable row identity where available.
 * **Join Ordering Destruction**: Joins do not claim a total order, including with `sort=True`, because duplicate merge keys lack a stable tie-breaker. Ordering-sensitive follow-up operations must explicitly sort by enough columns to break ties.
 * **Explicit Session Isolation**: Module-level helpers share a weak context-local implicit session. Explicit sessions created via `duckpd.connect(...)` remain isolated, configurable, and authoritative for resource management and cleanup.
 

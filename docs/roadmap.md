@@ -31,7 +31,9 @@ of "beat FireDucks" live in
 ### Initial non-goals
 
 - Drop-in compatibility with arbitrary pandas code.
-- MultiIndex or duplicate displayed column labels.
+- General MultiIndex construction/manipulation or duplicate displayed column
+  labels. Grouped rolling collection may emit pandas' group-key-prefixed
+  MultiIndex as a narrowly defined result contract.
 - Arbitrary row-wise `apply(axis=1)`.
 - Python `object` dtype compatibility beyond a documented safe subset.
 - Positional operations when stable ordering is unknown.
@@ -439,10 +441,10 @@ Goal: add positional and order-sensitive behavior only on sound foundations.
       window row numbers and counts.
 - [x] Implement expanding and rolling `count`, `sum`, `mean`, `min`, `max`,
       `std`, and `var` for row-based windows first.
-- [ ] Implement pandas-compatible `DataFrameGroupBy.rolling()` and
+- [x] Implement pandas-compatible `DataFrameGroupBy.rolling()` and
       `SeriesGroupBy.rolling()` for row-based windows, compiling group keys to
       window partitions while preserving explicit ordering within each group.
-- [ ] Support alignment-safe assignment of grouped rolling results back to the
+- [x] Support alignment-safe assignment of grouped rolling results back to the
       originating frame without materialization; arbitrary Python
       `GroupBy.transform` callbacks remain out of scope.
 - [ ] Add time-based rolling windows only after timezone and closed-boundary
@@ -587,30 +589,32 @@ Exit gate:
 
 Goal: broaden sources after local semantics are stable.
 
-- [ ] Make safe, read-only `Session.attach_postgres()` and
+- [x] Make safe, read-only `Session.attach_postgres()` and
       `Session.attach_mysql()` APIs the first Phase 11 priority. Attached tables
       return lazy DuckPD frames that re-read committed source data at each
       execution boundary; `persist()` remains the explicit snapshot operation.
-- [ ] Keep connection setup outside `Session.sql()`: use DuckDB secrets or
+- [x] Keep connection setup outside `Session.sql()`: use DuckDB secrets or
       structured connection parameters, default attachments to `READ_ONLY`, and
       redact credentials from plans, logs, exceptions, and reprs.
-- [ ] Test extension installation/loading, session ownership and cleanup,
+- [x] Test extension installation/loading, session ownership and cleanup,
       transaction visibility, schema-cache invalidation, and repeated
-      `collect()` behavior against supported PostgreSQL and MySQL versions.
-- [ ] Expose source identity and known pushdown capabilities in `explain()` and
+      `collect()` behavior against PostgreSQL 17 and MySQL 8.4.
+- [x] Expose source identity and known pushdown capabilities in `explain()` and
       warn or fail before unexpectedly large network scans where transfer cannot
       be bounded.
 - [ ] Support HTTP/S3/GCS Parquet through DuckDB configuration and secrets.
 - [ ] Test projection, predicate, and row-group pruning with `EXPLAIN ANALYZE`.
 - [ ] Add safe `Session.attach_sqlite()` support after the PostgreSQL and MySQL
       attachment contract is established.
-- [ ] Introduce `SourceCapabilities` for projection, filter, aggregation, join,
+- [x] Introduce `SourceCapabilities` for projection, filter, aggregation, join,
       window, limit, and sort pushdown.
 - [ ] Add a backend-neutral source fragment to the IR before implementing a
       split planner.
 - [ ] Compile supported fragments to source-native SQL, stream reduced results
       through Arrow, and finish unsupported work in DuckDB.
-- [ ] Add cost and safety guards against unexpectedly large network scans.
+- [x] Add safety guards against unexpectedly large network scans.
+- [ ] Add source-specific cost estimates once transferred-row or byte estimates
+      are available from DuckDB extension plans.
 - [ ] Use versioned object paths plus a manifest/catalog for remote replacement;
       do not claim atomic rename semantics on object stores.
 - [ ] Delegate recurring row-level updates to DuckDB, Iceberg, or DuckLake
@@ -686,7 +690,11 @@ product contract must remain explicitly unsupported and fail before execution.
 - [ ] Complete schema conversion for decimal, timestamp/time-zone, duration,
       list, array, struct, and enum DuckDB types instead of reporting `Unknown`.
 - [ ] Implement namespace I/O that maps Narwhals `scan_csv` and `scan_parquet`
-      to DuckPD lazy scans, plus lazy `sink_parquet` without pandas conversion.
+      to DuckPD lazy scans. Narwhals 2.25.0 still routes a plugin name through
+      `Implementation.UNKNOWN.to_native_namespace()` before entry-point
+      dispatch, so public plugin scans fail upstream; direct DuckPD readers
+      followed by `nw.from_native()` remain lazy. Lazy `sink_parquet` is
+      implemented.
 - [x] Define collection backends deliberately: Arrow first, pandas only when
       explicitly requested, and Polars rejected without changing `to_native()`.
 - [x] Normalize missing-column, duplicate-column, invalid-operation, and
@@ -780,15 +788,14 @@ decomposed into independently testable milestones below.
           defined in Stream 2 below.
 19. [x] Add observable, semantics-preserving optimizer passes with Linux
         benchmark proof as defined in Stream 3 below.
-20. [ ] Add pandas-compatible grouped row-based rolling windows as the next
-        product priority.
-    - [ ] Implement `DataFrameGroupBy.rolling()` and `SeriesGroupBy.rolling()`
+20. [x] Add pandas-compatible grouped row-based rolling windows.
+    - [x] Implement `DataFrameGroupBy.rolling()` and `SeriesGroupBy.rolling()`
           using DuckDB window partitions and DuckPD's explicit ordering metadata.
-    - [ ] Preserve pandas index and alignment semantics so grouped rolling
+    - [x] Preserve pandas index and alignment semantics so grouped rolling
           features can be assigned back to their originating frame lazily.
-    - [ ] Add differential tests for multiple keys, null keys, duplicate order
+    - [x] Add differential tests for multiple keys, null keys, duplicate order
           keys, insufficient window periods, and unordered-input failures.
-    - [ ] Update the compatibility matrix and README with a validated
+    - [x] Update the compatibility matrix and README with a validated
           multi-ticker moving-average crossover example.
 21. [ ] Add safe, read-only `Session.attach_postgres()` and
       `Session.attach_mysql()` APIs as the next product priority, with

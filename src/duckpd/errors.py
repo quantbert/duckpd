@@ -13,6 +13,14 @@ class UnsupportedOperationError(DuckPDError, NotImplementedError):
     """Raised when DuckPD cannot translate an operation safely."""
 
 
+class RemoteAttachmentError(DuckPDError):
+    """Raised when a remote database cannot be attached safely."""
+
+
+class RemoteScanWarning(UserWarning):
+    """Warn that a remote query has no proven transfer bound."""
+
+
 class UnorderedOperationError(DuckPDError):
     """Raised when an operation requires a stable row order."""
 

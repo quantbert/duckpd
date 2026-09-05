@@ -73,11 +73,16 @@ class Series:
         plan: LogicalPlan,
         expression: Expression,
         name: str | None = None,
+        *,
+        alignment_source: LogicalPlan | None = None,
+        alignment_expression: Expression | None = None,
     ) -> None:
         self._session = session
         self._plan = plan
         self._expression = expression
         self.name = name
+        self._alignment_source = alignment_source
+        self._alignment_expression = alignment_expression
 
     def rename(
         self,

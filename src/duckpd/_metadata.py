@@ -238,11 +238,14 @@ def after_union(
     columns: tuple[Column, ...],
     *,
     index_ids: tuple[ColumnId, ...] = (),
+    index_names: tuple[str | None, ...] = (),
     ordering_keys: tuple[OrderColumn, ...] = (),
     identity_ids: tuple[ColumnId, ...] = (),
 ) -> FrameMetadata:
     """Create metadata for a union (concat) plan."""
-    index = IndexSpec(index_ids, drop=True) if index_ids else IndexSpec()
+    index = (
+        IndexSpec(index_ids, drop=True, names=index_names) if index_ids else IndexSpec()
+    )
     identity_ids = tuple(identity_ids)
     result = FrameMetadata(
         columns,
@@ -310,6 +313,10 @@ def _after_transform(
 def validate_metadata(metadata: FrameMetadata) -> None:
     """Reject metadata that references columns absent from the schema."""
     available = {column.id for column in metadata.columns}
+    if metadata.index.names and len(metadata.index.names) != len(
+        metadata.index.columns
+    ):
+        raise AssertionError("Index names must match the number of index columns")
     dangling = set(metadata.index.columns) - available
     dangling.update(
         key.column_id

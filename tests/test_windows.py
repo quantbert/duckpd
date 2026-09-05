@@ -392,6 +392,179 @@ def test_dataframe_rolling_and_expanding_differential() -> None:
     )
 
 
+def test_series_groupby_rolling_matches_pandas_with_multiple_keys() -> None:
+    source = pd.DataFrame(
+        {
+            "row": [10, 11, 12, 13, 14, 15, 16],
+            "ticker": ["B", "A", "B", "A", None, "B", "A"],
+            "venue": ["X", "X", "X", "Y", "X", "X", "X"],
+            "sequence": [1, 1, 2, 2, 2, 3, 3],
+            "close": [10.0, 20.0, 12.0, 22.0, 30.0, 14.0, 24.0],
+        }
+    )
+    pandas_frame = source.set_index("row")
+    session = dp.connect()
+    frame = session.from_pandas(source, index="row", order_by="sequence")
+
+    result = (
+        frame.groupby(
+            ["ticker", "venue"],
+            sort=False,
+            dropna=False,
+        )["close"]
+        .rolling(3, min_periods=2)
+        .mean()
+    )
+
+    assert session.execution_count == 0
+    expected = (
+        pandas_frame.groupby(
+            ["ticker", "venue"],
+            sort=False,
+            dropna=False,
+        )["close"]
+        .rolling(3, min_periods=2)
+        .mean()
+    )
+    pd.testing.assert_series_equal(cast("dp.Series", result).collect(), expected)
+    assert session.execution_count == 1
+
+
+def test_dataframe_groupby_rolling_as_index_false_matches_pandas() -> None:
+    source = pd.DataFrame(
+        {
+            "row": [4, 2, 5, 1, 3],
+            "ticker": ["B", "A", "B", "A", "B"],
+            "sequence": [1, 1, 2, 2, 3],
+            "close": [10.0, 20.0, 12.0, 22.0, 14.0],
+            "volume": [100.0, 200.0, 120.0, 220.0, 140.0],
+        }
+    )
+    pandas_frame = source.set_index("row")
+    frame = dp.from_pandas(source, index="row", order_by="sequence")
+
+    result = (
+        frame.groupby("ticker", as_index=False, sort=True)[["close", "volume"]]
+        .rolling(2, min_periods=1)
+        .sum()
+    )
+    expected = (
+        pandas_frame.groupby("ticker", as_index=False, sort=True)[["close", "volume"]]
+        .rolling(2, min_periods=1)
+        .sum()
+    )
+
+    pd.testing.assert_frame_equal(cast("dp.DataFrame", result).collect(), expected)
+
+
+def test_grouped_rolling_assigns_to_origin_without_materialization() -> None:
+    source = pd.DataFrame(
+        {
+            "ticker": ["B", "A", "B", None, "A", "B"],
+            "sequence": [1, 1, 2, 2, 3, 3],
+            "close": [10.0, 20.0, 12.0, 30.0, 24.0, 14.0],
+        }
+    )
+    session = dp.connect()
+    frame = session.from_pandas(source, order_by="sequence")
+    moving_average = (
+        frame.groupby("ticker", sort=False, dropna=True)["close"]
+        .rolling(2, min_periods=1)
+        .mean()
+    )
+
+    result = frame.assign(moving_average=moving_average)
+
+    assert session.execution_count == 0
+    expected = source.assign(
+        moving_average=source.groupby(
+            "ticker",
+            sort=False,
+            dropna=True,
+        )["close"].transform(lambda values: values.rolling(2, min_periods=1).mean())
+    )
+    pd.testing.assert_frame_equal(result.collect(), expected)
+    assert session.execution_count == 1
+
+
+def test_projected_dataframe_grouped_rolling_assigns_to_origin() -> None:
+    source = pd.DataFrame(
+        {
+            "group": ["A", "B", "A", "B", "A"],
+            "sequence": [1, 1, 2, 2, 3],
+            "x": [10.0, 20.0, 12.0, 18.0, 14.0],
+            "y": [100.0, 200.0, 120.0, 180.0, 140.0],
+        }
+    )
+    session = dp.connect()
+    frame = session.from_pandas(source, order_by="sequence")
+    rolling = (
+        frame.groupby("group", sort=False)[["x", "y"]].rolling(2, min_periods=1).mean()
+    )
+
+    frame[["mean_x", "mean_y"]] = cast("dp.DataFrame", rolling)
+
+    assert session.execution_count == 0
+    expected = source.assign(
+        mean_x=source.groupby("group", sort=False)["x"].transform(
+            lambda values: values.rolling(2, min_periods=1).mean()
+        ),
+        mean_y=source.groupby("group", sort=False)["y"].transform(
+            lambda values: values.rolling(2, min_periods=1).mean()
+        ),
+    )
+    pd.testing.assert_frame_equal(frame.collect(), expected)
+    assert session.execution_count == 1
+
+
+def test_multi_ticker_moving_average_crossover_pipeline() -> None:
+    source = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "A", "B", "A", "B"],
+            "date": [1, 1, 2, 2, 3, 3],
+            "close": [10.0, 20.0, 12.0, 18.0, 14.0, 22.0],
+        }
+    )
+    session = dp.connect()
+    prices = session.from_pandas(source, order_by=["date", "ticker"])
+
+    features = prices.assign(
+        fast_ma=lambda frame: frame.groupby("ticker")["close"].rolling(2).mean(),
+        slow_ma=lambda frame: frame.groupby("ticker")["close"].rolling(3).mean(),
+    ).assign(ma_cross=lambda frame: frame["fast_ma"] > frame["slow_ma"])
+
+    assert session.execution_count == 0
+    expected = source.assign(
+        fast_ma=[np.nan, np.nan, 11.0, 19.0, 13.0, 20.0],
+        slow_ma=[np.nan, np.nan, np.nan, np.nan, 12.0, 20.0],
+        ma_cross=pd.Series(
+            [pd.NA, pd.NA, pd.NA, pd.NA, True, False],
+            dtype="boolean",
+        ),
+    )
+    pd.testing.assert_frame_equal(features.collect(), expected)
+    assert features.ordering == ("date", "ticker")
+    assert session.execution_count == 1
+
+
+def test_grouped_rolling_rejects_unordered_input_before_execution(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unordered-grouped.csv"
+    pd.DataFrame({"group": ["a", "a"], "value": [1.0, 2.0]}).to_csv(
+        path,
+        index=False,
+    )
+    session = dp.connect()
+    frame = session.read_csv(path)
+
+    with pytest.raises(UnorderedOperationError):
+        frame.groupby("group")["value"].rolling(2).sum()
+    with pytest.raises(UnorderedOperationError):
+        frame.groupby("group")[["value"]].rolling(2).sum()
+    assert session.execution_count == 0
+
+
 SERIES_ORDER_OPERATIONS: tuple[Callable[[dp.Series], object], ...] = (
     lambda series: series.cumsum(),
     lambda series: series.cummin(),

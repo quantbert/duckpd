@@ -24,6 +24,56 @@ jobs:
       - run: uv pip install "narwhals==${{ matrix.narwhals-version }}"
       - run: uv run --no-sync pytest
 
+  remote-databases:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: duckpd
+          POSTGRES_USER: duckpd
+          POSTGRES_PASSWORD: duckpd_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U duckpd -d duckpd"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: duckpd
+          MYSQL_USER: duckpd
+          MYSQL_PASSWORD: duckpd_secret
+          MYSQL_ROOT_PASSWORD: root_secret
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -u root -proot_secret"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DUCKPD_TEST_POSTGRES_HOST: 127.0.0.1
+      DUCKPD_TEST_POSTGRES_PORT: 5432
+      DUCKPD_TEST_POSTGRES_DATABASE: duckpd
+      DUCKPD_TEST_POSTGRES_USER: duckpd
+      DUCKPD_TEST_POSTGRES_PASSWORD: duckpd_secret
+      DUCKPD_TEST_MYSQL_HOST: 127.0.0.1
+      DUCKPD_TEST_MYSQL_PORT: 3306
+      DUCKPD_TEST_MYSQL_DATABASE: duckpd
+      DUCKPD_TEST_MYSQL_USER: duckpd
+      DUCKPD_TEST_MYSQL_PASSWORD: duckpd_secret
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: uv run pytest -o addopts='--strict-config --strict-markers' tests/test_remote_attachments.py
+
   quality:
     runs-on: ubuntu-latest
     steps:

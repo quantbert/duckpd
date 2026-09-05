@@ -111,6 +111,7 @@ def test_explain_json_exports_rewrites_and_optimized_plan() -> None:
         "fallback_policy": "error",
         "fallback": [],
         "materialization": [],
+        "remote": [],
     }
     assert [snapshot["name"] for snapshot in data["snapshots"]] == [
         "predicate_pushdown",

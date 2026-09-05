@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import warnings
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
@@ -35,6 +36,7 @@ from duckpd._logical import (
     PandasSource,
     ParquetSource,
     ProjectPlan,
+    RemoteTableSource,
     SamplePlan,
     ScanPlan,
     SortKey,
@@ -51,6 +53,7 @@ from duckpd.errors import (
     ConcurrentModificationError,
     MaterializationError,
     MergeError,
+    RemoteScanWarning,
     UnsupportedOperationError,
 )
 
@@ -397,6 +400,38 @@ def _fallback_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
     return tuple(found.values())
 
 
+def _remote_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
+    """Describe remote source movement and known native pushdown."""
+    boundaries: list[dict[str, object]] = []
+    for node in _plan_nodes(plan):
+        if not isinstance(node, ScanPlan) or not isinstance(
+            node.source, RemoteTableSource
+        ):
+            continue
+        source = node.source
+        capabilities = source.capabilities
+        boundaries.append(
+            {
+                "kind": "remote_table",
+                "engine": source.engine,
+                "source": source.qualified_name,
+                "location": sanitize_source_location(source.location),
+                "estimated_transfer_bytes": None,
+                "unbounded_scan": source.unbounded_scan,
+                "pushdown": {
+                    "projection": capabilities.projection,
+                    "filter": capabilities.filter,
+                    "aggregation": capabilities.aggregation,
+                    "join": capabilities.join,
+                    "window": capabilities.window,
+                    "limit": capabilities.limit,
+                    "sort": capabilities.sort,
+                },
+            }
+        )
+    return tuple(boundaries)
+
+
 class Executor:
     """Execute compiled plans and track observable execution boundaries."""
 
@@ -496,6 +531,8 @@ class Executor:
         if index_ids:
             index_labels = [compiled.bindings[column_id] for column_id in index_ids]
             result = result.set_index(index_labels, drop=plan.metadata.index.drop)
+            if plan.metadata.index.names:
+                result.index.names = list(plan.metadata.index.names)
         hidden_labels = [
             compiled.bindings[column.id]
             for column in plan.metadata.columns
@@ -1035,9 +1072,16 @@ class Executor:
             if fallback_boundaries
             else "none"
         )
+        remote_boundaries = _remote_boundaries(plan)
+        remote_text = (
+            json.dumps(remote_boundaries, sort_keys=True)
+            if remote_boundaries
+            else "none"
+        )
         boundaries = (
             f"Fallback boundaries: {fallback_text} (policy=error)\n"
-            "Materialization boundaries: none in the logical plan"
+            "Materialization boundaries: none in the logical plan\n"
+            f"Remote source boundaries: {remote_text}"
         )
         if mode == "logical":
             return f"{boundaries}\nDuckPD logical plan:\n{logical}"
@@ -1049,6 +1093,7 @@ class Executor:
                 "fallback_policy": "error",
                 "fallback": list(fallback_boundaries),
                 "materialization": [],
+                "remote": list(remote_boundaries),
             }
             return json.dumps(payload, indent=2)
 
@@ -1217,6 +1262,20 @@ class Executor:
         return reduced.infer_objects()
 
     def _validate_execution(self, plan: LogicalPlan) -> None:
+        if isinstance(plan, ScanPlan) and isinstance(plan.source, RemoteTableSource):
+            source = plan.source
+            message = (
+                f"Remote {source.engine} scan {source.qualified_name!r} has no "
+                "proven transfer bound; projection/filter pushdown is "
+                f"{'available' if source.capabilities.filter else 'limited'}"
+            )
+            if source.unbounded_scan == "error":
+                raise MaterializationError(
+                    f"{message}; set unbounded_scan='warn' or 'allow' explicitly"
+                )
+            if source.unbounded_scan == "warn":
+                warnings.warn(message, RemoteScanWarning, stacklevel=3)
+            return
         if isinstance(plan, JoinPlan):
             self._validate_execution(plan.left)
             self._validate_execution(plan.right)
@@ -1247,7 +1306,7 @@ class Executor:
             return
         if isinstance(
             plan,
-            (FilterPlan, ProjectPlan, SortPlan, LimitPlan, AggregatePlan),
+            (FilterPlan, ProjectPlan, SortPlan, TopKPlan, LimitPlan, AggregatePlan),
         ):
             self._validate_execution(plan.input)
 

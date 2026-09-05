@@ -27,6 +27,7 @@ from duckpd._logical import (
     LogicalPlan,
     ParquetSource,
     ProjectPlan,
+    RemoteTableSource,
     ScanPlan,
     SortPlan,
     SourceProvenance,
@@ -163,6 +164,17 @@ def _json_value(value: object) -> object:
             if field.name != "paths":
                 result[field.name] = _json_value(getattr(value, field.name))
         return result
+    if isinstance(value, RemoteTableSource):
+        return {
+            "node": "RemoteTableSource",
+            "engine": value.engine,
+            "attachment": value.attachment,
+            "schema": value.schema,
+            "table": value.table,
+            "location": sanitize_source_location(value.location),
+            "capabilities": _json_value(value.capabilities),
+            "unbounded_scan": value.unbounded_scan,
+        }
     if isinstance(value, SqlSource):
         return {
             "node": "SqlSource",
@@ -170,7 +182,7 @@ def _json_value(value: object) -> object:
             "fingerprint": hashlib.sha256(value.query.encode()).hexdigest(),
         }
     if isinstance(value, SourceProvenance):
-        return {
+        result = {
             "node": "SourceProvenance",
             "kind": value.kind.value,
             "locations": [
@@ -181,6 +193,9 @@ def _json_value(value: object) -> object:
             "row_preserving": value.row_preserving,
             "transformations": list(value.transformations),
         }
+        if value.capabilities is not None:
+            result["capabilities"] = _json_value(value.capabilities)
+        return result
     if isinstance(value, tuple):
         return [_json_value(item) for item in cast("tuple[object, ...]", value)]
     if isinstance(value, list):

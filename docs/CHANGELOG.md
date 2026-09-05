@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
 the [release policy](RELEASES.md).
 
+## 0.1.1 - 2026-09-05
+
+### Added
+
+- Pandas-compatible row-based `DataFrameGroupBy.rolling()` and
+  `SeriesGroupBy.rolling()` compile group keys into DuckDB window partitions,
+  preserve grouped result indexes and ordering, and support lazy assignment
+  back to the originating frame without materialization.
+
 ## 0.1.0a1 - 2026-09-04
 
 ### Added
@@ -33,6 +42,7 @@ the [release policy](RELEASES.md).
 - `explain("optimized")` and `explain("json")` expose optimized plans and per-pass before/after snapshots. Profiles separate DuckPD planning and execution timings; `scripts/benchmark_optimizer.py` warms and alternates variants, asserts Arrow-result equality, reports median/range statistics, and ablates each retained pass on Linux.
 - Release artifact verification: generated Narwhals compatibility documentation, wheel/sdist content checks, and clean-environment wheel installation smoke tests are configured for the CI Python 3.11–3.14 matrix; local Linux verification passes on all four Python versions.
 - Controlled Python escape hatches: sessions enforce `fallback="error"`; typed, batch-independent Arrow UDFs are registered explicitly and applied with `Series.map_arrow()`; `DataFrame.collect_small()` accepts only non-expanding local-Parquet plans with fixed-width output and a proven conservative memory upper bound, rejecting expanding or variable-width plans before execution; materialization reports and explain/profile output expose their boundaries.
+- Read-only PostgreSQL and MySQL attachments through DuckDB extensions: structured parameters or caller-managed secrets, credential-redacted diagnostics, lazy table frames with refresh-on-execution data visibility, explicit schema-cache refresh and detach lifecycle, source capability reporting, configurable unbounded-network-scan guards, and live PostgreSQL 17/MySQL 8.4 CI coverage.
 
 ### Changed
 

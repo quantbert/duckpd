@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from duckpd._logical import (
@@ -13,18 +14,32 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     Expression,
+    FilterPlan,
     FunctionCall,
+    IndexSpec,
+    IndexUniqueness,
     LiteralValue,
     NamedExpression,
+    NullPlacement,
+    OrderSpec,
     ProjectPlan,
+    RowIdentity,
+    SortDirection,
     SortKey,
+    SortPlan,
     WindowExpression,
 )
-from duckpd._metadata import after_projection
+from duckpd._metadata import (
+    after_filter,
+    after_projection,
+    after_sort,
+    validate_metadata,
+)
 from duckpd._reductions import expression_type, is_numeric_type
 from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
 
 if TYPE_CHECKING:
+    from duckpd._logical import LogicalPlan
     from duckpd.frame import DataFrame
     from duckpd.series import Series
 
@@ -37,10 +52,13 @@ class WindowBase:
         parent: DataFrame | Series,
         min_periods: int,
         frame_spec: str,
+        *,
+        partition_by: tuple[Expression, ...] = (),
     ) -> None:
         self._parent = parent
         self._min_periods = min_periods
         self._frame_spec = frame_spec
+        self._partition_by = partition_by
 
     def _require_order(self) -> tuple[SortKey, ...]:
         ordering = self._parent._plan.metadata.ordering
@@ -72,11 +90,13 @@ class WindowBase:
             window_cnt = WindowExpression(
                 function="count",
                 arguments=(s._expression,),
+                partition_by=self._partition_by,
                 order_by=order_keys,
                 frame_spec=self._frame_spec,
             )
             row_num = WindowExpression(
                 function="row_number",
+                partition_by=self._partition_by,
                 order_by=order_keys,
             )
             cnt_expr: Expression
@@ -121,6 +141,7 @@ class WindowBase:
         window_val = WindowExpression(
             function=duck_func,
             arguments=(op,),
+            partition_by=self._partition_by,
             order_by=order_keys,
             frame_spec=self._frame_spec,
         )
@@ -129,6 +150,7 @@ class WindowBase:
         window_cnt = WindowExpression(
             function="count",
             arguments=(s._expression,),
+            partition_by=self._partition_by,
             order_by=order_keys,
             frame_spec=self._frame_spec,
         )
@@ -196,6 +218,7 @@ class Rolling(WindowBase):
         min_periods: int | None = None,
         *,
         center: bool = False,
+        _partition_by: tuple[Expression, ...] = (),
     ) -> None:
         if type(window) is not int:
             raise ValueError("window must be an integer")
@@ -213,7 +236,12 @@ class Rolling(WindowBase):
         if min_p > window:
             raise ValueError("min_periods must not exceed window")
         frame_spec = f"ROWS BETWEEN {window - 1} PRECEDING AND CURRENT ROW"
-        super().__init__(parent, min_p, frame_spec)
+        super().__init__(
+            parent,
+            min_p,
+            frame_spec,
+            partition_by=_partition_by,
+        )
         self._window = window
 
     def count(self, numeric_only: bool = False) -> DataFrame | Series:
@@ -267,6 +295,327 @@ class Rolling(WindowBase):
             return self._apply_series_agg(self._parent, "var", ddof=ddof)
         return self._apply_frame_agg(
             self._parent, "var", numeric_only=numeric_only, ddof=ddof
+        )
+
+
+class GroupedRolling(Rolling):
+    """Row-based rolling windows partitioned by lazy GroupBy keys."""
+
+    def __init__(
+        self,
+        parent: DataFrame | Series,
+        key_columns: tuple[Column, ...],
+        window: int,
+        min_periods: int | None = None,
+        *,
+        center: bool = False,
+        as_index: bool = True,
+        sort: bool = True,
+        dropna: bool = True,
+        alignment_source: LogicalPlan | None = None,
+    ) -> None:
+        self._key_columns = key_columns
+        self._as_index = as_index
+        self._sort_groups = sort
+        self._dropna = dropna
+        self._alignment_source = alignment_source or parent._plan
+        super().__init__(
+            parent,
+            window,
+            min_periods,
+            center=center,
+            _partition_by=tuple(ColumnRef(column.id) for column in key_columns),
+        )
+
+    def count(self, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("count", numeric_only=numeric_only)
+
+    def sum(self, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("sum", numeric_only=numeric_only)
+
+    def mean(self, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("mean", numeric_only=numeric_only)
+
+    def min(self, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("min", numeric_only=numeric_only)
+
+    def max(self, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("max", numeric_only=numeric_only)
+
+    def std(self, ddof: int = 1, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("std", numeric_only=numeric_only, ddof=ddof)
+
+    def var(self, ddof: int = 1, numeric_only: bool = False) -> DataFrame | Series:
+        return self._calculate("var", numeric_only=numeric_only, ddof=ddof)
+
+    def _calculate(
+        self,
+        func: Literal["count", "sum", "mean", "min", "max", "std", "var"],
+        *,
+        numeric_only: bool,
+        ddof: int = 1,
+    ) -> DataFrame | Series:
+        from duckpd.frame import DataFrame
+        from duckpd.series import Series
+
+        source_plan = self._parent._plan
+        order_keys = self._require_order()
+        key_ids = {column.id for column in self._key_columns}
+        calculations: list[tuple[str, Expression, str]] = []
+
+        if isinstance(self._parent, Series):
+            result = self._apply_series_agg(self._parent, func, ddof=ddof)
+            calculations.append(
+                (
+                    self._parent.name or "0",
+                    result._expression,
+                    expression_type(source_plan, result._expression),
+                )
+            )
+        else:
+            for column in source_plan.metadata.visible_columns:
+                if column.id in key_ids:
+                    continue
+                if numeric_only and not is_numeric_type(column.duckdb_type):
+                    continue
+                series = Series(
+                    self._parent._session,
+                    source_plan,
+                    ColumnRef(column.id),
+                    column.label,
+                )
+                result = self._apply_series_agg(series, func, ddof=ddof)
+                calculations.append(
+                    (
+                        column.label,
+                        result._expression,
+                        expression_type(source_plan, result._expression),
+                    )
+                )
+
+        if not calculations:
+            raise UnsupportedOperationError(
+                f"No valid columns for grouped rolling {func}"
+            )
+
+        result_source = source_plan
+        source_index: list[tuple[Expression, str, str]] = []
+        index_names: tuple[str | None, ...]
+        source_metadata = source_plan.metadata
+        if source_metadata.index.columns:
+            index_names = source_metadata.index.names or tuple(
+                next(
+                    column.label
+                    for column in source_metadata.columns
+                    if column.id == column_id
+                )
+                for column_id in source_metadata.index.columns
+            )
+            for column_id in source_metadata.index.columns:
+                column = next(
+                    column
+                    for column in source_metadata.columns
+                    if column.id == column_id
+                )
+                source_index.append(
+                    (ColumnRef(column.id), column.label, column.duckdb_type)
+                )
+        elif (
+            source_metadata.row_identity.stable
+            and source_metadata.row_identity.unique
+            and len(source_metadata.row_identity.columns) == 1
+        ):
+            identity_id = source_metadata.row_identity.columns[0]
+            identity_column = next(
+                column for column in source_metadata.columns if column.id == identity_id
+            )
+            source_index.append(
+                (
+                    ColumnRef(identity_column.id),
+                    "__duckpd_grouped_rolling_index__",
+                    identity_column.duckdb_type,
+                )
+            )
+            index_names = (None,)
+        else:
+            ordinal_column = Column(
+                ColumnId.create(),
+                "__duckpd_grouped_rolling_index__",
+                "BIGINT",
+                hidden=True,
+            )
+            ordinal_expression = BinaryExpression(
+                WindowExpression(function="row_number", order_by=order_keys),
+                BinaryOperator.SUBTRACT,
+                LiteralValue(1),
+            )
+            base_projections = (
+                *(
+                    NamedExpression(column, ColumnRef(column.id))
+                    for column in source_metadata.columns
+                ),
+                NamedExpression(ordinal_column, ordinal_expression),
+            )
+            base_columns = tuple(item.column for item in base_projections)
+            base_metadata = after_projection(source_metadata, base_columns)
+            result_source = ProjectPlan(
+                source_plan,
+                base_projections,
+                base_metadata,
+            )
+            source_index.append(
+                (
+                    ColumnRef(ordinal_column.id),
+                    ordinal_column.label,
+                    ordinal_column.duckdb_type,
+                )
+            )
+            index_names = (None,)
+
+        valid_group: Expression | None = None
+        for column in self._key_columns:
+            present = FunctionCall("notnull", (ColumnRef(column.id),))
+            valid_group = (
+                present
+                if valid_group is None
+                else BinaryExpression(valid_group, BinaryOperator.AND, present)
+            )
+        if self._dropna:
+            if valid_group is None:
+                raise AssertionError("Grouped rolling requires at least one key")
+            result_source = FilterPlan(
+                result_source,
+                valid_group,
+                after_filter(result_source.metadata),
+            )
+
+        projections: list[NamedExpression] = []
+        key_outputs: list[Column] = []
+        for column in self._key_columns:
+            output = replace(column, id=ColumnId.create(), hidden=self._as_index)
+            key_outputs.append(output)
+            projections.append(NamedExpression(output, ColumnRef(column.id)))
+
+        index_outputs: list[Column] = []
+        for expression, label, duckdb_type in source_index:
+            output = Column(ColumnId.create(), label, duckdb_type, hidden=True)
+            index_outputs.append(output)
+            projections.append(NamedExpression(output, expression))
+
+        data_outputs: list[Column] = []
+        alignment_expressions: list[Expression] = []
+        for label, expression, duckdb_type in calculations:
+            output = Column(ColumnId.create(), label, duckdb_type)
+            data_outputs.append(output)
+            projections.append(NamedExpression(output, expression))
+            alignment_expressions.append(
+                CaseWhen(valid_group, expression, LiteralValue(None))
+                if self._dropna and valid_group is not None
+                else expression
+            )
+
+        group_order_outputs: list[Column] = []
+        if not self._sort_groups:
+            for position, key in enumerate(order_keys):
+                expression = WindowExpression(
+                    function="first_value",
+                    arguments=(key.expression,),
+                    partition_by=self._partition_by,
+                    order_by=order_keys,
+                )
+                output = Column(
+                    ColumnId.create(),
+                    f"__duckpd_group_order_{position}__",
+                    expression_type(source_plan, expression),
+                    hidden=True,
+                )
+                group_order_outputs.append(output)
+                projections.append(NamedExpression(output, expression))
+
+        row_order_outputs: list[Column] = []
+        for position, key in enumerate(order_keys):
+            output = Column(
+                ColumnId.create(),
+                f"__duckpd_group_row_order_{position}__",
+                expression_type(source_plan, key.expression),
+                hidden=True,
+            )
+            row_order_outputs.append(output)
+            projections.append(NamedExpression(output, key.expression))
+
+        output_columns = tuple(item.column for item in projections)
+        metadata = after_projection(result_source.metadata, output_columns)
+        index_columns = (
+            (*key_outputs, *index_outputs) if self._as_index else tuple(index_outputs)
+        )
+        grouped_index_names = (
+            (*tuple(column.label for column in self._key_columns), *index_names)
+            if self._as_index
+            else index_names
+        )
+        metadata = replace(
+            metadata,
+            index=IndexSpec(
+                tuple(column.id for column in index_columns),
+                drop=True,
+                uniqueness=IndexUniqueness.UNKNOWN,
+                names=grouped_index_names,
+            ),
+            ordering=OrderSpec(),
+            row_identity=RowIdentity(),
+        )
+        validate_metadata(metadata)
+        projected = ProjectPlan(result_source, tuple(projections), metadata)
+
+        sort_keys: list[SortKey] = []
+        if self._sort_groups:
+            sort_keys.extend(
+                SortKey(
+                    ColumnRef(column.id),
+                    SortDirection.ASCENDING,
+                    NullPlacement.LAST,
+                )
+                for column in key_outputs
+            )
+        else:
+            sort_keys.extend(
+                SortKey(
+                    ColumnRef(output.id),
+                    source_key.direction,
+                    source_key.null_placement,
+                )
+                for output, source_key in zip(
+                    group_order_outputs, order_keys, strict=True
+                )
+            )
+        sort_keys.extend(
+            SortKey(
+                ColumnRef(output.id),
+                source_key.direction,
+                source_key.null_placement,
+            )
+            for output, source_key in zip(row_order_outputs, order_keys, strict=True)
+        )
+        ordered_plan = SortPlan(
+            projected,
+            tuple(sort_keys),
+            after_sort(metadata, tuple(sort_keys)),
+        )
+
+        if isinstance(self._parent, Series):
+            return Series(
+                self._parent._session,
+                ordered_plan,
+                ColumnRef(data_outputs[0].id),
+                self._parent.name,
+                alignment_source=self._alignment_source,
+                alignment_expression=alignment_expressions[0],
+            )
+        return DataFrame(
+            self._parent._session,
+            ordered_plan,
+            alignment_source=self._alignment_source,
+            alignment_expressions=tuple(alignment_expressions),
         )
 
 

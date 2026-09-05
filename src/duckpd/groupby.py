@@ -21,9 +21,11 @@ from duckpd._reductions import is_numeric_type
 from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
+    from duckpd._logical import LogicalPlan
     from duckpd.frame import DataFrame
     from duckpd.series import Series
     from duckpd.session import Session
+    from duckpd.window import GroupedRolling
 
 
 class DataFrameGroupBy:
@@ -38,8 +40,10 @@ class DataFrameGroupBy:
         sort: bool = True,
         dropna: bool = True,
         observed: bool = True,
+        _alignment_source: LogicalPlan | None = None,
     ) -> None:
         self._frame = frame
+        self._alignment_source = _alignment_source or frame._plan
         self._session: Session = frame._session
         self._by = (by,) if isinstance(by, str) else tuple(by)
         if not self._by:
@@ -75,6 +79,7 @@ class DataFrameGroupBy:
                 as_index=self._as_index,
                 sort=self._sort,
                 dropna=self._dropna,
+                _alignment_source=self._alignment_source,
             )
         labels = tuple(key)
         # Project frame down to group keys + selected columns
@@ -88,6 +93,7 @@ class DataFrameGroupBy:
             as_index=self._as_index,
             sort=self._sort,
             dropna=self._dropna,
+            _alignment_source=self._alignment_source,
         )
 
     def agg(
@@ -170,6 +176,28 @@ class DataFrameGroupBy:
     def count(self) -> DataFrame:
         """Compute count of non-null values for each group."""
         return self._convenience_agg("count", numeric_only=False)
+
+    def rolling(
+        self,
+        window: int,
+        min_periods: int | None = None,
+        *,
+        center: bool = False,
+    ) -> GroupedRolling:
+        """Create row-based rolling windows partitioned by the group keys."""
+        from duckpd.window import GroupedRolling
+
+        return GroupedRolling(
+            self._frame,
+            tuple(self._key_columns),
+            window,
+            min_periods,
+            center=center,
+            as_index=self._as_index,
+            sort=self._sort,
+            dropna=self._dropna,
+            alignment_source=self._alignment_source,
+        )
 
     def size(self) -> DataFrame:
         """Compute group sizes."""
@@ -492,6 +520,7 @@ class SeriesGroupBy:
         sort: bool = True,
         dropna: bool = True,
         observed: bool = True,
+        _alignment_source: LogicalPlan | None = None,
     ) -> None:
         from duckpd.frame import DataFrame
         from duckpd.series import Series
@@ -501,6 +530,7 @@ class SeriesGroupBy:
         self._as_index = as_index
         self._sort = sort
         self._dropna = dropna
+        self._alignment_source = _alignment_source or series._plan
         if not observed:
             raise UnsupportedOperationError(
                 "DuckPD does not support unobserved categorical groups"
@@ -517,6 +547,7 @@ class SeriesGroupBy:
                 as_index=as_index,
                 sort=sort,
                 dropna=dropna,
+                _alignment_source=self._alignment_source,
             )
         elif isinstance(by, Series):
             if by._session is not series._session or by._plan is not series._plan:
@@ -534,6 +565,7 @@ class SeriesGroupBy:
                 as_index=as_index,
                 sort=sort,
                 dropna=dropna,
+                _alignment_source=self._alignment_source,
             )
         elif isinstance(by, Sequence):
             by_seq = tuple(cast("Sequence[object]", by))
@@ -548,6 +580,7 @@ class SeriesGroupBy:
                     as_index=as_index,
                     sort=sort,
                     dropna=dropna,
+                    _alignment_source=self._alignment_source,
                 )
             elif all(isinstance(item, Series) for item in by_seq):
                 ser_seq = cast("tuple[Series, ...]", by_seq)
@@ -570,6 +603,7 @@ class SeriesGroupBy:
                     as_index=as_index,
                     sort=sort,
                     dropna=dropna,
+                    _alignment_source=self._alignment_source,
                 )
             else:
                 raise TypeError("Group keys must be all strings or all Series")
@@ -577,6 +611,42 @@ class SeriesGroupBy:
             raise TypeError(
                 "by must be a string, Series, or sequence of strings/Series"
             )
+
+    def rolling(
+        self,
+        window: int,
+        min_periods: int | None = None,
+        *,
+        center: bool = False,
+    ) -> GroupedRolling:
+        """Create row-based rolling windows partitioned by the group keys."""
+        from duckpd.series import Series
+        from duckpd.window import GroupedRolling
+
+        frame = self._df_groupby._frame
+        target_name = self._series.name or "__duckpd_val__"
+        if self._series.name is None:
+            frame = frame.assign(**{target_name: self._series})
+        target = Series(
+            self._session,
+            frame._plan,
+            ColumnRef(find_column(frame._plan.metadata, target_name).id),
+            self._series.name,
+        )
+        keys = tuple(
+            find_column(frame._plan.metadata, label) for label in self._df_groupby._by
+        )
+        return GroupedRolling(
+            target,
+            keys,
+            window,
+            min_periods,
+            center=center,
+            as_index=self._as_index,
+            sort=self._sort,
+            dropna=self._dropna,
+            alignment_source=self._alignment_source,
+        )
 
     def agg(self, func: object) -> DataFrame:
         """Aggregate the grouped Series using the specified function."""

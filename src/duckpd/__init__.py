@@ -8,12 +8,13 @@ from duckpd.frame import DataFrame
 from duckpd.groupby import DataFrameGroupBy, SeriesGroupBy
 from duckpd.io import concat, from_arrow, from_pandas, read_csv, read_parquet
 from duckpd.series import Series
-from duckpd.session import ArrowUDFSpec, Session, connect
+from duckpd.session import ArrowUDFSpec, AttachedDatabase, Session, connect
 
 __version__ = version("duckpd")
 
 __all__ = [
     "ArrowUDFSpec",
+    "AttachedDatabase",
     "CommitReport",
     "ConcurrentModificationError",
     "DataFrame",

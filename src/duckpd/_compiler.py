@@ -35,6 +35,7 @@ from duckpd._logical import (
     PandasSource,
     ParquetSource,
     ProjectPlan,
+    RemoteTableSource,
     SamplePlan,
     ScanPlan,
     SortDirection,
@@ -78,6 +79,7 @@ class DuckDBCompiler:
             | CsvSource
             | PandasSource
             | ParquetSource
+            | RemoteTableSource
             | SqlSource
             | TableSource
         ),
@@ -512,6 +514,7 @@ class DuckDBCompiler:
             | CsvSource
             | PandasSource
             | ParquetSource
+            | RemoteTableSource
             | SqlSource
             | TableSource
         ),
@@ -529,6 +532,13 @@ class DuckDBCompiler:
                 msg = f"Registered source {source.key!r} is not an Arrow table or batch"
                 raise TypeError(msg)
             return self._session._connection.from_arrow(value)
+        if isinstance(source, RemoteTableSource):
+            parts = [source.attachment]
+            if source.schema is not None:
+                parts.append(source.schema)
+            parts.append(source.table)
+            qualified_name = ".".join(quote_identifier(part) for part in parts)
+            return self._session._connection.sql(f"SELECT * FROM {qualified_name}")
         if isinstance(source, TableSource):
             return self._session._connection.table(source.name)
         if isinstance(source, SqlSource):

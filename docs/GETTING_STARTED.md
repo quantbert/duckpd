@@ -97,6 +97,34 @@ Direct sinks and Arrow batch readers avoid constructing an intermediate pandas
 DataFrame. Individual DuckDB operators may still require blocking state; use
 `explain_write()` and `profile()` to inspect the plan and observed resource use.
 
+## Read-only remote databases
+
+Attach PostgreSQL or MySQL with structured parameters; connection credentials
+are stored in a temporary DuckDB secret rather than in the logical plan:
+
+```python
+import duckpd as pd
+
+with pd.connect() as session:
+    postgres = session.attach_postgres(
+        "warehouse",
+        host="db.example.com",
+        database="analytics",
+        user="reader",
+        password="...",
+        unbounded_scan="error",
+    )
+    orders = postgres.table("orders", schema="reporting", order_by="order_id")
+    result = orders[orders["status"] == "open"].collect()
+```
+
+Attachments are always `READ_ONLY`. A remote frame re-reads committed data on
+each execution; call `persist()` for a DuckDB-owned snapshot. The default
+`unbounded_scan="warn"` emits a warning when DuckPD cannot prove a network
+transfer bound; use `"error"` for strict prevention or `"allow"` when the scan
+is intentional. `attachment.refresh_schema()` clears DuckDB's extension schema
+cache after remote DDL, and `attachment.detach()` releases it early.
+
 ## Unsupported behavior
 
 DuckPD never silently falls back to pandas. Unsupported methods, dtypes, or

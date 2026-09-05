@@ -27,7 +27,6 @@ from duckpd._logical import (
 from duckpd._metadata import (
     after_projection,
     after_union,
-    find_column,
     projection_columns,
 )
 from duckpd._reductions import expression_type
@@ -292,16 +291,25 @@ def concat(
     # Check index preservation across all frames
     # If not ignore_index and all frames have matching index structure:
     index_ids: list[ColumnId] = []
+    index_names: tuple[str | None, ...] = ()
     hidden_index_cols: list[Column] = []
     if not ignore_index:
-        first_index_labels = frames[0].index_names
-        all_match_index = all(f.index_names == first_index_labels for f in frames)
-        if all_match_index and first_index_labels:
-            for idx_label in first_index_labels:
-                col_type = find_column(
-                    frames[0]._plan.metadata, idx_label, include_hidden=True
-                ).duckdb_type
-                idx_col = Column(ColumnId.create(), idx_label, col_type, hidden=True)
+        index_names = frames[0].index_names
+        all_match_index = all(f.index_names == index_names for f in frames)
+        first_index_ids = frames[0]._plan.metadata.index.columns
+        if all_match_index and first_index_ids:
+            for source_id in first_index_ids:
+                source_column = next(
+                    column
+                    for column in frames[0]._plan.metadata.columns
+                    if column.id == source_id
+                )
+                idx_col = Column(
+                    ColumnId.create(),
+                    source_column.label,
+                    source_column.duckdb_type,
+                    hidden=True,
+                )
                 hidden_index_cols.append(idx_col)
                 index_ids.append(idx_col.id)
 
@@ -342,6 +350,7 @@ def concat(
     metadata = after_union(
         tuple(output_columns),
         index_ids=tuple(index_ids),
+        index_names=index_names if index_ids else (),
         ordering_keys=ordering_keys,
         identity_ids=(
             (source_order_id, source_row_id)

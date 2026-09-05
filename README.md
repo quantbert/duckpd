@@ -19,23 +19,24 @@ Where practical, DuckPD aims to match pandas APIs and semantics closely enough t
 ```python
 import duckpd as pd
 
-prices = pd.read_parquet("price-data/*.parquet", order_by="date")
-
-features = (
-    prices.assign(
-        fast_ma=lambda frame: frame["close"].rolling(20).mean(),
-        slow_ma=lambda frame: frame["close"].rolling(50).mean(),
-    )
-    .assign(ma_cross=lambda frame: frame["fast_ma"] > frame["slow_ma"])
+prices = pd.read_parquet(
+    "price-data/*.parquet",
+    order_by=["date", "ticker"],
 )
+
+features = prices.assign(
+    fast_ma=lambda frame: frame.groupby("ticker")["close"].rolling(20).mean(),
+    slow_ma=lambda frame: frame.groupby("ticker")["close"].rolling(50).mean(),
+).assign(ma_cross=lambda frame: frame["fast_ma"] > frame["slow_ma"])
 
 print(features.explain())
 preview = features.head(10)
 features.write_parquet("price-features.parquet")
 ```
 
-Feature generation stays lazy. `head()` materializes only a bounded pandas
-preview, while `write_parquet()` executes the full pipeline directly in DuckDB.
+Grouped moving averages remain aligned to their originating ticker rows without
+materialization. `head()` materializes only a bounded pandas preview, while
+`write_parquet()` executes the full pipeline directly in DuckDB.
 
 ## Project directives
 
@@ -62,7 +63,8 @@ The long-term ambition is broad pandas API coverage **where those APIs can be im
 
 ## Current capabilities
 
-- Lazy Parquet, CSV, pandas, Arrow, DuckDB table, and read-only SQL sources.
+- Lazy Parquet, CSV, pandas, Arrow, DuckDB table, read-only SQL, and read-only
+  PostgreSQL/MySQL attachment sources.
 - Column selection, boolean filtering, arithmetic expressions, `assign`,
 `sort_values`, `limit`, and distinct/drop_duplicates deduplication.
 - Relational DataFrame joins (`merge`, `join`) supporting `inner`, `left`, `right`,
@@ -74,8 +76,9 @@ preservation, decimal-only coercion, and stable sequence order synthesis.
 - Vectorized `.str` (e.g. `upper`, `lower`, `strip`, `len`, `contains`, `replace`)
 and `.dt` (e.g. `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime`,
 `to_period`) accessor pipelines.
-- Multi-column `groupby()` supporting eager and lazy `agg()`, `sum()`, `mean()`,
-`min()`, `max()`, `std()`, `var()`, and `count()`.
+- Multi-column `groupby()` supporting lazy `agg()`, `sum()`, `mean()`, `min()`,
+`max()`, `std()`, `var()`, and `count()`, plus ordered row-based grouped
+`rolling()` windows that remain alignment-safe when assigned to the source frame.
 - Eager DataFrame and Series reductions: `count`, `size`, `sum`, `mean`, `min`,
 `max`, `std`, `var`, `median`, `quantile`, `any`, and `all` over numeric and
 boolean data, including `skipna`, `min_count`, and DataFrame `numeric_only` support.
@@ -99,13 +102,13 @@ DuckPD maps pandas semantics directly to DuckDB's vectorized analytical engine:
 
 | API Category                          | Supported Methods &amp; Operations                                                                                                                                   | Execution Model                                               |
 | :------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------- |
-| **I/O &amp; Data Loading**            | `read_parquet()`, `read_csv()`, `from_pandas()`, `from_arrow()`, `Session.sql()`, `connect()`                                                                        | **Lazy** (scans metadata / registers source)                  |
+| **I/O &amp; Data Loading**            | `read_parquet()`, `read_csv()`, `from_pandas()`, `from_arrow()`, `Session.sql()`, `Session.attach_postgres()`, `Session.attach_mysql()`, `connect()` | **Lazy** (scans metadata / registers source)                  |
 | **Transformations &amp; Projections** | `df[cols]`, `df[bool_filter]`, `assign()`, `sort_values()`, `limit()`, `drop_duplicates()`, `clip()`, `replace()`, `set_index()`, `reset_index()`, `df.loc[]`, `df.iloc[]` | **Lazy** (appends to logical query graph)                     |
 | **Joins &amp; Merges**                | `merge()`, `join()` (`inner`, `left`, `right`, `outer`, `cross`, custom suffixes, `validate=`)                                                                       | **Lazy** (relational hash join, pre-flight cardinality check) |
 | **Concatenation**                     | `duckpd.concat()` (multi-frame row union, schema alignment, null padding, defined numeric coercion, stable order synthesis)                                          | **Lazy** (union with projection padding)                      |
 | **String Accessor (`.str`)**          | `upper()`, `lower()`, `strip()`, `len()`, `startswith()`, `endswith()`, `contains()`, `replace()`                                                                    | **Lazy** (DuckDB SQL functions)                               |
 | **Datetime Accessor (`.dt`)**         | `year`, `month`, `day`, `hour`, `minute`, `second`, `strftime()`, `to_period()`                                                                                      | **Lazy** (DuckDB timestamp extractors)                        |
-| **GroupBy Aggregations**              | `groupby().agg()`, `.sum()`, `.mean()`, `.min()`, `.max()`, `.std()`, `.var()`, `.count()` (`as_index=True/False`)                                                   | **Lazy** for `.agg()`, **Eager** for reductions               |
+| **GroupBy Aggregations &amp; Windows** | `groupby().agg()`, `.sum()`, `.mean()`, `.min()`, `.max()`, `.std()`, `.var()`, `.count()`, and ordered row-based `groupby().rolling()` (`as_index=True/False`) | **Lazy** (aggregate or partitioned DuckDB window plan)         |
 | **Statistical Reductions**            | `sum()`, `mean()`, `min()`, `max()`, `count()`, `size`, `std()`, `var()`, `median()`, `quantile()`, `any()`, `all()`, `nunique()`                                    | **Eager** (single aggregate SQL pushdown)                     |
 | **Collection, Output &amp; State**    | `collect()`, `to_pandas()`, `head(n)`, `profile()`, `explain()`, `explain_write()`, `write_parquet()`, `write_csv()`, `to_csv()`, `to_arrow()`, `to_arrow_batches()`, `persist()` | **Explicit Execution Boundary**                               |
 

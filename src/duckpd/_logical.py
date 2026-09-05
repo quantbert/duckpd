@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
@@ -95,6 +95,42 @@ class TableSource:
 
 
 @dataclass(frozen=True)
+class SourceCapabilities:
+    """Known source-native operations; false means local DuckDB execution."""
+
+    projection: bool = False
+    filter: bool = False
+    aggregation: bool = False
+    join: bool = False
+    window: bool = False
+    limit: bool = False
+    sort: bool = False
+
+
+@dataclass(frozen=True)
+class RemoteTableSource:
+    """A table in a read-only database attached through a DuckDB extension."""
+
+    engine: Literal["postgres", "mysql"]
+    attachment: str
+    table: str
+    schema: str | None
+    location: str
+    capabilities: SourceCapabilities
+    unbounded_scan: Literal["error", "warn", "allow"] = "warn"
+
+    @property
+    def qualified_name(self) -> str:
+        """Return a credential-free qualified identifier for diagnostics."""
+        parts = (
+            (self.attachment, self.table)
+            if self.schema is None
+            else (self.attachment, self.schema, self.table)
+        )
+        return ".".join(parts)
+
+
+@dataclass(frozen=True)
 class SqlSource:
     """A validated read-only SQL query."""
 
@@ -102,7 +138,13 @@ class SqlSource:
 
 
 Source = (
-    ArrowSource | CsvSource | PandasSource | ParquetSource | SqlSource | TableSource
+    ArrowSource
+    | CsvSource
+    | PandasSource
+    | ParquetSource
+    | RemoteTableSource
+    | SqlSource
+    | TableSource
 )
 
 
@@ -292,6 +334,7 @@ class IndexSpec:
     columns: tuple[ColumnId, ...] = ()
     drop: bool = True
     uniqueness: IndexUniqueness = IndexUniqueness.UNKNOWN
+    names: tuple[str | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -329,6 +372,8 @@ class SourceKind(Enum):
     PARQUET = "parquet"
     CSV = "csv"
     TABLE = "table"
+    POSTGRES = "postgres"
+    MYSQL = "mysql"
     SQL = "sql"
 
 
@@ -342,6 +387,7 @@ class SourceProvenance:
     writable: bool = False
     row_preserving: bool = True
     transformations: tuple[str, ...] = ()
+    capabilities: SourceCapabilities | None = None
 
 
 @dataclass(frozen=True)

@@ -89,9 +89,18 @@ if TYPE_CHECKING:
 class DataFrame:
     """A lazy pandas-shaped DataFrame backed by a DuckDB query plan."""
 
-    def __init__(self, session: Session, plan: LogicalPlan) -> None:
+    def __init__(
+        self,
+        session: Session,
+        plan: LogicalPlan,
+        *,
+        alignment_source: LogicalPlan | None = None,
+        alignment_expressions: tuple[Expression, ...] = (),
+    ) -> None:
         self._session = session
         self._plan = plan
+        self._alignment_source = alignment_source
+        self._alignment_expressions = alignment_expressions
 
     @property
     def columns(self) -> tuple[str, ...]:
@@ -99,8 +108,10 @@ class DataFrame:
         return tuple(column.label for column in self._plan.metadata.visible_columns)
 
     @property
-    def index_names(self) -> tuple[str, ...]:
+    def index_names(self) -> tuple[str | None, ...]:
         """Names of explicit index columns without executing the plan."""
+        if self._plan.metadata.index.names:
+            return self._plan.metadata.index.names
         return tuple(
             self._column_by_id(column_id).label
             for column_id in self._plan.metadata.index.columns
@@ -1248,6 +1259,8 @@ class DataFrame:
                         ColumnRef(column.id)
                         for column in value._plan.metadata.visible_columns
                     )
+                elif value._alignment_source is self._plan:
+                    expressions = value._alignment_expressions
                 elif (
                     isinstance(value._plan, ProjectPlan)
                     and value._plan.input is self._plan
@@ -2392,6 +2405,12 @@ class DataFrame:
 
         if isinstance(value, Series):
             same_session = value._session is self._session
+            if same_session and value._alignment_source is self._plan:
+                if value._alignment_expression is None:
+                    raise AssertionError(
+                        "Aligned Series is missing its source expression"
+                    )
+                return value._alignment_expression
             compatible_plan = value._plan is self._plan or value._plan is alternate_plan
             if not same_session or not compatible_plan:
                 raise AlignmentError(

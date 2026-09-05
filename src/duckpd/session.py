@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -26,11 +27,13 @@ from duckpd._logical import (
     OrderSpec,
     PandasSource,
     ParquetSource,
+    RemoteTableSource,
     RowIdentity,
     ScanPlan,
     SortDirection,
     SortKey,
     SortPlan,
+    SourceCapabilities,
     SourceKind,
     SourceProvenance,
     SqlSource,
@@ -38,7 +41,12 @@ from duckpd._logical import (
     sanitize_source_location,
 )
 from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
-from duckpd.errors import SessionClosedError, UnsupportedOperationError
+from duckpd._quoting import quote_identifier, quote_literal
+from duckpd.errors import (
+    RemoteAttachmentError,
+    SessionClosedError,
+    UnsupportedOperationError,
+)
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -63,6 +71,69 @@ class ArrowUDFSpec:
     deterministic: bool
     side_effects: bool
     batch_independent: bool
+
+
+@dataclass(frozen=True)
+class _RemoteAttachmentState:
+    alias: str
+    engine: Literal["postgres", "mysql"]
+    location: str
+    secret_name: str
+    owns_secret: bool
+    default_schema: str | None
+    capabilities: SourceCapabilities
+    unbounded_scan: Literal["error", "warn", "allow"]
+
+
+@dataclass(frozen=True)
+class AttachedDatabase:
+    """A credential-free handle to one read-only DuckDB attachment."""
+
+    _session: Session
+    alias: str
+    engine: Literal["postgres", "mysql"]
+
+    @property
+    def closed(self) -> bool:
+        """Whether this attachment is no longer available."""
+        return self.alias not in self._session._attachments
+
+    def table(
+        self,
+        name: str,
+        *,
+        schema: str | None = None,
+        index: str | Sequence[str] | None = None,
+        order_by: str | Sequence[str] | None = None,
+        unbounded_scan: Literal["error", "warn", "allow"] | None = None,
+    ) -> DataFrame:
+        """Create a lazy frame for one attached remote table."""
+        return self._session._remote_table(
+            self.alias,
+            name,
+            schema=schema,
+            index=index,
+            order_by=order_by,
+            unbounded_scan=unbounded_scan,
+        )
+
+    def refresh_schema(self) -> None:
+        """Clear DuckDB's schema cache for this attachment type."""
+        self._session._refresh_remote_schema(self.alias)
+
+    def detach(self) -> None:
+        """Detach the remote database and remove its temporary secret."""
+        self._session._detach_remote(self.alias)
+
+    def __repr__(self) -> str:
+        return (
+            f"AttachedDatabase(alias={self.alias!r}, engine={self.engine!r}, "
+            f"read_only=True)"
+        )
+
+
+_POSTGRES_CAPABILITIES = SourceCapabilities(projection=True, filter=True)
+_MYSQL_CAPABILITIES = SourceCapabilities(projection=True)
 
 
 class Session:
@@ -99,6 +170,7 @@ class Session:
         self._registered_sources: dict[str, object] = {}
         self._fallback: Literal["error"] = fallback
         self._arrow_udfs: dict[str, ArrowUDFSpec] = {}
+        self._attachments: dict[str, _RemoteAttachmentState] = {}
         self._last_materialization_report: MaterializationReport | None = None
         self._closed = False
         self._execution_count = 0
@@ -317,17 +389,302 @@ class Session:
         plan = self._source_plan(source, index=index, order_by=order_by)
         return DataFrame(self, plan)
 
+    def attach_postgres(
+        self,
+        alias: str,
+        *,
+        host: str | None = None,
+        database: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        port: int | None = None,
+        schema: str | None = None,
+        sslmode: str | None = None,
+        secret: str | None = None,
+        unbounded_scan: Literal["error", "warn", "allow"] = "warn",
+    ) -> AttachedDatabase:
+        """Attach PostgreSQL through DuckDB's read-only postgres extension."""
+        return self._attach_remote(
+            "postgres",
+            alias,
+            host=host,
+            database=database,
+            user=user,
+            password=password,
+            port=port,
+            schema=schema,
+            sslmode=sslmode,
+            secret=secret,
+            unbounded_scan=unbounded_scan,
+        )
+
+    def attach_mysql(
+        self,
+        alias: str,
+        *,
+        host: str | None = None,
+        database: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        port: int | None = None,
+        secret: str | None = None,
+        unbounded_scan: Literal["error", "warn", "allow"] = "warn",
+    ) -> AttachedDatabase:
+        """Attach MySQL through DuckDB's read-only mysql extension."""
+        return self._attach_remote(
+            "mysql",
+            alias,
+            host=host,
+            database=database,
+            user=user,
+            password=password,
+            port=port,
+            schema=None,
+            sslmode=None,
+            secret=secret,
+            unbounded_scan=unbounded_scan,
+        )
+
+    def _attach_remote(
+        self,
+        engine: Literal["postgres", "mysql"],
+        alias: str,
+        *,
+        host: str | None,
+        database: str | None,
+        user: str | None,
+        password: str | None,
+        port: int | None,
+        schema: str | None,
+        sslmode: str | None,
+        secret: str | None,
+        unbounded_scan: Literal["error", "warn", "allow"],
+    ) -> AttachedDatabase:
+        self._ensure_open()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+            raise ValueError(
+                "attachment alias must start with a letter or underscore and "
+                "contain only letters, digits, and underscores"
+            )
+        if alias in self._attachments:
+            raise ValueError(f"attachment alias {alias!r} is already in use")
+        if unbounded_scan not in {"error", "warn", "allow"}:
+            raise ValueError("unbounded_scan must be 'error', 'warn', or 'allow'")
+        if schema is not None and not schema:
+            raise ValueError("schema must be non-empty when provided")
+
+        owns_secret = secret is None
+        if secret is None:
+            required = {
+                "host": host,
+                "database": database,
+                "user": user,
+                "password": password,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise ValueError(
+                    "structured connection parameters are missing: "
+                    + ", ".join(missing)
+                )
+            if any(value == "" for value in required.values()):
+                raise ValueError("structured connection parameters must be non-empty")
+            secret_name = f"__duckpd_{engine}_{uuid4().hex}"
+        else:
+            if not secret:
+                raise ValueError("secret must be non-empty")
+            if any(
+                value is not None
+                for value in (host, database, user, password, port, sslmode)
+            ):
+                raise ValueError(
+                    "secret cannot be combined with structured connection parameters"
+                )
+            secret_name = secret
+
+        default_port = 5432 if engine == "postgres" else 3306
+        resolved_port = default_port if port is None else port
+        if type(resolved_port) is not int or not 1 <= resolved_port <= 65535:
+            raise ValueError("port must be an integer between 1 and 65535")
+
+        quoted_alias = quote_identifier(alias)
+        quoted_secret = quote_identifier(secret_name)
+        attached = False
+        try:
+            self._connection.install_extension(engine)
+            self._connection.load_extension(engine)
+            if owns_secret:
+                secret_sql = (
+                    f"CREATE TEMPORARY SECRET {quoted_secret} "
+                    f"(TYPE {engine}, HOST ?, PORT ?, DATABASE ?, USER ?, PASSWORD ?"
+                )
+                parameters: list[object] = [
+                    cast("str", host),
+                    resolved_port,
+                    cast("str", database),
+                    cast("str", user),
+                    cast("str", password),
+                ]
+                if sslmode is not None:
+                    secret_sql += ", SSLMODE ?"
+                    parameters.append(sslmode)
+                secret_sql += ")"
+                self._connection.execute(secret_sql, parameters)
+
+            attach_sql = (
+                f"ATTACH '' AS {quoted_alias} "
+                f"(TYPE {engine}, SECRET {quoted_secret}, READ_ONLY"
+            )
+            if engine == "postgres" and schema is not None:
+                attach_sql += f", SCHEMA {quote_literal(schema)}"
+            attach_sql += ")"
+            self._connection.execute(attach_sql)
+            attached = True
+        except duckdb.Error as error:
+            if attached:
+                with suppress(duckdb.Error):
+                    self._connection.execute(f"DETACH {quoted_alias}")
+            if owns_secret:
+                with suppress(duckdb.Error):
+                    self._connection.execute(f"DROP SECRET {quoted_secret}")
+            raise RemoteAttachmentError(
+                f"Failed to attach {engine} database as {alias!r} "
+                f"({type(error).__name__})"
+            ) from None
+
+        location = (
+            f"{engine}://{host}:{resolved_port}/{database}"
+            if owns_secret
+            else f"{engine}://attached/{alias}"
+        )
+        state = _RemoteAttachmentState(
+            alias=alias,
+            engine=engine,
+            location=location,
+            secret_name=secret_name,
+            owns_secret=owns_secret,
+            default_schema=schema,
+            capabilities=(
+                _POSTGRES_CAPABILITIES if engine == "postgres" else _MYSQL_CAPABILITIES
+            ),
+            unbounded_scan=unbounded_scan,
+        )
+        self._attachments[alias] = state
+        return AttachedDatabase(self, alias, engine)
+
+    def _remote_table(
+        self,
+        alias: str,
+        name: str,
+        *,
+        schema: str | None,
+        index: str | Sequence[str] | None,
+        order_by: str | Sequence[str] | None,
+        unbounded_scan: Literal["error", "warn", "allow"] | None,
+    ) -> DataFrame:
+        from duckpd.frame import DataFrame
+
+        self._ensure_open()
+        try:
+            attachment = self._attachments[alias]
+        except KeyError:
+            raise RemoteAttachmentError(
+                f"Remote attachment {alias!r} is not available"
+            ) from None
+        if not name:
+            raise ValueError("remote table name must be non-empty")
+        effective_schema = attachment.default_schema if schema is None else schema
+        if effective_schema == "":
+            raise ValueError("remote schema must be non-empty when provided")
+        policy = attachment.unbounded_scan if unbounded_scan is None else unbounded_scan
+        if policy not in {"error", "warn", "allow"}:
+            raise ValueError("unbounded_scan must be 'error', 'warn', or 'allow'")
+        source = RemoteTableSource(
+            engine=attachment.engine,
+            attachment=alias,
+            table=name,
+            schema=effective_schema,
+            location=attachment.location,
+            capabilities=attachment.capabilities,
+            unbounded_scan=policy,
+        )
+        plan = self._source_plan(source, index=index, order_by=order_by)
+        return DataFrame(self, plan)
+
+    def _refresh_remote_schema(self, alias: str) -> None:
+        self._ensure_open()
+        try:
+            attachment = self._attachments[alias]
+        except KeyError:
+            raise RemoteAttachmentError(
+                f"Remote attachment {alias!r} is not available"
+            ) from None
+        function = (
+            "pg_clear_cache" if attachment.engine == "postgres" else "mysql_clear_cache"
+        )
+        try:
+            self._connection.execute(f"CALL {function}()")
+        except duckdb.Error as error:
+            raise RemoteAttachmentError(
+                f"Failed to refresh {attachment.engine} schema cache "
+                f"({type(error).__name__})"
+            ) from None
+
+    def _detach_remote(self, alias: str) -> None:
+        self._ensure_open()
+        try:
+            attachment = self._attachments[alias]
+        except KeyError:
+            raise RemoteAttachmentError(
+                f"Remote attachment {alias!r} is not available"
+            ) from None
+        try:
+            self._connection.execute(f"DETACH {quote_identifier(alias)}")
+            if attachment.owns_secret:
+                self._connection.execute(
+                    f"DROP SECRET {quote_identifier(attachment.secret_name)}"
+                )
+        except duckdb.Error as error:
+            raise RemoteAttachmentError(
+                f"Failed to detach {attachment.engine} database {alias!r} "
+                f"({type(error).__name__})"
+            ) from None
+        del self._attachments[alias]
+
     def table(
         self,
         name: str,
         *,
         index: str | Sequence[str] | None = None,
         order_by: str | Sequence[str] | None = None,
+        unbounded_scan: Literal["error", "warn", "allow"] | None = None,
     ) -> DataFrame:
-        """Create a lazy frame for a table in this session."""
+        """Create a lazy frame for a local or attached remote table."""
         from duckpd.frame import DataFrame
 
         self._ensure_open()
+        parts = name.split(".")
+        if parts[0] in self._attachments:
+            if len(parts) == 2:
+                schema = None
+                table_name = parts[1]
+            elif len(parts) == 3:
+                schema = parts[1]
+                table_name = parts[2]
+            else:
+                raise ValueError(
+                    "attached table names must be 'alias.table' or 'alias.schema.table'"
+                )
+            return self._remote_table(
+                parts[0],
+                table_name,
+                schema=schema,
+                index=index,
+                order_by=order_by,
+                unbounded_scan=unbounded_scan,
+            )
+        if unbounded_scan is not None:
+            raise ValueError("unbounded_scan applies only to attached remote tables")
         source = TableSource(name)
         plan = self._source_plan(source, index=index, order_by=order_by)
         return DataFrame(self, plan)
@@ -356,9 +713,18 @@ class Session:
         return DataFrame(self, plan)
 
     def close(self) -> None:
-        """Release the connection and retained Python sources."""
+        """Release attachments, temporary secrets, and retained sources."""
         if self._closed:
             return
+        for attachment in self._attachments.values():
+            with suppress(duckdb.Error):
+                self._connection.execute(f"DETACH {quote_identifier(attachment.alias)}")
+            if attachment.owns_secret:
+                with suppress(duckdb.Error):
+                    self._connection.execute(
+                        f"DROP SECRET {quote_identifier(attachment.secret_name)}"
+                    )
+        self._attachments.clear()
         self._registered_sources.clear()
         self._connection.close()
         self._closed = True
@@ -394,6 +760,7 @@ class Session:
             | CsvSource
             | PandasSource
             | ParquetSource
+            | RemoteTableSource
             | SqlSource
             | TableSource
         ),
@@ -464,6 +831,7 @@ class Session:
             | CsvSource
             | PandasSource
             | ParquetSource
+            | RemoteTableSource
             | SqlSource
             | TableSource
         ),
@@ -513,6 +881,19 @@ class Session:
                 SourceKind.CSV,
                 canonical,
                 fingerprint=fingerprint,
+            )
+        if isinstance(source, RemoteTableSource):
+            kind = (
+                SourceKind.POSTGRES if source.engine == "postgres" else SourceKind.MYSQL
+            )
+            location = (
+                f"{sanitize_source_location(source.location)}/{source.qualified_name}"
+            )
+            return SourceProvenance(
+                kind,
+                (location,),
+                writable=False,
+                capabilities=source.capabilities,
             )
         if isinstance(source, TableSource):
             return SourceProvenance(
