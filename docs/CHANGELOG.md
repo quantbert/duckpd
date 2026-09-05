@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
 the [release policy](RELEASES.md).
 
-## 0.1.1 - 2026-09-05
+## 0.1.2 - 2026-09-05
 
 ### Added
 
@@ -14,13 +14,24 @@ the [release policy](RELEASES.md).
   `SeriesGroupBy.rolling()` compile group keys into DuckDB window partitions,
   preserve grouped result indexes and ordering, and support lazy assignment
   back to the originating frame without materialization.
-- Credential-safe HTTP/S3/GCS Parquet scans, scoped temporary S3/GCS secrets,
-  and read-only SQLite attachments with session-owned cleanup.
+- Safe, read-only `Session.attach_postgres()` and `Session.attach_mysql()` APIs
+  with lazy table scans (`AttachedDatabase.table()`), refresh-on-execution
+  semantics, schema cache invalidation (`refresh_schema()`), structured
+  credential parameters or DuckDB secret references, and full credential redaction
+  from logical plans, `explain()`, and exceptions.
+- Credential-safe HTTP/S3/GCS Parquet scans, scoped temporary S3/GCS secrets
+  (`Session.create_s3_secret()`, `Session.create_gcs_secret()`), and read-only
+  SQLite attachments (`Session.attach_sqlite()`) with session-owned cleanup.
+- Unbounded remote scan guardrails (`unbounded_scan="warn"|"error"|"allow"`)
+  raising `UnboundedRemoteScanError` or emitting warnings when remote transfer
+  cannot be proven bounded.
 - Backend-neutral source-fragment planning, conservative pushdown-candidate and
   required-local-work reporting, cross-source movement plans, and source-I/O
   profile metrics.
 - Executing `explain("analyze")` output for projection, predicate, and Parquet
   row-group pruning evidence, guarded by the remote scan policy.
+- Redacted remote schema inspection errors preventing connection string and
+  credential leakage during attachment and table planning failures.
 - Release checks now validate project/changelog metadata before publishing an
   already-versioned immutable release; validated benchmark tracks report source
   bytes and preserve unknown remote-transfer metrics as `null`.
