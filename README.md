@@ -143,9 +143,9 @@ DuckPD is benchmarked across dataset sizes from **5 MB to 50 GB** on standard si
 
 | Dataset Size | Pandas Execution Time | DuckPD Execution Time | Pandas Peak RSS | DuckPD Peak RSS | DuckPD Heap Traced | Result |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **500 MB** | 1.84s | **0.28s (6.5x faster)** | ~4.8 GB | **~180 MB** | ~358 KB | Complete |
-| **5 GB** | 19.6s | **2.10s (9.3x faster)** | ~38 GB | **~850 MB** | ~358 KB | Complete |
-| **50 GB** | 💥 **OOM Crash** (>250 GB req.) | **18.4s (Out-of-Core)** | 💥 Out of Memory | **< 2 GB (Spill Bounded)** | ~358 KB | **Zero OOM** |
+| **500 MB** | 0.80s | **0.29s (2.8x faster)** | ~4.9 GB | **~189 MB** | ~403 KB | Complete |
+| **5 GB** | 7.23s | **2.46s (2.9x faster)** | ~38 GB | **~212 MB** | ~403 KB | Complete |
+| **50 GB** | 💥 **OOM Crash** (>250 GB req.) | **18.4s (Out-of-Core)** | 💥 Out of Memory | **< 2 GB (Spill Bounded)** | ~403 KB | **Zero OOM** |
 
 Run benchmarks locally:
 ```bash

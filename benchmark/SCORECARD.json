@@ -1,0 +1,120 @@
+{
+  "dimensions": {
+    "correctness": "validated results retained per engine and track",
+    "safety": "failed, OOM, unsupported, and unknown metrics are retained",
+    "scale": {
+      "rows_per_track": {
+        "tpch_q1": 100000,
+        "db_groupby_join": 100000,
+        "synthetic_ohlc": 100000
+      }
+    },
+    "observability": [
+      "planning_seconds",
+      "peak_rss_bytes",
+      "spill_bytes",
+      "source_bytes_read",
+      "transfer_bytes"
+    ],
+    "performance": [
+      "cold_execution_seconds",
+      "warm_execution_seconds",
+      "cold_cache_policy"
+    ],
+    "portability": {
+      "platform": "Linux",
+      "python": "3.12.13"
+    },
+    "interoperability": {
+      "engines": [
+        "duckdb_sql",
+        "duckpd",
+        "fireducks",
+        "pandas",
+        "polars"
+      ]
+    },
+    "openness": {
+      "format": "public JSON",
+      "license": "MIT",
+      "generator": "benchmark.tracks"
+    }
+  },
+  "engines": [
+    {
+      "engine": "duckdb_sql",
+      "tracks": 3,
+      "successful_tracks": 3,
+      "correct_tracks": 3,
+      "failed_tracks": 0,
+      "oom_tracks": 0,
+      "unsupported_tracks": 0,
+      "unavailable_tracks": 0,
+      "median_cold_seconds": 0.010426903143525124,
+      "median_warm_seconds": 0.005070609971880913,
+      "max_peak_rss_bytes": 169369600,
+      "source_byte_measurements": 0,
+      "transfer_byte_measurements": 0
+    },
+    {
+      "engine": "duckpd",
+      "tracks": 3,
+      "successful_tracks": 3,
+      "correct_tracks": 3,
+      "failed_tracks": 0,
+      "oom_tracks": 0,
+      "unsupported_tracks": 0,
+      "unavailable_tracks": 0,
+      "median_cold_seconds": 0.013772028498351574,
+      "median_warm_seconds": 0.008913036435842514,
+      "max_peak_rss_bytes": 170938368,
+      "source_byte_measurements": 3,
+      "transfer_byte_measurements": 0
+    },
+    {
+      "engine": "fireducks",
+      "tracks": 3,
+      "successful_tracks": 0,
+      "correct_tracks": 0,
+      "failed_tracks": 0,
+      "oom_tracks": 0,
+      "unsupported_tracks": 0,
+      "unavailable_tracks": 3,
+      "median_cold_seconds": null,
+      "median_warm_seconds": null,
+      "max_peak_rss_bytes": null,
+      "source_byte_measurements": 0,
+      "transfer_byte_measurements": 0
+    },
+    {
+      "engine": "pandas",
+      "tracks": 3,
+      "successful_tracks": 3,
+      "correct_tracks": 3,
+      "failed_tracks": 0,
+      "oom_tracks": 0,
+      "unsupported_tracks": 0,
+      "unavailable_tracks": 0,
+      "median_cold_seconds": 0.02317112684249878,
+      "median_warm_seconds": 0.014056259766221046,
+      "max_peak_rss_bytes": 240304128,
+      "source_byte_measurements": 0,
+      "transfer_byte_measurements": 0
+    },
+    {
+      "engine": "polars",
+      "tracks": 3,
+      "successful_tracks": 0,
+      "correct_tracks": 0,
+      "failed_tracks": 0,
+      "oom_tracks": 0,
+      "unsupported_tracks": 0,
+      "unavailable_tracks": 3,
+      "median_cold_seconds": null,
+      "median_warm_seconds": null,
+      "max_peak_rss_bytes": null,
+      "source_byte_measurements": 0,
+      "transfer_byte_measurements": 0
+    }
+  ]
+}
