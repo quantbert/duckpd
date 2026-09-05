@@ -230,9 +230,7 @@ with pd.connect() as session:
         schema="reporting",
         order_by="order_id",
     )
-    open_orders = orders[orders["status"] == "open"][
-        ["order_id", "customer_id", "total"]
-    ]
+    open_orders = orders[orders["status"] == "open"][["order_id", "customer_id", "total"]]
 
     # No rows are fetched until an explicit execution boundary.
     print(open_orders.explain("json"))

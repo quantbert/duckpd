@@ -135,9 +135,7 @@ def concat(
     if axis not in {0, 1, "index", "columns"}:
         raise ValueError("axis must be 0, 1, 'index', or 'columns'")
     if join not in {"outer", "inner"}:
-        raise ValueError(
-            "Only can inner (intersect) or outer (union) join the other axis"
-        )
+        raise ValueError("Only can inner (intersect) or outer (union) join the other axis")
 
     typed_objs: list[DataFrame | Series] = []
     for item in objs:
@@ -175,8 +173,7 @@ def concat(
             if not ignore_index and len(labels) != len(set(labels)):
                 duplicates = sorted({x for x in labels if labels.count(x) > 1})
                 raise ValueError(
-                    "Duplicate column labels found across concatenated objects: "
-                    f"{duplicates!r}"
+                    f"Duplicate column labels found across concatenated objects: {duplicates!r}"
                 )
 
             if ignore_index:
@@ -238,8 +235,7 @@ def concat(
                     {x for x in all_visible_labels if all_visible_labels.count(x) > 1}
                 )
                 raise ValueError(
-                    "Duplicate column labels found across concatenated frames: "
-                    f"{duplicates!r}"
+                    f"Duplicate column labels found across concatenated frames: {duplicates!r}"
                 )
         join_mode: Literal["outer", "inner"] = "inner" if join == "inner" else "outer"
         result = frames[0]
@@ -300,9 +296,7 @@ def concat(
         if all_match_index and first_index_ids:
             for source_id in first_index_ids:
                 source_column = next(
-                    column
-                    for column in frames[0]._plan.metadata.columns
-                    if column.id == source_id
+                    column for column in frames[0]._plan.metadata.columns if column.id == source_id
                 )
                 idx_col = Column(
                     ColumnId.create(),

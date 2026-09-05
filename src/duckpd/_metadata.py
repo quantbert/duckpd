@@ -20,9 +20,7 @@ from duckpd._logical import (
 )
 
 
-def find_column(
-    metadata: FrameMetadata, label: str, *, include_hidden: bool = False
-) -> Column:
+def find_column(metadata: FrameMetadata, label: str, *, include_hidden: bool = False) -> Column:
     """Find a column by displayed label."""
     for column in metadata.columns:
         if column.label == label and (include_hidden or not column.hidden):
@@ -47,15 +45,12 @@ def source_metadata(
     index_columns = tuple(find_column(base, label) for label in index_labels)
     index_ids = tuple(column.id for column in index_columns)
     updated = tuple(
-        replace(column, hidden=True) if column.id in index_ids else column
-        for column in columns
+        replace(column, hidden=True) if column.id in index_ids else column for column in columns
     )
     return replace(base, columns=updated, index=IndexSpec(index_ids, drop=True))
 
 
-def projection_columns(
-    metadata: FrameMetadata, selected: tuple[Column, ...]
-) -> tuple[Column, ...]:
+def projection_columns(metadata: FrameMetadata, selected: tuple[Column, ...]) -> tuple[Column, ...]:
     """Append hidden columns required to preserve index and ordering metadata."""
     selected_ids = {column.id for column in selected}
     required_ids = set(metadata.index.columns)
@@ -68,9 +63,7 @@ def projection_columns(
     return (*selected, *hidden)
 
 
-def after_projection(
-    metadata: FrameMetadata, columns: tuple[Column, ...]
-) -> FrameMetadata:
+def after_projection(metadata: FrameMetadata, columns: tuple[Column, ...]) -> FrameMetadata:
     """Carry only metadata whose physical columns remain available."""
     available = {column.id for column in columns}
     index = (
@@ -139,9 +132,7 @@ def after_aggregate(
     return result
 
 
-def set_index(
-    metadata: FrameMetadata, columns: tuple[Column, ...], *, drop: bool
-) -> FrameMetadata:
+def set_index(metadata: FrameMetadata, columns: tuple[Column, ...], *, drop: bool) -> FrameMetadata:
     """Replace the explicit index without requiring uniqueness."""
     index_ids = tuple(column.id for column in columns)
     updated = tuple(
@@ -163,17 +154,11 @@ def reset_index(metadata: FrameMetadata, *, drop: bool) -> FrameMetadata:
     if not metadata.index.columns:
         raise ValueError("DataFrame has no explicit index to reset")
     index_ids = set(metadata.index.columns)
-    index_columns = tuple(
-        column for column in metadata.columns if column.id in index_ids
-    )
-    other_columns = tuple(
-        column for column in metadata.columns if column.id not in index_ids
-    )
+    index_columns = tuple(column for column in metadata.columns if column.id in index_ids)
+    other_columns = tuple(column for column in metadata.columns if column.id not in index_ids)
     if drop:
         columns = tuple(
-            column
-            for column in metadata.columns
-            if column.id not in index_ids or not column.hidden
+            column for column in metadata.columns if column.id not in index_ids or not column.hidden
         )
     else:
         if any(not column.hidden for column in index_columns):
@@ -206,9 +191,7 @@ def protected_column_ids(metadata: FrameMetadata) -> frozenset[ColumnId]:
     return frozenset(values)
 
 
-def sort_keys_for_labels(
-    metadata: FrameMetadata, labels: tuple[str, ...]
-) -> tuple[SortKey, ...]:
+def sort_keys_for_labels(metadata: FrameMetadata, labels: tuple[str, ...]) -> tuple[SortKey, ...]:
     """Create ascending, nulls-last sort keys for source order declarations."""
     return tuple(
         SortKey(
@@ -243,9 +226,7 @@ def after_union(
     identity_ids: tuple[ColumnId, ...] = (),
 ) -> FrameMetadata:
     """Create metadata for a union (concat) plan."""
-    index = (
-        IndexSpec(index_ids, drop=True, names=index_names) if index_ids else IndexSpec()
-    )
+    index = IndexSpec(index_ids, drop=True, names=index_names) if index_ids else IndexSpec()
     identity_ids = tuple(identity_ids)
     result = FrameMetadata(
         columns,
@@ -313,15 +294,11 @@ def _after_transform(
 def validate_metadata(metadata: FrameMetadata) -> None:
     """Reject metadata that references columns absent from the schema."""
     available = {column.id for column in metadata.columns}
-    if metadata.index.names and len(metadata.index.names) != len(
-        metadata.index.columns
-    ):
+    if metadata.index.names and len(metadata.index.names) != len(metadata.index.columns):
         raise AssertionError("Index names must match the number of index columns")
     dangling = set(metadata.index.columns) - available
     dangling.update(
-        key.column_id
-        for key in metadata.ordering.keys
-        if key.column_id not in available
+        key.column_id for key in metadata.ordering.keys if key.column_id not in available
     )
     dangling.update(set(metadata.row_identity.columns) - available)
     if dangling:

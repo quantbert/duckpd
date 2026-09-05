@@ -50,9 +50,7 @@ def validate_explicit_index_alignment(
         )
 
     left_columns = tuple(left_frame._column_by_id(column_id) for column_id in left_ids)
-    right_columns = tuple(
-        right_frame._column_by_id(column_id) for column_id in right_ids
-    )
+    right_columns = tuple(right_frame._column_by_id(column_id) for column_id in right_ids)
     left_names = tuple(column.label for column in left_columns)
     right_names = tuple(column.label for column in right_columns)
     if left_names != right_names:
@@ -84,10 +82,7 @@ def plan_merge(
 ) -> JoinPlan:
     """Build a typed JoinPlan following pandas merge semantics."""
     if how not in {"inner", "left", "right", "outer", "cross"}:
-        msg = (
-            f"Invalid how={how!r}; must be 'inner', 'left', 'right', "
-            "'outer', or 'cross'"
-        )
+        msg = f"Invalid how={how!r}; must be 'inner', 'left', 'right', 'outer', or 'cross'"
         raise ValueError(msg)
 
     join_type = {
@@ -134,15 +129,12 @@ def plan_merge(
     if join_type is JoinType.CROSS:
         if on or left_on or right_on or left_index or right_index:
             raise ValueError(
-                "Can not pass on, left_on, right_on, left_index or right_index "
-                "when how='cross'"
+                "Can not pass on, left_on, right_on, left_index or right_index when how='cross'"
             )
     else:
         if on is not None:
             if left_on is not None or right_on is not None or left_index or right_index:
-                raise ValueError(
-                    "Cannot pass on with left_on, right_on, left_index or right_index"
-                )
+                raise ValueError("Cannot pass on with left_on, right_on, left_index or right_index")
             on_labels = (on,) if isinstance(on, str) else tuple(on)
             if not on_labels:
                 raise ValueError("on must not be empty")
@@ -160,9 +152,7 @@ def plan_merge(
                     for c_id in left_frame._plan.metadata.index.columns
                 ]
             elif left_on is not None:
-                left_on_labels = (
-                    (left_on,) if isinstance(left_on, str) else tuple(left_on)
-                )
+                left_on_labels = (left_on,) if isinstance(left_on, str) else tuple(left_on)
                 left_keys = [
                     find_column(left_frame._plan.metadata, key_label)
                     for key_label in left_on_labels
@@ -172,10 +162,7 @@ def plan_merge(
                 common = [
                     c.label
                     for c in left_frame._plan.metadata.visible_columns
-                    if any(
-                        r.label == c.label
-                        for r in right_frame._plan.metadata.visible_columns
-                    )
+                    if any(r.label == c.label for r in right_frame._plan.metadata.visible_columns)
                 ]
                 if not common:
                     raise ValueError(
@@ -189,31 +176,26 @@ def plan_merge(
             if right_index:
                 if not right_frame._plan.metadata.index.columns:
                     raise ValueError(
-                        "right_index=True requires right frame to "
-                        "have an explicit index"
+                        "right_index=True requires right frame to have an explicit index"
                     )
                 right_keys = [
                     right_frame._column_by_id(c_id)
                     for c_id in right_frame._plan.metadata.index.columns
                 ]
             elif right_on is not None:
-                right_on_labels = (
-                    (right_on,) if isinstance(right_on, str) else tuple(right_on)
-                )
+                right_on_labels = (right_on,) if isinstance(right_on, str) else tuple(right_on)
                 right_keys = [
                     find_column(right_frame._plan.metadata, key_label)
                     for key_label in right_on_labels
                 ]
             elif not right_keys:
                 raise ValueError(
-                    "Must specify right_on or right_index when "
-                    "left_on/left_index is provided"
+                    "Must specify right_on or right_index when left_on/left_index is provided"
                 )
 
         if len(left_keys) != len(right_keys):
             raise ValueError(
-                f"len(left_on) ({len(left_keys)}) does not match "
-                f"len(right_on) ({len(right_keys)})"
+                f"len(left_on) ({len(left_keys)}) does not match len(right_on) ({len(right_keys)})"
             )
 
     # 2. Build output schema & handle name collisions and duplicate merge keys
@@ -232,9 +214,7 @@ def plan_merge(
         left_included = left_frame._plan.metadata.columns
         # Right columns include visible only (hidden index dropped)
         right_included = [
-            c
-            for c in right_frame._plan.metadata.visible_columns
-            if c.id not in right_key_ids
+            c for c in right_frame._plan.metadata.visible_columns if c.id not in right_key_ids
         ]
     else:
         left_included = left_frame._plan.metadata.visible_columns
@@ -256,15 +236,11 @@ def plan_merge(
     # Check collisions between left visible and right visible
     left_labels = {c.label for c in left_included if not c.hidden}
     right_labels = {
-        c.label
-        for c in right_included
-        if c.id not in right_to_left_key_map and not c.hidden
+        c.label for c in right_included if c.id not in right_to_left_key_map and not c.hidden
     }
     common_labels = left_labels.intersection(right_labels)
     if common_labels and not lsuffix and not rsuffix:
-        raise ValueError(
-            f"columns overlap but no suffix is specified: {sorted(common_labels)!r}"
-        )
+        raise ValueError(f"columns overlap but no suffix is specified: {sorted(common_labels)!r}")
 
     for c in left_included:
         is_collision = not c.hidden and c.label in common_labels
@@ -292,9 +268,7 @@ def plan_merge(
     if join_type in {JoinType.LEFT, JoinType.OUTER}:
         nullable_ids.update(column.id for column in right_included)
     output_columns = [
-        replace(column, nullable=Nullability.NULLABLE)
-        if column.id in nullable_ids
-        else column
+        replace(column, nullable=Nullability.NULLABLE) if column.id in nullable_ids else column
         for column in output_columns
     ]
 

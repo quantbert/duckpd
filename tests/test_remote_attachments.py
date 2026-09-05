@@ -265,9 +265,7 @@ def test_attachment_validation_and_failure_redact_credentials() -> None:
     with pytest.raises(ValueError, match="cannot be combined"):
         session.attach_mysql("db", secret="managed", host="host")
     with pytest.raises(ValueError, match="unbounded_scan"):
-        session.attach_mysql(
-            "policy", secret="managed", unbounded_scan=cast("Any", "no")
-        )
+        session.attach_mysql("policy", secret="managed", unbounded_scan=cast("Any", "no"))
     with pytest.raises(ValueError, match="schema must be non-empty"):
         session.attach_postgres("schema", secret="managed", schema="")
     with pytest.raises(ValueError, match="parameters are missing"):
@@ -302,16 +300,12 @@ def test_attachment_validation_and_failure_redact_credentials() -> None:
     message = str(captured.value)
     assert "reader" not in message
     assert "super-secret" not in message
-    assert any(
-        query.startswith("DROP SECRET") for query, _ in failed_connection.queries
-    )
+    assert any(query.startswith("DROP SECRET") for query, _ in failed_connection.queries)
 
 
 def test_remote_fragment_and_cross_source_movement_are_explicit() -> None:
     session, _ = _session_with_fake()
-    attachment = session.attach_postgres(
-        "analytics", secret="managed", unbounded_scan="allow"
-    )
+    attachment = session.attach_postgres("analytics", secret="managed", unbounded_scan="allow")
     remote = attachment.table("orders")
     session.register_arrow_udf(
         "adjust",
@@ -327,9 +321,7 @@ def test_remote_fragment_and_cross_source_movement_are_explicit() -> None:
     assert "projection" in computed_fragment["local_required"]
     planned = remote[remote["amount"] > 0][["id"]].limit(5)
 
-    fragment = json.loads(planned.explain("json"))["execution_boundaries"][
-        "source_fragments"
-    ][0]
+    fragment = json.loads(planned.explain("json"))["execution_boundaries"]["source_fragments"][0]
     assert fragment["requested"] == ["projection", "filter", "limit"]
     assert fragment["pushdown_candidates"] == ["projection", "filter"]
     assert fragment["local_required"] == ["limit"]
@@ -410,9 +402,7 @@ def test_object_store_secret_validation_and_failures_are_redacted() -> None:
         "s3.us-west-2.amazonaws.com",
     )
     with pytest.raises(ValueError, match="cannot be combined"):
-        session.create_s3_secret(
-            "mixed", key_id="key", secret="secret", credential_chain=True
-        )
+        session.create_s3_secret("mixed", key_id="key", secret="secret", credential_chain=True)
     with pytest.raises(ValueError, match="both be non-empty"):
         session.create_s3_secret("missing", key_id="key")
     with pytest.raises(ValueError, match="both be non-empty"):
@@ -480,8 +470,7 @@ def test_sqlite_attachment_is_read_only_and_refreshes(tmp_path: Path) -> None:
     attachment = session.attach_sqlite("catalog", path)
     query, parameters = connection.queries[-1]
     assert query == (
-        f"ATTACH {quote_literal(str(path.resolve()))} "
-        'AS "catalog" (TYPE sqlite, READ_ONLY)'
+        f'ATTACH {quote_literal(str(path.resolve()))} AS "catalog" (TYPE sqlite, READ_ONLY)'
     )
     assert parameters == ()
     assert attachment.engine == "sqlite"
@@ -517,9 +506,7 @@ def test_sqlite_attachment_reads_fresh_commits_without_write_access(
         writer.commit()
         assert frame.collect()["id"].tolist() == [1, 2]
         with pytest.raises(duckdb.Error):
-            session._connection.execute(
-                'INSERT INTO "catalog"."orders" VALUES (3, 30.0)'
-            )
+            session._connection.execute('INSERT INTO "catalog"."orders" VALUES (3, 30.0)')
 
         writer.execute("ALTER TABLE orders ADD COLUMN note TEXT")
         writer.commit()
@@ -613,8 +600,7 @@ def test_remote_attachment_refresh_visibility_and_read_only(engine: str) -> None
     )
     writer = _attach_writer(engine, settings)
     writer.execute(
-        f"CREATE TABLE {qualified_writer}"
-        "(id INTEGER, amount DOUBLE, ignored VARCHAR(16))"
+        f"CREATE TABLE {qualified_writer}(id INTEGER, amount DOUBLE, ignored VARCHAR(16))"
     )
     writer.execute(f"INSERT INTO {qualified_writer} VALUES (1, 10.5, 'unused')")
 
@@ -628,9 +614,7 @@ def test_remote_attachment_refresh_visibility_and_read_only(engine: str) -> None
     )
     filtered = attachment.table(table_name)
     filtered = filtered[filtered["amount"] > 5][["id"]]
-    fragment = json.loads(filtered.explain("json"))["execution_boundaries"][
-        "source_fragments"
-    ][0]
+    fragment = json.loads(filtered.explain("json"))["execution_boundaries"]["source_fragments"][0]
     assert fragment["pushdown_candidates"] == ["projection", "filter"]
     assert fragment["local_required"] == []
     analyzed = filtered.explain("analyze")

@@ -75,9 +75,7 @@ def market_query(rows: int) -> str:
     """
 
 
-def estimate_row_count(
-    calibration_rows: int, calibration_bytes: int, target_bytes: int
-) -> int:
+def estimate_row_count(calibration_rows: int, calibration_bytes: int, target_bytes: int) -> int:
     """Estimate rows required for a compressed target size."""
     if min(calibration_rows, calibration_bytes, target_bytes) <= 0:
         raise ValueError("calibration and target values must be positive")
@@ -162,10 +160,7 @@ def generate(arguments: Arguments) -> None:
                 write_market_data(session, rows, path)
                 actual_bytes = path.stat().st_size
                 error = (actual_bytes - target_bytes) / target_bytes * 100.0
-                print(
-                    f"Created {path}: {human_size(actual_bytes)} "
-                    f"({error:+.1f}% from target)"
-                )
+                print(f"Created {path}: {human_size(actual_bytes)} ({error:+.1f}% from target)")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> Arguments:
@@ -177,8 +172,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Arguments:
         default=None,
         metavar="SIZE",
         help=(
-            "Size presets to generate "
-            f"({', '.join(TARGET_SIZES)}); defaults to a 5 MB smoke file"
+            f"Size presets to generate ({', '.join(TARGET_SIZES)}); defaults to a 5 MB smoke file"
         ),
     )
     parser.add_argument(
@@ -208,9 +202,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Arguments:
     invalid = [size for size in parsed_sizes or () if size not in TARGET_SIZES]
     if invalid:
         valid = ", ".join(TARGET_SIZES)
-        parser.error(
-            f"argument sizes: invalid choice: {invalid[0]!r} (choose from {valid})"
-        )
+        parser.error(f"argument sizes: invalid choice: {invalid[0]!r} (choose from {valid})")
     sizes = tuple(parsed_sizes) if parsed_sizes else ("smoke",)
     calibration_rows = cast("int", namespace.calibration_rows)
     if calibration_rows <= 0:

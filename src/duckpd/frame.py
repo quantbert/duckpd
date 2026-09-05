@@ -113,8 +113,7 @@ class DataFrame:
         if self._plan.metadata.index.names:
             return self._plan.metadata.index.names
         return tuple(
-            self._column_by_id(column_id).label
-            for column_id in self._plan.metadata.index.columns
+            self._column_by_id(column_id).label for column_id in self._plan.metadata.index.columns
         )
 
     @property
@@ -164,9 +163,7 @@ class DataFrame:
         """Execute the plan and stream its rows as Arrow record batches."""
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        return self._session._executor.to_arrow_batches(
-            self._plan, batch_size=batch_size
-        )
+        return self._session._executor.to_arrow_batches(self._plan, batch_size=batch_size)
 
     def write_parquet(
         self,
@@ -276,9 +273,7 @@ class DataFrame:
         )
         identity_columns = self._plan.metadata.row_identity.columns
         stable_order_label = (
-            self._column_by_id(identity_columns[0]).label
-            if len(identity_columns) == 1
-            else None
+            self._column_by_id(identity_columns[0]).label if len(identity_columns) == 1 else None
         )
         self._plan = ScanPlan(
             ParquetSource(
@@ -292,9 +287,7 @@ class DataFrame:
 
     def explain(
         self,
-        mode: Literal[
-            "all", "logical", "optimized", "json", "sql", "physical", "analyze"
-        ] = "all",
+        mode: Literal["all", "logical", "optimized", "json", "sql", "physical", "analyze"] = "all",
     ) -> str:
         """Return a logical, optimized, SQL, physical, analyzed, or JSON plan."""
         return self._session._executor.explain(self._plan, mode=mode)
@@ -306,9 +299,7 @@ class DataFrame:
         compression: ParquetCompression = "snappy",
     ) -> str:
         """Inspect write strategy and execution plan without writing rows."""
-        return self._session._executor.explain_write(
-            self._plan, str(path), compression=compression
-        )
+        return self._session._executor.explain_write(self._plan, str(path), compression=compression)
 
     def profile(self) -> ProfileResult:
         """Execute the plan with DuckDB profiling enabled and return metrics."""
@@ -627,9 +618,7 @@ class DataFrame:
                         target_type = normalize_dtype(target_spec)
                         out_col = replace_column(col, duckdb_type=target_type)
                         projections.append(
-                            NamedExpression(
-                                out_col, CastExpression(ColumnRef(col.id), target_type)
-                            )
+                            NamedExpression(out_col, CastExpression(ColumnRef(col.id), target_type))
                         )
                     except (TypeError, ValueError):
                         if errors == "raise":
@@ -650,9 +639,7 @@ class DataFrame:
             except (TypeError, ValueError):
                 if errors == "raise":
                     raise
-                projections = [
-                    NamedExpression(col, ColumnRef(col.id)) for col in visible
-                ]
+                projections = [NamedExpression(col, ColumnRef(col.id)) for col in visible]
 
         for col in index_columns:
             projections.append(NamedExpression(col, ColumnRef(col.id)))
@@ -763,9 +750,7 @@ class DataFrame:
         if inplace:
             raise UnsupportedOperationError("DuckPD does not support inplace=True")
         if ignore_index:
-            raise UnsupportedOperationError(
-                "DuckPD does not support ignore_index=True in dropna"
-            )
+            raise UnsupportedOperationError("DuckPD does not support ignore_index=True in dropna")
         if how not in {None, "any", "all"}:
             raise ValueError("how must be 'any' or 'all'")
         if how is not None and thresh is not None:
@@ -779,8 +764,7 @@ class DataFrame:
 
         if axis in {1, "columns"}:
             raise UnsupportedOperationError(
-                "dropna(axis=1) is not supported because "
-                "column dropping requires data inspection"
+                "dropna(axis=1) is not supported because column dropping requires data inspection"
             )
 
         if axis not in {0, "index"}:
@@ -808,9 +792,7 @@ class DataFrame:
                 count_expr = BinaryExpression(
                     count_expr,
                     BinaryOperator.ADD,
-                    CastExpression(
-                        FunctionCall("notnull", (ColumnRef(col.id),)), "INTEGER"
-                    ),
+                    CastExpression(FunctionCall("notnull", (ColumnRef(col.id),)), "INTEGER"),
                 )
             predicate: Expression = BinaryExpression(
                 count_expr, BinaryOperator.GREATER_EQUAL, LiteralValue(thresh)
@@ -889,11 +871,7 @@ class DataFrame:
         if lower is None and upper is None:
             return self
 
-        if (
-            isinstance(lower, (int, float))
-            and isinstance(upper, (int, float))
-            and lower > upper
-        ):
+        if isinstance(lower, (int, float)) and isinstance(upper, (int, float)) and lower > upper:
             raise ValueError("Cannot set lower > upper")
 
         new_cols: list[Column] = []
@@ -912,14 +890,10 @@ class DataFrame:
             )
 
             lower_val = (
-                LiteralValue(cast("ScalarValue", col_lower))
-                if col_lower is not None
-                else None
+                LiteralValue(cast("ScalarValue", col_lower)) if col_lower is not None else None
             )
             upper_val = (
-                LiteralValue(cast("ScalarValue", col_upper))
-                if col_upper is not None
-                else None
+                LiteralValue(cast("ScalarValue", col_upper)) if col_upper is not None else None
             )
 
             cond_lower = (
@@ -965,9 +939,7 @@ class DataFrame:
             else:
                 full_projections.append(NamedExpression(col, ColumnRef(col.id)))
         metadata = after_projection(self._plan.metadata, all_cols)
-        return DataFrame(
-            self._session, ProjectPlan(self._plan, tuple(full_projections), metadata)
-        )
+        return DataFrame(self._session, ProjectPlan(self._plan, tuple(full_projections), metadata))
 
     def replace(
         self,
@@ -983,9 +955,7 @@ class DataFrame:
         if inplace:
             raise UnsupportedOperationError("DuckPD does not support inplace=True")
         if regex:
-            raise UnsupportedOperationError(
-                "DuckPD replace does not yet support regex=True"
-            )
+            raise UnsupportedOperationError("DuckPD replace does not yet support regex=True")
         if limit is not None or method is not None:
             raise UnsupportedOperationError(
                 "DuckPD replace does not support limit or method parameters"
@@ -997,9 +967,7 @@ class DataFrame:
             if val is None or val is pd.NA:
                 return True
             if is_numeric_type(duckdb_type):
-                return isinstance(val, (int, float, Decimal)) and not isinstance(
-                    val, bool
-                )
+                return isinstance(val, (int, float, Decimal)) and not isinstance(val, bool)
             if duckdb_type in {"VARCHAR", "TEXT"}:
                 return isinstance(val, str)
             if duckdb_type == "BOOLEAN":
@@ -1045,9 +1013,7 @@ class DataFrame:
                 pairs = [(to_replace, value)]
 
             cur_expr: Expression = expr
-            applicable_pairs = [
-                p for p in pairs if _is_replace_compatible(p[0], col.duckdb_type)
-            ]
+            applicable_pairs = [p for p in pairs if _is_replace_compatible(p[0], col.duckdb_type)]
             if applicable_pairs:
                 for old_v, new_v in reversed(applicable_pairs):
                     is_null_val = (
@@ -1082,9 +1048,7 @@ class DataFrame:
             else:
                 full_projections.append(NamedExpression(col, ColumnRef(col.id)))
         metadata = after_projection(self._plan.metadata, all_cols)
-        return DataFrame(
-            self._session, ProjectPlan(self._plan, tuple(full_projections), metadata)
-        )
+        return DataFrame(self._session, ProjectPlan(self._plan, tuple(full_projections), metadata))
 
     def _where_mask(
         self,
@@ -1107,14 +1071,10 @@ class DataFrame:
         if isinstance(cond, DataFrame):
             if cond._session is not self._session or cond._plan is not self._plan:
                 raise AlignmentError(
-                    "Condition DataFrame from different frame "
-                    "requires explicit index alignment"
+                    "Condition DataFrame from different frame requires explicit index alignment"
                 )
             # Match each column of cond to self
-            cond_map = {
-                col.label: ColumnRef(col.id)
-                for col in cond._plan.metadata.visible_columns
-            }
+            cond_map = {col.label: ColumnRef(col.id) for col in cond._plan.metadata.visible_columns}
         elif isinstance(cond, Series):
             self._require_same_plan(cond)
             cond_map = {col.label: cond._expression for col in visible}
@@ -1127,12 +1087,10 @@ class DataFrame:
         if isinstance(other, DataFrame):
             if other._session is not self._session or other._plan is not self._plan:
                 raise AlignmentError(
-                    "Other DataFrame from different frame "
-                    "requires explicit index alignment"
+                    "Other DataFrame from different frame requires explicit index alignment"
                 )
             other_map = {
-                col.label: ColumnRef(col.id)
-                for col in other._plan.metadata.visible_columns
+                col.label: ColumnRef(col.id) for col in other._plan.metadata.visible_columns
             }
         elif isinstance(other, Series):
             self._require_same_plan(other)
@@ -1140,8 +1098,7 @@ class DataFrame:
         elif isinstance(other, dict):
             other_dict = cast("dict[object, object]", other)
             other_map = {
-                col.label: self._coerce_expression(other_dict.get(col.label))
-                for col in visible
+                col.label: self._coerce_expression(other_dict.get(col.label)) for col in visible
             }
         elif is_scalar_value(other):
             other_map = {col.label: LiteralValue(other) for col in visible}
@@ -1219,9 +1176,7 @@ class DataFrame:
             self._require_same_plan(key)
             return DataFrame(
                 self._session,
-                FilterPlan(
-                    self._plan, key._expression, after_filter(self._plan.metadata)
-                ),
+                FilterPlan(self._plan, key._expression, after_filter(self._plan.metadata)),
             )
 
         labels = tuple(key)
@@ -1235,9 +1190,7 @@ class DataFrame:
         )
         selected = tuple(projection.column for projection in projections)
         columns = projection_columns(self._plan.metadata, selected)
-        projections = tuple(
-            NamedExpression(column, ColumnRef(column.id)) for column in columns
-        )
+        projections = tuple(NamedExpression(column, ColumnRef(column.id)) for column in columns)
         return DataFrame(
             self._session,
             ProjectPlan(
@@ -1263,20 +1216,15 @@ class DataFrame:
             if isinstance(value, DataFrame):
                 if value._session is not self._session:
                     raise AlignmentError(
-                        "Assigned DataFrame from different frame "
-                        "requires explicit alignment"
+                        "Assigned DataFrame from different frame requires explicit alignment"
                     )
                 if value._plan is self._plan:
                     expressions = tuple(
-                        ColumnRef(column.id)
-                        for column in value._plan.metadata.visible_columns
+                        ColumnRef(column.id) for column in value._plan.metadata.visible_columns
                     )
                 elif value._alignment_source is self._plan:
                     expressions = value._alignment_expressions
-                elif (
-                    isinstance(value._plan, ProjectPlan)
-                    and value._plan.input is self._plan
-                ):
+                elif isinstance(value._plan, ProjectPlan) and value._plan.input is self._plan:
                     expressions = tuple(
                         projection.expression
                         for projection in value._plan.projections
@@ -1287,9 +1235,7 @@ class DataFrame:
                         "Assigned DataFrame requires a direct same-frame projection"
                     )
                 if len(labels) != len(expressions):
-                    raise ValueError(
-                        "Number of columns does not match number of labels"
-                    )
+                    raise ValueError("Number of columns does not match number of labels")
                 from duckpd.series import Series
 
                 kwargs = {
@@ -1320,27 +1266,19 @@ class DataFrame:
         frame = self
         for label, value in columns.items():
             resolved = value(frame) if callable(value) else value
-            expression = frame._coerce_expression(
-                resolved, alternate_plan=original_plan
-            )
+            expression = frame._coerce_expression(resolved, alternate_plan=original_plan)
             try:
                 existing = find_column(frame._plan.metadata, label, include_hidden=True)
             except KeyError:
                 existing = None
-            if existing is not None and existing.id in protected_column_ids(
-                frame._plan.metadata
-            ):
-                raise ValueError(
-                    "Cannot replace an index or ordering column; reset metadata first"
-                )
+            if existing is not None and existing.id in protected_column_ids(frame._plan.metadata):
+                raise ValueError("Cannot replace an index or ordering column; reset metadata first")
             output = Column(
                 ColumnId.create(),
                 label,
                 expression_type(frame._plan, expression),
                 nullable=expression_nullability(expression, frame._plan.metadata),
-                alias_of=(
-                    expression.column_id if isinstance(expression, ColumnRef) else None
-                ),
+                alias_of=(expression.column_id if isinstance(expression, ColumnRef) else None),
             )
             if existing is not None:
                 # Replace column in-place to preserve original column order
@@ -1384,17 +1322,11 @@ class DataFrame:
         if na_position not in {"first", "last"}:
             raise ValueError("na_position must be 'first' or 'last'")
 
-        directions = (
-            (ascending,) * len(labels)
-            if isinstance(ascending, bool)
-            else tuple(ascending)
-        )
+        directions = (ascending,) * len(labels) if isinstance(ascending, bool) else tuple(ascending)
         if len(directions) != len(labels):
             raise ValueError("Length of ascending must match length of by")
 
-        null_placement = (
-            NullPlacement.FIRST if na_position == "first" else NullPlacement.LAST
-        )
+        null_placement = NullPlacement.FIRST if na_position == "first" else NullPlacement.LAST
         keys = tuple(
             SortKey(
                 ColumnRef(self._column(label).id),
@@ -1404,9 +1336,7 @@ class DataFrame:
             for label, direction in zip(labels, directions, strict=True)
         )
         selected_ids = {
-            key.expression.column_id
-            for key in keys
-            if isinstance(key.expression, ColumnRef)
+            key.expression.column_id for key in keys if isinstance(key.expression, ColumnRef)
         }
         identity_ids = set(self._plan.metadata.row_identity.columns)
         stable_keys = tuple(
@@ -1523,17 +1453,11 @@ class DataFrame:
         Builds an immutable lazy plan using DuckDB reservoir sampling.
         """
         if axis not in (0, "index", None):
-            raise UnsupportedOperationError(
-                "DuckPD sample supports only axis=0 or axis='index'"
-            )
+            raise UnsupportedOperationError("DuckPD sample supports only axis=0 or axis='index'")
         if replace is not False:
-            raise UnsupportedOperationError(
-                "DuckPD sample does not currently support replace=True"
-            )
+            raise UnsupportedOperationError("DuckPD sample does not currently support replace=True")
         if weights is not None:
-            raise UnsupportedOperationError(
-                "DuckPD sample does not currently support weights"
-            )
+            raise UnsupportedOperationError("DuckPD sample does not currently support weights")
         if n is not None and frac is not None:
             raise ValueError("Only one of 'n' or 'frac' can be specified")
         if n is None and frac is None:
@@ -1544,9 +1468,7 @@ class DataFrame:
             if n < 0:
                 raise ValueError("A negative number of rows was requested")
         if frac is not None:
-            if isinstance(frac, bool) or not isinstance(
-                cast("object", frac), (int, float)
-            ):
+            if isinstance(frac, bool) or not isinstance(cast("object", frac), (int, float)):
                 raise ValueError(f"'frac' must be a float, got {type(frac).__name__}")
             if not isfinite(float(frac)):
                 raise ValueError("'frac' must be finite")
@@ -1555,8 +1477,7 @@ class DataFrame:
             if frac > 1.0:
                 raise ValueError("Replace has to be set to True when frac > 1")
         if random_state is not None and (
-            isinstance(random_state, bool)
-            or not isinstance(cast("object", random_state), int)
+            isinstance(random_state, bool) or not isinstance(cast("object", random_state), int)
         ):
             raise ValueError("random_state must be an integer seed or None")
         if random_state is not None and not 0 <= random_state <= 2_147_483_647:
@@ -1618,9 +1539,7 @@ class DataFrame:
         if level is not None:
             raise UnsupportedOperationError("DuckPD does not support MultiIndex levels")
         if index is not None:
-            raise UnsupportedOperationError(
-                "DuckPD does not yet support renaming index labels"
-            )
+            raise UnsupportedOperationError("DuckPD does not yet support renaming index labels")
         if axis not in {0, 1, "index", "columns"}:
             raise ValueError("axis must be 0, 'index', 1, or 'columns'")
         if mapper is not None and columns is not None:
@@ -1632,9 +1551,7 @@ class DataFrame:
         if not isinstance(source, dict):
             raise TypeError("rename currently supports only a dict mapping")
         if mapper is not None and axis in {0, "index"}:
-            raise UnsupportedOperationError(
-                "DuckPD does not yet support renaming index labels"
-            )
+            raise UnsupportedOperationError("DuckPD does not yet support renaming index labels")
         mapping: dict[str, str] = {}
         for old_item, new_item in cast("dict[object, object]", source).items():
             if not isinstance(old_item, str) or not isinstance(new_item, str):
@@ -1681,9 +1598,7 @@ class DataFrame:
         if level is not None:
             raise UnsupportedOperationError("DuckPD does not support MultiIndex levels")
         if index is not None:
-            raise UnsupportedOperationError(
-                "DuckPD does not yet support dropping rows by index"
-            )
+            raise UnsupportedOperationError("DuckPD does not yet support dropping rows by index")
         if axis not in {0, 1, "index", "columns"}:
             raise ValueError("axis must be 0, 'index', 1, or 'columns'")
         if errors not in {"ignore", "raise"}:
@@ -1694,9 +1609,7 @@ class DataFrame:
         elif labels is None:
             raise TypeError("must specify either labels or columns")
         elif axis in {0, "index"}:
-            raise UnsupportedOperationError(
-                "DuckPD does not yet support dropping rows by index"
-            )
+            raise UnsupportedOperationError("DuckPD does not yet support dropping rows by index")
         else:
             drop_labels = (labels,) if isinstance(labels, str) else tuple(labels)
 
@@ -1710,9 +1623,7 @@ class DataFrame:
 
         drop_set = set(drop_labels)
         kept_visible = tuple(
-            column
-            for column in self._plan.metadata.visible_columns
-            if column.label not in drop_set
+            column for column in self._plan.metadata.visible_columns if column.label not in drop_set
         )
         if not kept_visible:
             raise ValueError("DuckPD does not yet support empty projections")
@@ -1742,9 +1653,7 @@ class DataFrame:
     ) -> DataFrame:
         """Return cumulative sum over a DataFrame axis."""
         validate_axis(axis, series=False)
-        return self._cumulative_transform(
-            "cumsum", skipna=skipna, numeric_only=numeric_only
-        )
+        return self._cumulative_transform("cumsum", skipna=skipna, numeric_only=numeric_only)
 
     def cummin(
         self,
@@ -1755,9 +1664,7 @@ class DataFrame:
     ) -> DataFrame:
         """Return cumulative minimum over a DataFrame axis."""
         validate_axis(axis, series=False)
-        return self._cumulative_transform(
-            "cummin", skipna=skipna, numeric_only=numeric_only
-        )
+        return self._cumulative_transform("cummin", skipna=skipna, numeric_only=numeric_only)
 
     def cummax(
         self,
@@ -1768,9 +1675,7 @@ class DataFrame:
     ) -> DataFrame:
         """Return cumulative maximum over a DataFrame axis."""
         validate_axis(axis, series=False)
-        return self._cumulative_transform(
-            "cummax", skipna=skipna, numeric_only=numeric_only
-        )
+        return self._cumulative_transform("cummax", skipna=skipna, numeric_only=numeric_only)
 
     def cumprod(
         self,
@@ -1781,9 +1686,7 @@ class DataFrame:
     ) -> DataFrame:
         """Return cumulative product over a DataFrame axis."""
         validate_axis(axis, series=False)
-        return self._cumulative_transform(
-            "cumprod", skipna=skipna, numeric_only=numeric_only
-        )
+        return self._cumulative_transform("cumprod", skipna=skipna, numeric_only=numeric_only)
 
     def _cumulative_transform(
         self,
@@ -2008,15 +1911,12 @@ class DataFrame:
         if not visible:
             raise UnsupportedOperationError("No columns are available for nunique")
         requests = tuple(
-            (column.label, ColumnRef(column.id), column.duckdb_type)
-            for column in visible
+            (column.label, ColumnRef(column.id), column.duckdb_type) for column in visible
         )
         plan = aggregate_plan(self._plan, requests, AggregateOperator.NUNIQUE)
         result = self._session._executor.reduce_columns(plan)
         if not dropna:
-            raise UnsupportedOperationError(
-                "DuckPD nunique currently supports only dropna=True"
-            )
+            raise UnsupportedOperationError("DuckPD nunique currently supports only dropna=True")
         return result
 
     def rolling(
@@ -2115,9 +2015,7 @@ class DataFrame:
                 partition_by=partition_exprs,
                 order_by=order_by_keys,
             )
-            dedup_col = Column(
-                ColumnId.create(), "__duckpd_rn__", "BIGINT", hidden=True
-            )
+            dedup_col = Column(ColumnId.create(), "__duckpd_rn__", "BIGINT", hidden=True)
             proj_plan = ProjectPlan(
                 self._plan,
                 (
@@ -2137,9 +2035,7 @@ class DataFrame:
                 BinaryOperator.EQUAL,
                 LiteralValue(1),
             )
-            filter_plan = FilterPlan(
-                proj_plan, predicate, after_filter(proj_plan.metadata)
-            )
+            filter_plan = FilterPlan(proj_plan, predicate, after_filter(proj_plan.metadata))
             return DataFrame(self._session, filter_plan)
         else:  # keep is False
             cnt = WindowExpression(
@@ -2147,9 +2043,7 @@ class DataFrame:
                 arguments=(LiteralValue(1),),
                 partition_by=partition_exprs,
             )
-            dedup_col = Column(
-                ColumnId.create(), "__duckpd_cnt__", "BIGINT", hidden=True
-            )
+            dedup_col = Column(ColumnId.create(), "__duckpd_cnt__", "BIGINT", hidden=True)
             proj_plan = ProjectPlan(
                 self._plan,
                 (
@@ -2169,9 +2063,7 @@ class DataFrame:
                 BinaryOperator.EQUAL,
                 LiteralValue(1),
             )
-            filter_plan = FilterPlan(
-                proj_plan, predicate, after_filter(proj_plan.metadata)
-            )
+            filter_plan = FilterPlan(proj_plan, predicate, after_filter(proj_plan.metadata))
             return DataFrame(self._session, filter_plan)
 
     def nlargest(
@@ -2217,9 +2109,7 @@ class DataFrame:
                 "sort first using .sort_values(...)"
             )
         labels = (columns,) if isinstance(columns, str) else tuple(columns)
-        value_direction = (
-            SortDirection.DESCENDING if largest else SortDirection.ASCENDING
-        )
+        value_direction = SortDirection.DESCENDING if largest else SortDirection.ASCENDING
         keys = tuple(
             SortKey(
                 ColumnRef(self._column(label).id),
@@ -2265,9 +2155,7 @@ class DataFrame:
         if isinstance(other, DataFrame):
             return self._frame_binary(other, operator, reverse=reverse)
         if not is_scalar_value(other):
-            raise TypeError(
-                "DuckPD DataFrame arithmetic requires a scalar or DataFrame operand"
-            )
+            raise TypeError("DuckPD DataFrame arithmetic requires a scalar or DataFrame operand")
         scalar = LiteralValue(other)
         outputs: list[tuple[Column, Expression]] = []
         for source in self._plan.metadata.visible_columns:
@@ -2317,12 +2205,8 @@ class DataFrame:
                 validate="1:1",
             )
 
-        left_columns = {
-            column.label: column for column in self._plan.metadata.visible_columns
-        }
-        right_columns = {
-            column.label: column for column in other._plan.metadata.visible_columns
-        }
+        left_columns = {column.label: column for column in self._plan.metadata.visible_columns}
+        right_columns = {column.label: column for column in other._plan.metadata.visible_columns}
         outputs: list[tuple[Column, Expression]] = []
         for label in sorted(left_columns.keys() | right_columns.keys()):
             left = left_columns.get(label)
@@ -2331,9 +2215,7 @@ class DataFrame:
                 expression: Expression = CastExpression(LiteralValue(None), "DOUBLE")
                 output_type = "DOUBLE"
             else:
-                if not is_numeric_type(left.duckdb_type) or not is_numeric_type(
-                    right.duckdb_type
-                ):
+                if not is_numeric_type(left.duckdb_type) or not is_numeric_type(right.duckdb_type):
                     raise UnsupportedOperationError(
                         "Cross-frame DataFrame arithmetic currently supports only "
                         "numeric columns shared by both operands"
@@ -2352,9 +2234,7 @@ class DataFrame:
                         output_type,
                         nullable=expression_nullability(expression, plan.metadata),
                         alias_of=(
-                            expression.column_id
-                            if isinstance(expression, ColumnRef)
-                            else None
+                            expression.column_id if isinstance(expression, ColumnRef) else None
                         ),
                     ),
                     expression,
@@ -2410,9 +2290,7 @@ class DataFrame:
 
     def _require_same_plan(self, series: Series) -> None:
         if series._session is not self._session or series._plan is not self._plan:
-            raise AlignmentError(
-                "Series from a different frame requires explicit index alignment"
-            )
+            raise AlignmentError("Series from a different frame requires explicit index alignment")
 
     def _coerce_expression(
         self, value: object, *, alternate_plan: LogicalPlan | None = None
@@ -2423,9 +2301,7 @@ class DataFrame:
             same_session = value._session is self._session
             if same_session and value._alignment_source is self._plan:
                 if value._alignment_expression is None:
-                    raise AssertionError(
-                        "Aligned Series is missing its source expression"
-                    )
+                    raise AssertionError("Aligned Series is missing its source expression")
                 return value._alignment_expression
             compatible_plan = value._plan is self._plan or value._plan is alternate_plan
             if not same_session or not compatible_plan:
@@ -2446,9 +2322,7 @@ class DataFrame:
         require_numeric: bool = False,
     ) -> tuple[Column, ...]:
         visible = self._plan.metadata.visible_columns
-        numeric = tuple(
-            column for column in visible if is_numeric_type(column.duckdb_type)
-        )
+        numeric = tuple(column for column in visible if is_numeric_type(column.duckdb_type))
         if numeric_only:
             if not numeric:
                 raise UnsupportedOperationError(
@@ -2477,8 +2351,7 @@ class DataFrame:
         q: float = 0.5,
     ) -> pd.Series:
         requests = tuple(
-            (column.label, ColumnRef(column.id), column.duckdb_type)
-            for column in columns
+            (column.label, ColumnRef(column.id), column.duckdb_type) for column in columns
         )
         plan = aggregate_plan(
             self._plan,

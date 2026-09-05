@@ -43,9 +43,7 @@ def df2() -> pd.DataFrame:
 # --- Basic row-wise concatenation -------------------------------------------
 
 
-def test_concat_identical_schemas_matches_pandas(
-    df1: pd.DataFrame, df2: pd.DataFrame
-) -> None:
+def test_concat_identical_schemas_matches_pandas(df1: pd.DataFrame, df2: pd.DataFrame) -> None:
     session = duckpd.connect()
     f1 = session.from_pandas(df1)
     f2 = session.from_pandas(df2)
@@ -96,9 +94,9 @@ def test_concat_with_series() -> None:
 
     # concat series and frame
     result = duckpd.concat([f, s])
-    expected = pd.concat(
-        [pd.DataFrame({"x": [1, 2]}), pd.Series([1, 2], name="x")]
-    ).reset_index(drop=True)
+    expected = pd.concat([pd.DataFrame({"x": [1, 2]}), pd.Series([1, 2], name="x")]).reset_index(
+        drop=True
+    )
     assert_frame_equal(result.collect().reset_index(drop=True), expected)
 
 
@@ -146,9 +144,7 @@ def test_concat_preserves_nullable_uint64_exactly() -> None:
     first = pd.DataFrame({"value": pd.Series([2**63 + 1, None], dtype="UInt64")})
     second = pd.DataFrame({"value": pd.Series([2**63 + 2], dtype="UInt64")})
 
-    result = duckpd.concat(
-        [duckpd.from_pandas(first), duckpd.from_pandas(second)]
-    ).collect()
+    result = duckpd.concat([duckpd.from_pandas(first), duckpd.from_pandas(second)]).collect()
 
     expected = pd.concat([first, second]).reset_index(drop=True)
     assert_frame_equal(result, expected)
@@ -159,9 +155,7 @@ def test_concat_promotes_integer_width_without_using_float() -> None:
     first = pd.DataFrame({"value": pd.Series([-1], dtype="int8")})
     second = pd.DataFrame({"value": pd.Series([255], dtype="uint8")})
 
-    result = duckpd.concat(
-        [duckpd.from_pandas(first), duckpd.from_pandas(second)]
-    ).collect()
+    result = duckpd.concat([duckpd.from_pandas(first), duckpd.from_pandas(second)]).collect()
 
     expected = pd.concat([first, second]).reset_index(drop=True)
     assert_frame_equal(result, expected)
@@ -185,9 +179,7 @@ def test_concat_mixed_nullable_integer_widths_are_lossless(
     left = pd.DataFrame({"value": pd.Series(values[:2], dtype=left_dtype)})
     right = pd.DataFrame({"value": pd.Series(values[2:], dtype=right_dtype)})
 
-    result = duckpd.concat(
-        [duckpd.from_pandas(left), duckpd.from_pandas(right)]
-    ).collect()
+    result = duckpd.concat([duckpd.from_pandas(left), duckpd.from_pandas(right)]).collect()
 
     expected = pd.DataFrame({"value": pd.Series(values, dtype=expected_dtype)})
     assert_frame_equal(result, expected)
@@ -195,9 +187,7 @@ def test_concat_mixed_nullable_integer_widths_are_lossless(
 
 def test_concat_rejects_decimal_float_precision_loss_before_execution() -> None:
     session = duckpd.connect()
-    decimal_frame = session.from_pandas(
-        pd.DataFrame({"value": [Decimal("9007199254740993.01")]})
-    )
+    decimal_frame = session.from_pandas(pd.DataFrame({"value": [Decimal("9007199254740993.01")]}))
     float_frame = session.from_pandas(pd.DataFrame({"value": [1.5]}))
 
     with pytest.raises(
@@ -213,9 +203,7 @@ def test_concat_reconciles_decimal_precision_and_scale() -> None:
     first = pd.DataFrame({"value": [Decimal("1.25"), None]})
     second = pd.DataFrame({"value": [Decimal("123.4")]})
 
-    result = duckpd.concat(
-        [duckpd.from_pandas(first), duckpd.from_pandas(second)]
-    ).collect()
+    result = duckpd.concat([duckpd.from_pandas(first), duckpd.from_pandas(second)]).collect()
 
     expected = pd.concat([first, second]).reset_index(drop=True)
     assert_frame_equal(result, expected)
@@ -240,14 +228,10 @@ def test_concat_preserves_matching_non_numeric_types(
     left = pd.DataFrame({"value": first})
     right = pd.DataFrame({"value": second})
 
-    result = duckpd.concat(
-        [duckpd.from_pandas(left), duckpd.from_pandas(right)]
-    ).collect()
+    result = duckpd.concat([duckpd.from_pandas(left), duckpd.from_pandas(right)]).collect()
 
     expected = pd.concat([left, right]).reset_index(drop=True)
-    timezone_alias_differs = (
-        isinstance(first[0], pd.Timestamp) and first[0].tzinfo is not None
-    )
+    timezone_alias_differs = isinstance(first[0], pd.Timestamp) and first[0].tzinfo is not None
     assert_frame_equal(result, expected, check_dtype=not timezone_alias_differs)
 
 
@@ -278,9 +262,7 @@ def test_concat_preserves_typed_null_only_column() -> None:
     first = pd.DataFrame({"value": pd.Series([None], dtype="UInt64")})
     second = pd.DataFrame({"value": pd.Series([2**63 + 1], dtype="UInt64")})
 
-    result = duckpd.concat(
-        [duckpd.from_pandas(first), duckpd.from_pandas(second)]
-    ).collect()
+    result = duckpd.concat([duckpd.from_pandas(first), duckpd.from_pandas(second)]).collect()
 
     expected = pd.concat([first, second]).reset_index(drop=True)
     assert_frame_equal(result, expected)
@@ -295,9 +277,7 @@ def test_concat_preserves_input_sequence_and_snapshot_order() -> None:
     expected = pd.concat([first, second], ignore_index=True)
     assert_frame_equal(combined.collect().reset_index(drop=True), expected)
     sliced = cast("duckpd.DataFrame", combined.iloc[1:4]).collect()
-    assert_frame_equal(
-        sliced.reset_index(drop=True), expected.iloc[1:4].reset_index(drop=True)
-    )
+    assert_frame_equal(sliced.reset_index(drop=True), expected.iloc[1:4].reset_index(drop=True))
     assert_frame_equal(
         combined[["value"]].cumsum().collect().reset_index(drop=True),
         expected[["value"]].cumsum(),
@@ -453,9 +433,7 @@ def test_concat_axis1_same_plan_mixed_df_series() -> None:
     df = session.from_pandas(pdf, index="k")
     res = duckpd.concat([df[["a", "b"]], df["c"]], axis=1)
     assert res.columns == ("a", "b", "c")
-    expected = pd.concat(
-        [pdf.set_index("k")[["a", "b"]], pdf.set_index("k")["c"]], axis=1
-    )
+    expected = pd.concat([pdf.set_index("k")[["a", "b"]], pdf.set_index("k")["c"]], axis=1)
     assert_frame_equal(res.collect(), expected)
 
     res_ign = duckpd.concat([df[["a", "b"]], df["c"]], axis=1, ignore_index=True)
@@ -491,9 +469,7 @@ def test_concat_axis1_multi_frame_outer_join() -> None:
     res = duckpd.concat([f1, f2], axis=1, join="outer", sort=True)
     assert session.execution_count == 0
 
-    expected = pd.concat(
-        [p1.set_index("k"), p2.set_index("k")], axis=1, join="outer", sort=True
-    )
+    expected = pd.concat([p1.set_index("k"), p2.set_index("k")], axis=1, join="outer", sort=True)
     assert_frame_equal(res.collect(), expected)
     assert session.execution_count == 1
 
@@ -509,9 +485,7 @@ def test_concat_axis1_multi_frame_inner_join() -> None:
     res = duckpd.concat([f1, f2], axis=1, join="inner", sort=True)
     assert session.execution_count == 0
 
-    expected = pd.concat(
-        [p1.set_index("k"), p2.set_index("k")], axis=1, join="inner", sort=True
-    )
+    expected = pd.concat([p1.set_index("k"), p2.set_index("k")], axis=1, join="inner", sort=True)
     assert_frame_equal(res.collect(), expected)
     assert session.execution_count == 1
 

@@ -38,10 +38,7 @@ def test_optimizer_is_named_idempotent_and_preserves_root_metadata() -> None:
     )
     assert first.plan == second.plan
     assert first.plan.metadata == plan.metadata
-    assert all(
-        snapshot.before.metadata == snapshot.after.metadata
-        for snapshot in first.snapshots
-    )
+    assert all(snapshot.before.metadata == snapshot.after.metadata for snapshot in first.snapshots)
     assert any(
         snapshot.name == "required_column_liveness" and snapshot.changed
         for snapshot in first.snapshots
@@ -97,11 +94,7 @@ def test_optimizer_reports_common_subplans_without_implicit_cache() -> None:
 
 
 def test_explain_json_exports_rewrites_and_optimized_plan() -> None:
-    frame = (
-        duckpd.from_pandas(pd.DataFrame({"value": [2, 1]}))
-        .sort_values("value")
-        .limit(1)
-    )
+    frame = duckpd.from_pandas(pd.DataFrame({"value": [2, 1]})).sort_values("value").limit(1)
     execution_count = frame._session.execution_count
 
     data = json.loads(frame.explain("json"))

@@ -50,9 +50,7 @@ def load_matrix(path: Path) -> CompatibilityMatrix:
         if not isinstance(value, dict):
             raise ValueError("Invalid compatibility method record")
         record = cast("dict[str, object]", value)
-        if set(record) != required or not all(
-            isinstance(record[key], str) for key in required
-        ):
+        if set(record) != required or not all(isinstance(record[key], str) for key in required):
             raise ValueError("Invalid compatibility method record")
     return cast("CompatibilityMatrix", raw)
 
@@ -87,18 +85,14 @@ def render_matrix(matrix: CompatibilityMatrix) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--check", action="store_true", help="fail if generated output is stale"
-    )
+    parser.add_argument("--check", action="store_true", help="fail if generated output is stale")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     source = root / "docs" / "narwhals-compatibility.json"
     destination = root / "docs" / "NARWHALS_COMPATIBILITY.md"
     rendered = render_matrix(load_matrix(source))
     if args.check:
-        current = (
-            destination.read_text(encoding="utf-8") if destination.exists() else None
-        )
+        current = destination.read_text(encoding="utf-8") if destination.exists() else None
         if current != rendered:
             raise SystemExit("Generated Narwhals compatibility documentation is stale")
         return

@@ -88,9 +88,7 @@ with pd.connect(memory_limit="2GB") as session:
         region="us-east-1",
         scope="s3://company-warehouse/",
     )
-    events = pd.read_parquet(
-        "s3://company-warehouse/clickstream/*.parquet", session=session
-    )
+    events = pd.read_parquet("s3://company-warehouse/clickstream/*.parquet", session=session)
 
     # Attach PostgreSQL read-only without leaking credentials in logs or reprs
     warehouse = session.attach_postgres(

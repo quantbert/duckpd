@@ -17,57 +17,37 @@ from duckpd.errors import UnorderedOperationError
 def test_series_cumsum_skipna_differential() -> None:
     data = [1.0, 2.0, np.nan, 4.0, 5.0]
     s_pd = pd.Series(data)
-    df_dp = dp.from_pandas(
-        pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id"
-    )
+    df_dp = dp.from_pandas(pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id")
 
     res_dp_skipna = df_dp["a"].cumsum(skipna=True).collect()
-    pd.testing.assert_series_equal(
-        res_dp_skipna, s_pd.cumsum(skipna=True), check_names=False
-    )
+    pd.testing.assert_series_equal(res_dp_skipna, s_pd.cumsum(skipna=True), check_names=False)
 
     res_dp_noskip = df_dp["a"].cumsum(skipna=False).collect()
-    pd.testing.assert_series_equal(
-        res_dp_noskip, s_pd.cumsum(skipna=False), check_names=False
-    )
+    pd.testing.assert_series_equal(res_dp_noskip, s_pd.cumsum(skipna=False), check_names=False)
 
 
 def test_series_cummin_cummax_cumprod_differential() -> None:
     data = [3.0, 1.0, np.nan, 4.0, 2.0]
     s_pd = pd.Series(data)
-    df_dp = dp.from_pandas(
-        pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id"
-    )
+    df_dp = dp.from_pandas(pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id")
 
     # cummin
     res_min_skip = df_dp["a"].cummin(skipna=True).collect()
-    pd.testing.assert_series_equal(
-        res_min_skip, s_pd.cummin(skipna=True), check_names=False
-    )
+    pd.testing.assert_series_equal(res_min_skip, s_pd.cummin(skipna=True), check_names=False)
     res_min_noskip = df_dp["a"].cummin(skipna=False).collect()
-    pd.testing.assert_series_equal(
-        res_min_noskip, s_pd.cummin(skipna=False), check_names=False
-    )
+    pd.testing.assert_series_equal(res_min_noskip, s_pd.cummin(skipna=False), check_names=False)
 
     # cummax
     res_max_skip = df_dp["a"].cummax(skipna=True).collect()
-    pd.testing.assert_series_equal(
-        res_max_skip, s_pd.cummax(skipna=True), check_names=False
-    )
+    pd.testing.assert_series_equal(res_max_skip, s_pd.cummax(skipna=True), check_names=False)
     res_max_noskip = df_dp["a"].cummax(skipna=False).collect()
-    pd.testing.assert_series_equal(
-        res_max_noskip, s_pd.cummax(skipna=False), check_names=False
-    )
+    pd.testing.assert_series_equal(res_max_noskip, s_pd.cummax(skipna=False), check_names=False)
 
     # cumprod
     res_prod_skip = df_dp["a"].cumprod(skipna=True).collect()
-    pd.testing.assert_series_equal(
-        res_prod_skip, s_pd.cumprod(skipna=True), check_names=False
-    )
+    pd.testing.assert_series_equal(res_prod_skip, s_pd.cumprod(skipna=True), check_names=False)
     res_prod_noskip = df_dp["a"].cumprod(skipna=False).collect()
-    pd.testing.assert_series_equal(
-        res_prod_noskip, s_pd.cumprod(skipna=False), check_names=False
-    )
+    pd.testing.assert_series_equal(res_prod_noskip, s_pd.cumprod(skipna=False), check_names=False)
 
 
 def test_dataframe_cum_transforms_differential() -> None:
@@ -111,9 +91,7 @@ def test_cumulative_uses_csv_source_order(tmp_path: Path) -> None:
 def test_shift_diff_pct_change_differential() -> None:
     data = [10.0, 20.0, 25.0, 50.0, 100.0]
     s_pd = pd.Series(data)
-    df_dp = dp.from_pandas(
-        pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id"
-    )
+    df_dp = dp.from_pandas(pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id")
 
     # Shift positive & negative
     res_shift_1 = df_dp["a"].shift(1).collect()
@@ -124,9 +102,7 @@ def test_shift_diff_pct_change_differential() -> None:
 
     # Shift with fill_value
     res_shift_fill = df_dp["a"].shift(1, fill_value=0.0).collect()
-    pd.testing.assert_series_equal(
-        res_shift_fill, s_pd.shift(1, fill_value=0.0), check_names=False
-    )
+    pd.testing.assert_series_equal(res_shift_fill, s_pd.shift(1, fill_value=0.0), check_names=False)
 
     # Diff
     res_diff = df_dp["a"].diff(1).collect()
@@ -153,9 +129,7 @@ def test_shift_diff_pct_change_differential() -> None:
 def test_rank_methods_differential() -> None:
     data = [10.0, 20.0, 20.0, 30.0, np.nan]
     s_pd = pd.Series(data)
-    df_dp = dp.from_pandas(
-        pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id"
-    )
+    df_dp = dp.from_pandas(pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id")
 
     for method in ("average", "min", "max", "first", "dense"):
         res_dp = df_dp["a"].rank(method=method).collect()  # type: ignore[arg-type]
@@ -191,9 +165,7 @@ def test_drop_duplicates_keep_modes_differential() -> None:
     df = dp.from_pandas(pdf, order_by="id")
 
     # keep='first' with order
-    res_first = (
-        df.drop_duplicates(subset=["k"], keep="first").sort_values("id").collect()
-    )
+    res_first = df.drop_duplicates(subset=["k"], keep="first").sort_values("id").collect()
     exp_first = pdf.drop_duplicates(subset=["k"], keep="first")
     pd.testing.assert_frame_equal(
         res_first.reset_index(drop=True), exp_first.reset_index(drop=True)
@@ -202,9 +174,7 @@ def test_drop_duplicates_keep_modes_differential() -> None:
     # keep='last' with order
     res_last = df.drop_duplicates(subset=["k"], keep="last").sort_values("id").collect()
     exp_last = pdf.drop_duplicates(subset=["k"], keep="last")
-    pd.testing.assert_frame_equal(
-        res_last.reset_index(drop=True), exp_last.reset_index(drop=True)
-    )
+    pd.testing.assert_frame_equal(res_last.reset_index(drop=True), exp_last.reset_index(drop=True))
 
     # keep=False with order
     res_false = df.drop_duplicates(subset=["k"], keep=False).sort_values("id").collect()
@@ -217,9 +187,7 @@ def test_drop_duplicates_keep_modes_differential() -> None:
 def test_series_rolling_and_expanding_differential() -> None:
     data = [10.0, 20.0, np.nan, 30.0, 50.0]
     s_pd = pd.Series(data)
-    df_dp = dp.from_pandas(
-        pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id"
-    )
+    df_dp = dp.from_pandas(pd.DataFrame({"a": data, "id": range(len(data))}), order_by="id")
 
     # rolling sum, mean, min, max, std, var, count
     pd.testing.assert_series_equal(
@@ -468,9 +436,7 @@ def test_grouped_rolling_assigns_to_origin_without_materialization() -> None:
     session = dp.connect()
     frame = session.from_pandas(source, order_by="sequence")
     moving_average = (
-        frame.groupby("ticker", sort=False, dropna=True)["close"]
-        .rolling(2, min_periods=1)
-        .mean()
+        frame.groupby("ticker", sort=False, dropna=True)["close"].rolling(2, min_periods=1).mean()
     )
 
     result = frame.assign(moving_average=moving_average)
@@ -498,9 +464,7 @@ def test_projected_dataframe_grouped_rolling_assigns_to_origin() -> None:
     )
     session = dp.connect()
     frame = session.from_pandas(source, order_by="sequence")
-    rolling = (
-        frame.groupby("group", sort=False)[["x", "y"]].rolling(2, min_periods=1).mean()
-    )
+    rolling = frame.groupby("group", sort=False)[["x", "y"]].rolling(2, min_periods=1).mean()
 
     frame[["mean_x", "mean_y"]] = cast("dp.DataFrame", rolling)
 
@@ -549,9 +513,7 @@ def test_multi_ticker_moving_average_crossover_pipeline() -> None:
 
 def test_grouped_rolling_rejects_unordered_input_before_execution() -> None:
     session = dp.connect()
-    frame = session.sql(
-        "select * from (values ('a', 1.0), ('a', 2.0)) t(\"group\", value)"
-    )
+    frame = session.sql("select * from (values ('a', 1.0), ('a', 2.0)) t(\"group\", value)")
 
     with pytest.raises(UnorderedOperationError):
         frame.groupby("group")["value"].rolling(2).sum()
@@ -607,9 +569,7 @@ DATAFRAME_ORDER_OPERATIONS: tuple[Callable[[dp.DataFrame], object], ...] = (
 def test_every_dataframe_order_dependent_operation_rejects_unordered_input(
     operation: Callable[[dp.DataFrame], object],
 ) -> None:
-    frame = dp.connect().sql(
-        'select * from (values (3, 6), (1, 4), (2, 5)) t("left", "right")'
-    )
+    frame = dp.connect().sql('select * from (values (3, 6), (1, 4), (2, 5)) t("left", "right")')
 
     with pytest.raises(UnorderedOperationError):
         operation(frame)

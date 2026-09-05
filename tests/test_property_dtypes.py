@@ -70,9 +70,7 @@ def test_property_nullable_integer_roundtrip_and_reductions(
     st.lists(
         st.one_of(
             st.none(),
-            st.floats(
-                min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
-            ),
+            st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False),
         ),
         min_size=1,
         max_size=40,

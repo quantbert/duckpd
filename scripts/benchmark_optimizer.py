@@ -78,11 +78,7 @@ def main() -> None:
         )
         for position in range(12):
             frame = frame.assign(**{f"derived_{position}": _derived(position)})
-        workload = (
-            frame[["id", "group_id", "value"]]
-            .sort_values(["group_id", "value"])
-            .limit(1000)
-        )
+        workload = frame[["id", "group_id", "value"]].sort_values(["group_id", "value"]).limit(1000)
 
         optimization_times = [
             _duration(lambda: session._compiler.optimize(workload._plan))
@@ -114,9 +110,7 @@ def main() -> None:
                     optimized_times.append(duration)
             _assert_equal(results["baseline"], results["optimized"])
 
-        changed_passes = [
-            snapshot.name for snapshot in optimization.snapshots if snapshot.changed
-        ]
+        changed_passes = [snapshot.name for snapshot in optimization.snapshots if snapshot.changed]
         ablations: dict[str, dict[str, object]] = {}
         for pass_name in changed_passes:
             ablated = session._compiler.optimize(

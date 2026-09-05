@@ -214,9 +214,7 @@ def test_report_generation(tmp_path: Path) -> None:
         threads=2,
     )
     report_file = tmp_path / "REPORT.md"
-    content = generate_markdown_report(
-        [comp], threads=2, repetitions=1, output_path=report_file
-    )
+    content = generate_markdown_report([comp], threads=2, repetitions=1, output_path=report_file)
     assert "# DuckPD vs pandas Benchmark Report" in content
     assert "5mb" in content
     assert "filter_groupby_agg" in content
@@ -258,10 +256,7 @@ def test_validated_release_tracks(tmp_path: Path) -> None:
             assert cold_execution_seconds >= 0
             assert warm_execution_seconds is not None
             assert warm_execution_seconds >= 0
-            assert (
-                engines[name].cold_cache_policy
-                == "fresh_spawn_process+posix_fadvise_dontneed"
-            )
+            assert engines[name].cold_cache_policy == "fresh_spawn_process+posix_fadvise_dontneed"
             assert peak_rss_bytes is not None
             assert peak_rss_bytes > 0
         assert engines["duckpd"].planning_seconds is not None
@@ -284,10 +279,7 @@ def test_validated_release_tracks(tmp_path: Path) -> None:
         "interoperability",
         "openness",
     }
-    entries = {
-        entry["engine"]: entry
-        for entry in cast("list[dict[str, object]]", card["engines"])
-    }
+    entries = {entry["engine"]: entry for entry in cast("list[dict[str, object]]", card["engines"])}
     assert entries["duckpd"]["correct_tracks"] == 3
     assert entries["duckpd"]["successful_tracks"] == 3
     assert entries["duckpd"]["median_cold_seconds"] is not None

@@ -41,9 +41,7 @@ def _collect_once(
 
 def test_narwhals_entrypoint_wraps_duckpd_without_execution() -> None:
     with duckpd.connect() as session:
-        native = session.from_pandas(
-            pd.DataFrame({"key": [3, 1, 2], "value": [30, 10, 20]})
-        )
+        native = session.from_pandas(pd.DataFrame({"key": [3, 1, 2], "value": [30, 10, 20]}))
 
         lazy = nw.from_native(native)
         transformed = lazy.select("key", "value").sort("key").head(2)
@@ -155,9 +153,9 @@ def test_narwhals_expression_operator_subset() -> None:
             (10 % nw.col("a")).alias("reverse_modulo"),
             (nw.col("a") != nw.col("b")).alias("not_equal"),
             (nw.col("a") <= nw.col("b")).alias("less_equal"),
-            (
-                ((nw.col("a") >= 5) | (nw.col("b") < 0)) & ~(nw.col("a") == nw.col("b"))
-            ).alias("predicate"),
+            (((nw.col("a") >= 5) | (nw.col("b") < 0)) & ~(nw.col("a") == nw.col("b"))).alias(
+                "predicate"
+            ),
         ).collect()
 
         assert collected.to_native().to_pydict() == {
@@ -193,9 +191,7 @@ def test_narwhals_expression_unary_negation() -> None:
 
 def test_narwhals_expression_validation_fails_before_execution() -> None:
     with duckpd.connect() as session:
-        lazy = nw.from_native(
-            session.from_pandas(pd.DataFrame({"a": [1], "b": [2], "c": [3]}))
-        )
+        lazy = nw.from_native(session.from_pandas(pd.DataFrame({"a": [1], "b": [2], "c": [3]})))
 
         with pytest.raises(ValueError, match="one output"):
             lazy.select(nw.col("a", "b").alias("renamed"))
@@ -213,9 +209,7 @@ def test_narwhals_expression_validation_fails_before_execution() -> None:
 
 def test_narwhals_filter_combines_constraints() -> None:
     with duckpd.connect() as session:
-        lazy = nw.from_native(
-            session.from_pandas(pd.DataFrame({"a": [1, 1, 2], "b": [2, 3, 2]}))
-        )
+        lazy = nw.from_native(session.from_pandas(pd.DataFrame({"a": [1, 1, 2], "b": [2, 3, 2]})))
 
         result = lazy.filter(a=1, b=2).collect().to_native()
 
@@ -521,10 +515,7 @@ def test_narwhals_ordered_expression_surface() -> None:
             nw.col("x").diff().over(order_by="pos").alias("difference"),
             nw.col("x").shift(1).over(order_by="pos").alias("shifted"),
             nw.col("x").rank(method="ordinal").over(order_by="pos").alias("rank"),
-            nw.col("x")
-            .rolling_sum(2, min_samples=1)
-            .over(order_by="pos")
-            .alias("rolling"),
+            nw.col("x").rolling_sum(2, min_samples=1).over(order_by="pos").alias("rolling"),
         )
 
         result = _collect_once(lazy, session).to_pydict()
@@ -544,9 +535,7 @@ def test_narwhals_ordered_expression_surface() -> None:
 
 def test_narwhals_ordered_expression_rejections_are_pre_execution() -> None:
     with duckpd.connect() as session:
-        lazy = nw.from_native(
-            session.from_pandas(pd.DataFrame({"x": [1, 2]}), order_by="x")
-        )
+        lazy = nw.from_native(session.from_pandas(pd.DataFrame({"x": [1, 2]}), order_by="x"))
 
         with pytest.raises(UnsupportedOperationError, match="reverse=True"):
             lazy.select(nw.col("x").cum_sum(reverse=True))
@@ -677,8 +666,6 @@ def test_narwhals_plugin_entrypoint_is_packaged() -> None:
 def test_generated_narwhals_compatibility_is_current() -> None:
     root = Path(__file__).resolve().parents[1]
     matrix = load_matrix(root / "docs" / "narwhals-compatibility.json")
-    generated = (root / "docs" / "NARWHALS_COMPATIBILITY.md").read_text(
-        encoding="utf-8"
-    )
+    generated = (root / "docs" / "NARWHALS_COMPATIBILITY.md").read_text(encoding="utf-8")
 
     assert generated == render_matrix(matrix)

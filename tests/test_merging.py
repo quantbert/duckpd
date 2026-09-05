@@ -79,9 +79,7 @@ def test_outer_merge_promotes_plain_integer_and_boolean_nulls_like_pandas() -> N
     )
 
     assert session.execution_count == 0
-    assert_frame_equal(
-        result.collect(), left.merge(right, on="key", how="outer", sort=True)
-    )
+    assert_frame_equal(result.collect(), left.merge(right, on="key", how="outer", sort=True))
 
 
 @pytest.mark.parametrize("sort", [False, True])
@@ -89,9 +87,7 @@ def test_merge_does_not_claim_total_order_with_duplicate_keys(sort: bool) -> Non
     left = pd.DataFrame({"key": [2, 1, 1], "left_value": [20, 10, 11]})
     right = pd.DataFrame({"key": [1, 1, 2], "right_value": [100, 101, 200]})
     session = duckpd.connect()
-    merged = session.from_pandas(left).merge(
-        session.from_pandas(right), on="key", sort=sort
-    )
+    merged = session.from_pandas(left).merge(session.from_pandas(right), on="key", sort=sort)
 
     assert merged.ordering == ()
     with pytest.raises(UnorderedOperationError):
@@ -114,9 +110,7 @@ def test_merge_with_left_on_right_on_different_names() -> None:
     l_frame = session.from_pandas(l_pd)
     r_frame = session.from_pandas(r_pd)
 
-    result = l_frame.merge(
-        r_frame, left_on="lkey", right_on="rkey", how="inner", sort=True
-    )
+    result = l_frame.merge(r_frame, left_on="lkey", right_on="rkey", how="inner", sort=True)
     expected = l_pd.merge(r_pd, left_on="lkey", right_on="rkey", how="inner", sort=True)
 
     assert_frame_equal(result.collect(), expected)
@@ -141,12 +135,8 @@ def test_merge_null_keys_match_pandas() -> None:
 
 
 def test_merge_with_index_keys() -> None:
-    l_pd = pd.DataFrame(
-        {"val_l": ["a", "b", "c"]}, index=pd.Index([1, 2, 3], name="index")
-    )
-    r_pd = pd.DataFrame(
-        {"val_r": ["x", "y", "z"]}, index=pd.Index([2, 3, 4], name="index")
-    )
+    l_pd = pd.DataFrame({"val_l": ["a", "b", "c"]}, index=pd.Index([1, 2, 3], name="index"))
+    r_pd = pd.DataFrame({"val_r": ["x", "y", "z"]}, index=pd.Index([2, 3, 4], name="index"))
 
     session = duckpd.connect()
     l_frame_idx = session.from_pandas(l_pd.reset_index()).set_index("index")
@@ -155,9 +145,7 @@ def test_merge_with_index_keys() -> None:
     result = l_frame_idx.merge(
         r_frame_idx, left_index=True, right_index=True, how="inner", sort=True
     )
-    expected = l_pd.merge(
-        r_pd, left_index=True, right_index=True, how="inner", sort=True
-    )
+    expected = l_pd.merge(r_pd, left_index=True, right_index=True, how="inner", sort=True)
     assert_frame_equal(result.collect(), expected)
 
 
@@ -191,9 +179,7 @@ def test_merge_cross_session_raises_alignment_error(
         f1.merge(f2, on="key")
 
 
-def test_merge_invalid_arguments_raise_early(
-    left_df: pd.DataFrame, right_df: pd.DataFrame
-) -> None:
+def test_merge_invalid_arguments_raise_early(left_df: pd.DataFrame, right_df: pd.DataFrame) -> None:
     session = duckpd.connect()
     frame = session.from_pandas(left_df)
     other = session.from_pandas(right_df)
@@ -246,12 +232,8 @@ def test_merge_invalid_validate_raises_early() -> None:
 )
 def test_merge_validate_one_to_one(val_param: str) -> None:
     session = duckpd.connect()
-    left_unique = session.from_pandas(
-        pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"]})
-    )
-    right_unique = session.from_pandas(
-        pd.DataFrame({"key": [1, 2], "val_r": ["x", "y"]})
-    )
+    left_unique = session.from_pandas(pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"]}))
+    right_unique = session.from_pandas(pd.DataFrame({"key": [1, 2], "val_r": ["x", "y"]}))
     left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
     right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
 
@@ -286,9 +268,7 @@ def test_merge_validate_one_to_one(val_param: str) -> None:
 )
 def test_merge_validate_one_to_many(val_param: str) -> None:
     session = duckpd.connect()
-    left_unique = session.from_pandas(
-        pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"]})
-    )
+    left_unique = session.from_pandas(pd.DataFrame({"key": [1, 2], "val_l": ["a", "b"]}))
     right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
     left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
 
@@ -314,9 +294,7 @@ def test_merge_validate_one_to_many(val_param: str) -> None:
 def test_merge_validate_many_to_one(val_param: str) -> None:
     session = duckpd.connect()
     left_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_l": ["a", "b"]}))
-    right_unique = session.from_pandas(
-        pd.DataFrame({"key": [1, 2], "val_r": ["x", "y"]})
-    )
+    right_unique = session.from_pandas(pd.DataFrame({"key": [1, 2], "val_r": ["x", "y"]}))
     right_dup = session.from_pandas(pd.DataFrame({"key": [1, 1], "val_r": ["x", "y"]}))
 
     # Passing m:1
@@ -363,12 +341,8 @@ def test_merge_validate_with_null_keys() -> None:
         left_dup_null.merge(right, on="key", validate="1:1").collect()
 
     # Single null in left and right dataset (unique!)
-    left_single_null = session.from_pandas(
-        pd.DataFrame({"key": [1.0, None], "val_l": ["a", "b"]})
-    )
-    right_single_null = session.from_pandas(
-        pd.DataFrame({"key": [1.0, 2.0], "val_r": ["x", "y"]})
-    )
+    left_single_null = session.from_pandas(pd.DataFrame({"key": [1.0, None], "val_l": ["a", "b"]}))
+    right_single_null = session.from_pandas(pd.DataFrame({"key": [1.0, 2.0], "val_r": ["x", "y"]}))
     merged = left_single_null.merge(right_single_null, on="key", validate="1:1")
     assert len(merged.collect()) == 1
 
@@ -417,15 +391,9 @@ def test_merge_validate_cross_join() -> None:
 
 def test_join_shorthand_with_validate() -> None:
     session = duckpd.connect()
-    left = session.from_pandas(
-        pd.DataFrame({"idx": [1, 2], "val": [10, 20]}), index="idx"
-    )
-    right = session.from_pandas(
-        pd.DataFrame({"idx": [1, 2], "val": [100, 200]}), index="idx"
-    )
-    bad_right = session.from_pandas(
-        pd.DataFrame({"idx": [1, 1], "val": [100, 200]}), index="idx"
-    )
+    left = session.from_pandas(pd.DataFrame({"idx": [1, 2], "val": [10, 20]}), index="idx")
+    right = session.from_pandas(pd.DataFrame({"idx": [1, 2], "val": [100, 200]}), index="idx")
+    bad_right = session.from_pandas(pd.DataFrame({"idx": [1, 1], "val": [100, 200]}), index="idx")
 
     # Valid join
     res = left.join(right, lsuffix="_l", rsuffix="_r", validate="1:1").collect()
@@ -477,12 +445,8 @@ def test_merge_validate_on_all_execution_boundaries(tmp_path: Path) -> None:
 
 def test_nested_validation_reports_upstream_loc_error_first() -> None:
     session = duckpd.connect()
-    left = session.from_pandas(
-        pd.DataFrame({"id": [1, 2], "value": [10, 20]}), index="id"
-    )
-    right = session.from_pandas(
-        pd.DataFrame({"id": [1, 2], "other": [100, 200]}), index="id"
-    )
+    left = session.from_pandas(pd.DataFrame({"id": [1, 2], "value": [10, 20]}), index="id")
+    right = session.from_pandas(pd.DataFrame({"id": [1, 2], "other": [100, 200]}), index="id")
     missing = cast("duckpd.DataFrame", left.loc[[99, 99]])
     merged = missing.merge(
         right,

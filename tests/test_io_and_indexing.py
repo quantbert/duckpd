@@ -429,9 +429,7 @@ def test_loc_list_enables_deterministic_positional_and_window_operations() -> No
     # Because loc with a list establishes an explicit request ordering,
     # positional and window operations work deterministically
     reordered = cast("dp.DataFrame", df.loc[[4, 2, 1]])
-    assert (
-        reordered.ordering == ()
-    )  # hidden order column is not exposed in public ordering
+    assert reordered.ordering == ()  # hidden order column is not exposed in public ordering
 
     # .iloc slicing
     sliced = cast("dp.DataFrame", reordered.iloc[0:2]).collect()
@@ -502,9 +500,7 @@ def test_save_as_table_failed_overwrite_rolls_back() -> None:
         with pytest.raises(MaterializationError, match="save_as_table"):
             failing.save_as_table("rollback_target", mode="overwrite")
 
-        pd.testing.assert_frame_equal(
-            session.table("rollback_target").collect(), original
-        )
+        pd.testing.assert_frame_equal(session.table("rollback_target").collect(), original)
 
 
 def test_parquet_atomic_commit_with_index_preservation(tmp_path: Path) -> None:

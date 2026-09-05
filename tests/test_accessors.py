@@ -215,12 +215,8 @@ def test_v01_acceptance_workflow_runs_end_to_end(tmp_path: object) -> None:
 
 
 def test_accessor_invalid_arguments_raise_early() -> None:
-    df = pd.DataFrame(
-        {"s": ["abc"], "ts": pd.Series(["2023-01-01"], dtype="datetime64[ns]")}
-    )
+    df = pd.DataFrame({"s": ["abc"], "ts": pd.Series(["2023-01-01"], dtype="datetime64[ns]")})
     frame = duckpd.from_pandas(df)
 
-    with pytest.raises(
-        UnsupportedOperationError, match="currently supports 'Y', 'M', 'D'"
-    ):
+    with pytest.raises(UnsupportedOperationError, match="currently supports 'Y', 'M', 'D'"):
         frame["ts"].dt.to_period("Q")  # type: ignore[arg-type]

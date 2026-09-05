@@ -87,12 +87,8 @@ def generate_markdown_report(
     ]
 
     valid_speedups = [c.speedup for c in comparisons if c.speedup is not None]
-    valid_rss_red = [
-        c.rss_reduction for c in comparisons if c.rss_reduction is not None
-    ]
-    valid_heap_red = [
-        c.heap_reduction for c in comparisons if c.heap_reduction is not None
-    ]
+    valid_rss_red = [c.rss_reduction for c in comparisons if c.rss_reduction is not None]
+    valid_heap_red = [c.heap_reduction for c in comparisons if c.heap_reduction is not None]
 
     max_speedup = max(valid_speedups) if valid_speedups else 1.0
     avg_speedup = sum(valid_speedups) / len(valid_speedups) if valid_speedups else 1.0
@@ -185,14 +181,10 @@ def generate_markdown_report(
     for c in comparisons:
         d = c.duckpd
         d_time_range = (
-            f"{human_seconds(d.min_time)} - {human_seconds(d.max_time)}"
-            if d.success
-            else "N/A"
+            f"{human_seconds(d.min_time)} - {human_seconds(d.max_time)}" if d.success else "N/A"
         )
         d_mb_s = f"{d.throughput_mb_s:.2f} MB/s" if d.success else "N/A"
-        d_rows_s = (
-            human_throughput(d.throughput_rows_s, "rows/s") if d.success else "N/A"
-        )
+        d_rows_s = human_throughput(d.throughput_rows_s, "rows/s") if d.success else "N/A"
         d_status = "SUCCESS" if d.success else f"ERROR: {d.error_message}"
 
         lines.append(
@@ -206,14 +198,10 @@ def generate_markdown_report(
         if c.pandas is not None:
             p = c.pandas
             p_time_range = (
-                f"{human_seconds(p.min_time)} - {human_seconds(p.max_time)}"
-                if p.success
-                else "N/A"
+                f"{human_seconds(p.min_time)} - {human_seconds(p.max_time)}" if p.success else "N/A"
             )
             p_mb_s = f"{p.throughput_mb_s:.2f} MB/s" if p.success else "N/A"
-            p_rows_s = (
-                human_throughput(p.throughput_rows_s, "rows/s") if p.success else "N/A"
-            )
+            p_rows_s = human_throughput(p.throughput_rows_s, "rows/s") if p.success else "N/A"
             p_status = "SUCCESS" if p.success else f"FAILED: {p.error_message}"
             lines.append(
                 f"| **{c.preset}** | `{c.workload_name}` | pandas | "

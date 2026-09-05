@@ -79,9 +79,7 @@ class StringMethods:
 
     def replace(self, pat: str, repl: str) -> Series:
         """Replace occurrences of pattern/regex in the Series with some other string."""
-        return self._series._call_function(
-            "replace", LiteralValue(pat), LiteralValue(repl)
-        )
+        return self._series._call_function("replace", LiteralValue(pat), LiteralValue(repl))
 
 
 class DatetimeProperties:

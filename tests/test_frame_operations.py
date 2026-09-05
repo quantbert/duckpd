@@ -75,9 +75,7 @@ def test_quoted_column_identifier_is_structured() -> None:
     source = pd.DataFrame({'odd "name': [1, 2]})
     frame = duckpd.from_pandas(source)
 
-    result = frame.assign(calculated=frame['odd "name'] + 1)[
-        ['odd "name', "calculated"]
-    ].collect()
+    result = frame.assign(calculated=frame['odd "name'] + 1)[['odd "name', "calculated"]].collect()
 
     expected = source.assign(calculated=[2, 3])
     assert_frame_equal(result, expected)
@@ -259,8 +257,7 @@ def test_cross_frame_series_arithmetic_aligns_explicit_indexes_lazily() -> None:
         assert session.execution_count == 0
         assert_series_equal(
             result.collect(),
-            left_source.set_index("idx")["value"]
-            + right_source.set_index("idx")["value"],
+            left_source.set_index("idx")["value"] + right_source.set_index("idx")["value"],
         )
         assert session.execution_count == 3
 
@@ -308,12 +305,12 @@ def test_dataframe_scalar_arithmetic_matches_pandas(method: str) -> None:
 
 def test_cross_frame_arithmetic_rejects_incompatible_indexes_before_execution() -> None:
     with duckpd.connect() as session:
-        left = session.from_pandas(
-            pd.DataFrame({"left_idx": [1], "value": [1]})
-        ).set_index("left_idx")
-        right = session.from_pandas(
-            pd.DataFrame({"right_idx": [1], "value": [2]})
-        ).set_index("right_idx")
+        left = session.from_pandas(pd.DataFrame({"left_idx": [1], "value": [1]})).set_index(
+            "left_idx"
+        )
+        right = session.from_pandas(pd.DataFrame({"right_idx": [1], "value": [2]})).set_index(
+            "right_idx"
+        )
 
         with pytest.raises(AlignmentError, match="matching index names"):
             _ = left + right
@@ -334,9 +331,7 @@ def test_cross_frame_arithmetic_rejects_ambiguous_duplicate_indexes(
     right_source = pd.DataFrame(
         {"idx": right_index, "value": list(range(10, 10 + len(right_index)))}
     )
-    pandas_result = (
-        left_source.set_index("idx")["value"] + right_source.set_index("idx")["value"]
-    )
+    pandas_result = left_source.set_index("idx")["value"] + right_source.set_index("idx")["value"]
     assert len(pandas_result) == pandas_result_length
 
     with duckpd.connect() as session:
@@ -396,9 +391,7 @@ def test_registered_arrow_udf_is_typed_lazy_and_batch_independent() -> None:
             "BIGINT",
             null_handling="special",
         )
-        frame = session.from_pandas(
-            pd.DataFrame({"value": pd.Series([1, 2, None], dtype="Int64")})
-        )
+        frame = session.from_pandas(pd.DataFrame({"value": pd.Series([1, 2, None], dtype="Int64")}))
         result = frame.assign(mapped=frame["value"].map_arrow("plus_one"))
 
         assert spec.deterministic is True

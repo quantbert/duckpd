@@ -88,9 +88,7 @@ def test_dataframe_sum_min_count_matches_pandas() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "operation", ["sum", "mean", "min", "max", "std", "var", "median"]
-)
+@pytest.mark.parametrize("operation", ["sum", "mean", "min", "max", "std", "var", "median"])
 @pytest.mark.parametrize("skipna", [True, False])
 def test_series_reductions_match_pandas(
     numeric_source: pd.DataFrame,
@@ -226,9 +224,7 @@ def test_reductions_std_var_ddof() -> None:
 
 
 def test_reductions_quantile() -> None:
-    source = pd.DataFrame(
-        {"a": [10.0, 20.0, 30.0, 40.0, 50.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]}
-    )
+    source = pd.DataFrame({"a": [10.0, 20.0, 30.0, 40.0, 50.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]})
     session = duckpd.connect()
     frame = session.from_pandas(source)
 
@@ -272,18 +268,12 @@ def test_reductions_any_all_string_truthiness_and_nulls() -> None:
 
     nullable = pd.DataFrame({"value": pd.Series([False, None], dtype=object)})
     nullable_frame = duckpd.from_pandas(nullable)
-    assert nullable_frame["value"].any(skipna=False) == nullable["value"].any(
-        skipna=False
-    )
+    assert nullable_frame["value"].any(skipna=False) == nullable["value"].any(skipna=False)
 
     floating = pd.DataFrame({"value": [0.0, float("nan")]})
     floating_frame = duckpd.from_pandas(floating)
-    assert floating_frame["value"].any(skipna=False) == floating["value"].any(
-        skipna=False
-    )
-    assert floating_frame["value"].all(skipna=False) == floating["value"].all(
-        skipna=False
-    )
+    assert floating_frame["value"].any(skipna=False) == floating["value"].any(skipna=False)
+    assert floating_frame["value"].all(skipna=False) == floating["value"].all(skipna=False)
 
 
 def test_reductions_bool_only_and_invalid_args() -> None:

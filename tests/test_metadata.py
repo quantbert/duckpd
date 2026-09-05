@@ -57,9 +57,7 @@ def test_source_index_and_order_are_lazy() -> None:
 
 
 def test_index_and_order_survive_projection_filter_and_limit() -> None:
-    source = pd.DataFrame(
-        {"row_id": [3, 1, 2], "sequence": [30, 10, 20], "value": [8, 6, 7]}
-    )
+    source = pd.DataFrame({"row_id": [3, 1, 2], "sequence": [30, 10, 20], "value": [8, 6, 7]})
     frame = duckpd.from_pandas(source, order_by="sequence").set_index("row_id")
 
     result = frame[frame["value"] >= 7][["value"]].limit(2)
@@ -95,9 +93,7 @@ def test_reset_index_drop_discards_hidden_index() -> None:
 def test_reset_index_drop_clears_ordering_on_removed_index() -> None:
     source = pd.DataFrame({"row_id": [2, 1], "value": [20, 10]})
 
-    result = duckpd.from_pandas(source, index="row_id", order_by="row_id").reset_index(
-        drop=True
-    )
+    result = duckpd.from_pandas(source, index="row_id", order_by="row_id").reset_index(drop=True)
 
     assert result.ordering == ()
     expected = source.sort_values("row_id")[["value"]].reset_index(drop=True)
@@ -194,10 +190,7 @@ def test_arithmetic_metadata_uses_duckdb_numeric_promotion() -> None:
         decimal_product=frame["decimal"] * frame["decimal"],
     )
 
-    dtypes = {
-        column.label: column.duckdb_type
-        for column in result._plan.metadata.visible_columns
-    }
+    dtypes = {column.label: column.duckdb_type for column in result._plan.metadata.visible_columns}
     assert dtypes["float_sum"] == "FLOAT"
     assert dtypes["decimal_sum"] == "DECIMAL(4,2)"
     assert dtypes["decimal_product"] == "DECIMAL(6,4)"
@@ -248,9 +241,7 @@ def test_decimal_promotion_never_emits_invalid_precision_or_scale() -> None:
                     continue
                 precision, scale = (
                     int(part)
-                    for part in result.removeprefix("DECIMAL(")
-                    .removesuffix(")")
-                    .split(",")
+                    for part in result.removeprefix("DECIMAL(").removesuffix(")").split(",")
                 )
                 assert 0 <= scale <= precision <= 38
 
@@ -259,9 +250,7 @@ def test_global_aggregate_clears_index_and_order_metadata() -> None:
     source = pd.DataFrame({"row_id": [1, 2], "value": [10, 20]})
     frame = duckpd.from_pandas(source, index="row_id", order_by="row_id")
     value = next(
-        column
-        for column in frame._plan.metadata.visible_columns
-        if column.label == "value"
+        column for column in frame._plan.metadata.visible_columns if column.label == "value"
     )
 
     plan = aggregate_plan(
@@ -323,14 +312,8 @@ def test_expression_alias_and_nullability_metadata() -> None:
     frame = duckpd.from_pandas(pd.DataFrame({"value": [1, 2]}))
     value = frame._plan.metadata.visible_columns[0]
 
-    assert (
-        expression_nullability(LiteralValue(None), frame._plan.metadata)
-        is Nullability.NULLABLE
-    )
-    assert (
-        expression_nullability(LiteralValue(1), frame._plan.metadata)
-        is Nullability.NON_NULL
-    )
+    assert expression_nullability(LiteralValue(None), frame._plan.metadata) is Nullability.NULLABLE
+    assert expression_nullability(LiteralValue(1), frame._plan.metadata) is Nullability.NON_NULL
 
     result = frame.assign(alias=frame["value"], constant=1)
     columns = {column.label: column for column in result._plan.metadata.visible_columns}

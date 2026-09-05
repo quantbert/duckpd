@@ -105,9 +105,7 @@ def _run_pandas_pipeline(
     queue.put((result_df, t1 - t0, peak_bytes))
 
 
-def run_in_subprocess(
-    target: object, *args: object
-) -> tuple[pd_orig.DataFrame, float, int]:
+def run_in_subprocess(target: object, *args: object) -> tuple[pd_orig.DataFrame, float, int]:
     """Run pipeline in an isolated process to measure peak memory allocations."""
     ctx = multiprocessing.get_context("spawn")
     queue: multiprocessing.Queue[tuple[pd_orig.DataFrame, float, int]] = ctx.Queue()
@@ -154,16 +152,12 @@ def benchmark_file(
                     selected_ticker,
                     threads,
                 )
-                duck_runs.append(
-                    BenchmarkResult("DuckPD", elapsed, peak_heap, len(result_df))
-                )
+                duck_runs.append(BenchmarkResult("DuckPD", elapsed, peak_heap, len(result_df)))
             else:
                 result_df, elapsed, peak_heap = run_in_subprocess(
                     _run_pandas_pipeline, str(parquet_path), selected_ticker
                 )
-                pandas_runs.append(
-                    BenchmarkResult("pandas", elapsed, peak_heap, len(result_df))
-                )
+                pandas_runs.append(BenchmarkResult("pandas", elapsed, peak_heap, len(result_df)))
             outputs[engine] = result_df
         if not skip_pandas:
             assert_frame_equal(outputs["duckpd"], outputs["pandas"])
@@ -178,9 +172,7 @@ def benchmark_file(
     print(_format_summary(pandas_summary, pandas_runs))
     print("[OK] Semantic verification passed for every repetition.")
     speedup = pandas_summary.elapsed_seconds / max(duck_summary.elapsed_seconds, 1e-6)
-    heap_ratio = pandas_summary.peak_python_heap_bytes / max(
-        duck_summary.peak_python_heap_bytes, 1
-    )
+    heap_ratio = pandas_summary.peak_python_heap_bytes / max(duck_summary.peak_python_heap_bytes, 1)
     print(f"  * Median speedup:           {speedup:.2f}x")
     print(f"  * Traced Python heap ratio: {heap_ratio:.2f}x")
     return duck_summary, pandas_summary
@@ -255,9 +247,7 @@ def parse_args(args: list[str]) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args(sys.argv[1:])
-    presets: list[str] = (
-        ["smoke", "100mb", "1gb", "5gb"] if args.preset == "all" else [args.preset]
-    )
+    presets: list[str] = ["smoke", "100mb", "1gb", "5gb"] if args.preset == "all" else [args.preset]
 
     found_any = False
     for preset in presets:

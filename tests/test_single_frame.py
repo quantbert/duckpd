@@ -213,9 +213,7 @@ def test_drop_with_columns_kwarg_matches_pandas(mixed_source: pd.DataFrame) -> N
 
 
 def test_drop_preserves_index_metadata() -> None:
-    source = pd.DataFrame(
-        {"row_id": [1, 2, 3], "seq": [30, 10, 20], "value": [8, 6, 7]}
-    )
+    source = pd.DataFrame({"row_id": [1, 2, 3], "seq": [30, 10, 20], "value": [8, 6, 7]})
     frame = duckpd.from_pandas(source, index="row_id", order_by="seq")
 
     result = frame.drop(columns="value")
@@ -294,9 +292,7 @@ def test_series_astype_errors_ignore() -> None:
     source = pd.DataFrame({"val": [1, 2, 3]})
     frame = duckpd.from_pandas(source)
 
-    same_series = frame.assign(
-        converted=frame["val"].astype("invalid_type_name", errors="ignore")
-    )
+    same_series = frame.assign(converted=frame["val"].astype("invalid_type_name", errors="ignore"))
     assert_frame_equal(same_series.collect(), source.assign(converted=source["val"]))
 
 
@@ -663,16 +659,9 @@ def test_where_mask_cross_frame_alignment_error() -> None:
 def test_isna_rename_drop_pipeline_matches_pandas(mixed_source: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(mixed_source)
 
-    result = (
-        frame.rename(columns={"integer": "int"})
-        .drop(columns="boolean")
-        .isna()
-        .collect()
-    )
+    result = frame.rename(columns={"integer": "int"}).drop(columns="boolean").isna().collect()
 
-    expected = (
-        mixed_source.rename(columns={"integer": "int"}).drop(columns="boolean").isna()
-    )
+    expected = mixed_source.rename(columns={"integer": "int"}).drop(columns="boolean").isna()
     assert_frame_equal(result, expected, check_dtype=False)
 
 
@@ -913,9 +902,7 @@ def test_dataframe_and_series_sample() -> None:
     small_pdf = pd.DataFrame({"x": range(7)})
     small_df = duckpd.from_pandas(small_pdf)
     for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        assert len(small_df.sample(frac=frac).collect()) == len(
-            small_pdf.sample(frac=frac)
-        )
+        assert len(small_df.sample(frac=frac).collect()) == len(small_pdf.sample(frac=frac))
         assert len(small_df["x"].sample(frac=frac).collect()) == len(
             small_pdf["x"].sample(frac=frac)
         )
@@ -924,23 +911,17 @@ def test_dataframe_and_series_sample() -> None:
     indexed_pdf = pd.DataFrame({"k": ["row1", "row2", "row3"], "v": [10, 20, 30]})
     indexed_df = duckpd.from_pandas(indexed_pdf).set_index("k")
     # With explicit index preserved
-    sample_idx_preserved = indexed_df.sample(
-        2, random_state=1, ignore_index=False
-    ).collect()
+    sample_idx_preserved = indexed_df.sample(2, random_state=1, ignore_index=False).collect()
     assert all(idx in ["row1", "row2", "row3"] for idx in sample_idx_preserved.index)
     assert sample_idx_preserved.index.name == "k"
     # With ignore_index
-    sample_idx_ignored = indexed_df.sample(
-        2, random_state=1, ignore_index=True
-    ).collect()
+    sample_idx_ignored = indexed_df.sample(2, random_state=1, ignore_index=True).collect()
     assert list(sample_idx_ignored.index) == [0, 1]
     assert list(sample_idx_ignored.columns) == ["v"]
 
     # Series ignore_index
     s_indexed = indexed_df["v"]
-    s_sample_preserved = s_indexed.sample(
-        2, random_state=1, ignore_index=False
-    ).collect()
+    s_sample_preserved = s_indexed.sample(2, random_state=1, ignore_index=False).collect()
     assert all(idx in ["row1", "row2", "row3"] for idx in s_sample_preserved.index)
     s_sample_ignored = s_indexed.sample(2, random_state=1, ignore_index=True).collect()
     assert list(s_sample_ignored.index) == [0, 1]

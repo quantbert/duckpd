@@ -185,9 +185,7 @@ def _json_value(value: object) -> object:
         result = {
             "node": "SourceProvenance",
             "kind": value.kind.value,
-            "locations": [
-                sanitize_source_location(location) for location in value.locations
-            ],
+            "locations": [sanitize_source_location(location) for location in value.locations],
             "fingerprint": value.fingerprint,
             "writable": value.writable,
             "row_preserving": value.row_preserving,
@@ -206,10 +204,7 @@ def _json_value(value: object) -> object:
     if is_dataclass(value):
         result: dict[str, object] = {"node": type(value).__name__}
         result.update(
-            {
-                field.name: _json_value(getattr(value, field.name))
-                for field in fields(value)
-            }
+            {field.name: _json_value(getattr(value, field.name)) for field in fields(value)}
         )
         return result
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -268,9 +263,7 @@ def _required_column_liveness(plan: LogicalPlan) -> LogicalPlan:
             required.update(_expression_columns(projection.expression))
         if isinstance(node.input, ScanPlan):
             scan = node.input
-            columns = tuple(
-                column for column in scan.metadata.columns if column.id in required
-            )
+            columns = tuple(column for column in scan.metadata.columns if column.id in required)
             if not columns or len(columns) == len(scan.metadata.columns):
                 return node
             return replace(
@@ -284,9 +277,7 @@ def _required_column_liveness(plan: LogicalPlan) -> LogicalPlan:
             return node
         inner = node.input
         retained = tuple(
-            projection
-            for projection in inner.projections
-            if projection.column.id in required
+            projection for projection in inner.projections if projection.column.id in required
         )
         if not retained or len(retained) == len(inner.projections):
             return node
@@ -363,9 +354,7 @@ def _expression_columns(expression: Expression) -> set[ColumnId]:
     if isinstance(expression, (UnaryExpression, CastExpression)):
         return _expression_columns(expression.operand)
     if isinstance(expression, BinaryExpression):
-        return _expression_columns(expression.left) | _expression_columns(
-            expression.right
-        )
+        return _expression_columns(expression.left) | _expression_columns(expression.right)
     if isinstance(expression, CaseWhen):
         return (
             _expression_columns(expression.condition)
@@ -418,9 +407,7 @@ def _map_expression_columns(
             otherwise=otherwise,
         )
     if isinstance(expression, FunctionCall):
-        arguments = tuple(
-            _map_expression_columns(item, mapping) for item in expression.arguments
-        )
+        arguments = tuple(_map_expression_columns(item, mapping) for item in expression.arguments)
         if any(item is None for item in arguments):
             return None
         return replace(expression, arguments=arguments)
@@ -453,9 +440,7 @@ def _common_subplan_recommendations(
             "fingerprint": fingerprint,
             "occurrences": count,
             "node": type(node).__name__,
-            "message": (
-                "Repeated logical subplan; consider explicit DataFrame.persist()."
-            ),
+            "message": ("Repeated logical subplan; consider explicit DataFrame.persist()."),
         }
         for fingerprint, (count, node) in sorted(counts.items())
         if count > 1 and not isinstance(node, ScanPlan)

@@ -462,9 +462,7 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
         other_meta = expression_metadata(expression.otherwise)
         return ExpressionMetadata(
             is_elementwise=(
-                cond_meta.is_elementwise
-                and val_meta.is_elementwise
-                and other_meta.is_elementwise
+                cond_meta.is_elementwise and val_meta.is_elementwise and other_meta.is_elementwise
             ),
             preserves_length=(
                 cond_meta.preserves_length
@@ -472,16 +470,10 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
                 and other_meta.preserves_length
             ),
             is_scalar_like=(
-                cond_meta.is_scalar_like
-                and val_meta.is_scalar_like
-                and other_meta.is_scalar_like
+                cond_meta.is_scalar_like and val_meta.is_scalar_like and other_meta.is_scalar_like
             ),
-            is_literal=(
-                cond_meta.is_literal and val_meta.is_literal and other_meta.is_literal
-            ),
-            has_window=(
-                cond_meta.has_window or val_meta.has_window or other_meta.has_window
-            ),
+            is_literal=(cond_meta.is_literal and val_meta.is_literal and other_meta.is_literal),
+            has_window=(cond_meta.has_window or val_meta.has_window or other_meta.has_window),
             order_dependency_count=(
                 cond_meta.order_dependency_count
                 + val_meta.order_dependency_count
@@ -510,8 +502,7 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
             is_literal=False,
             has_window=True,
             order_dependency_count=(
-                len(expression.order_by)
-                + sum(m.order_dependency_count for m in all_metas)
+                len(expression.order_by) + sum(m.order_dependency_count for m in all_metas)
             ),
         )
 
@@ -523,9 +514,7 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
         is_scalar_like=left.is_scalar_like and right.is_scalar_like,
         is_literal=left.is_literal and right.is_literal,
         has_window=left.has_window or right.has_window,
-        order_dependency_count=(
-            left.order_dependency_count + right.order_dependency_count
-        ),
+        order_dependency_count=(left.order_dependency_count + right.order_dependency_count),
     )
 
 
@@ -536,17 +525,11 @@ def expression_nullability(
     """Infer nullability conservatively from typed expression structure."""
     if isinstance(expression, ColumnRef):
         return next(
-            (
-                column.nullable
-                for column in metadata.columns
-                if column.id == expression.column_id
-            ),
+            (column.nullable for column in metadata.columns if column.id == expression.column_id),
             Nullability.UNKNOWN,
         )
     if isinstance(expression, LiteralValue):
-        return (
-            Nullability.NULLABLE if expression.value is None else Nullability.NON_NULL
-        )
+        return Nullability.NULLABLE if expression.value is None else Nullability.NON_NULL
     if isinstance(expression, UnaryExpression):
         return expression_nullability(expression.operand, metadata)
     if isinstance(expression, CastExpression):
@@ -554,20 +537,14 @@ def expression_nullability(
     if isinstance(expression, FunctionCall):
         if expression.name.lower() in {"isnull", "notnull", "isnan", "isfinite"}:
             return Nullability.NON_NULL
-        values = [
-            expression_nullability(argument, metadata)
-            for argument in expression.arguments
-        ]
+        values = [expression_nullability(argument, metadata) for argument in expression.arguments]
     elif isinstance(expression, CaseWhen):
         values = [
             expression_nullability(expression.value, metadata),
             expression_nullability(expression.otherwise, metadata),
         ]
     elif isinstance(expression, WindowExpression):
-        values = [
-            expression_nullability(argument, metadata)
-            for argument in expression.arguments
-        ]
+        values = [expression_nullability(argument, metadata) for argument in expression.arguments]
         if not values:
             return Nullability.NON_NULL
     else:

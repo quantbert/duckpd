@@ -249,9 +249,7 @@ def _tpch_duckpd(session: duckpd.Session, path: Path) -> duckpd.DataFrame:
     frame = session.read_parquet(path)
     return (
         frame.assign(
-            disc_price=lambda current: (
-                current["extendedprice"] * (1 - current["discount"])
-            )
+            disc_price=lambda current: current["extendedprice"] * (1 - current["discount"])
         )
         .groupby(["returnflag", "linestatus"], as_index=False)
         .agg(
@@ -273,9 +271,7 @@ def _join_expected(orders: Path, customers: Path) -> pd.DataFrame:
     ).df()
 
 
-def _join_duckpd(
-    session: duckpd.Session, orders: Path, customers: Path
-) -> duckpd.DataFrame:
+def _join_duckpd(session: duckpd.Session, orders: Path, customers: Path) -> duckpd.DataFrame:
     return (
         session.read_parquet(orders)
         .merge(session.read_parquet(customers), on="customer_id")
@@ -330,9 +326,7 @@ def _duckdb_track(name: str, paths: dict[str, Path]) -> pd.DataFrame:
     return _ohlc_expected(paths["ohlc"])
 
 
-def _duckpd_track(
-    name: str, session: duckpd.Session, paths: dict[str, Path]
-) -> duckpd.DataFrame:
+def _duckpd_track(name: str, session: duckpd.Session, paths: dict[str, Path]) -> duckpd.DataFrame:
     if name == "tpch_q1":
         return _tpch_duckpd(session, paths["lineitem"])
     if name == "db_groupby_join":
@@ -344,11 +338,7 @@ def _pandas_track(name: str, paths: dict[str, Path]) -> pd.DataFrame:
     if name == "tpch_q1":
         return (
             pd.read_parquet(paths["lineitem"])
-            .assign(
-                disc_price=lambda frame: (
-                    frame["extendedprice"] * (1 - frame["discount"])
-                )
-            )
+            .assign(disc_price=lambda frame: frame["extendedprice"] * (1 - frame["discount"]))
             .groupby(["returnflag", "linestatus"], as_index=False)
             .agg(
                 sum_qty=("quantity", "sum"),
@@ -390,9 +380,7 @@ def _isolated_worker(
         _evict_source_cache(_track_sources(name, paths))
         keys = _TRACK_KEYS[name]
         if engine == "duckdb_sql":
-            result = _measure(
-                engine, lambda: _duckdb_track(name, paths), expected, keys
-            )
+            result = _measure(engine, lambda: _duckdb_track(name, paths), expected, keys)
         elif engine == "duckpd":
             result = _measure_duckpd(
                 lambda session: _duckpd_track(name, session, paths),
@@ -401,9 +389,7 @@ def _isolated_worker(
                 spill_directory,
             )
         else:
-            result = _measure(
-                engine, lambda: _pandas_track(name, paths), expected, keys
-            )
+            result = _measure(engine, lambda: _pandas_track(name, paths), expected, keys)
     except BaseException as exc:
         result = EngineResult(
             engine,
@@ -485,20 +471,12 @@ def scorecard(results: tuple[TrackResult, ...]) -> dict[str, object]:
         ]
         successful = [sample for sample in samples if sample.status == "success"]
         cold = [
-            value
-            for sample in successful
-            if (value := sample.cold_execution_seconds) is not None
+            value for sample in successful if (value := sample.cold_execution_seconds) is not None
         ]
         warm = [
-            value
-            for sample in successful
-            if (value := sample.warm_execution_seconds) is not None
+            value for sample in successful if (value := sample.warm_execution_seconds) is not None
         ]
-        rss = [
-            value
-            for sample in successful
-            if (value := sample.peak_rss_bytes) is not None
-        ]
+        rss = [value for sample in successful if (value := sample.peak_rss_bytes) is not None]
         entries.append(
             {
                 "engine": engine_name,
@@ -507,12 +485,8 @@ def scorecard(results: tuple[TrackResult, ...]) -> dict[str, object]:
                 "correct_tracks": sum(sample.correct is True for sample in samples),
                 "failed_tracks": sum(sample.status == "failed" for sample in samples),
                 "oom_tracks": sum(sample.status == "oom" for sample in samples),
-                "unsupported_tracks": sum(
-                    sample.status == "unsupported" for sample in samples
-                ),
-                "unavailable_tracks": sum(
-                    sample.status == "unavailable" for sample in samples
-                ),
+                "unsupported_tracks": sum(sample.status == "unsupported" for sample in samples),
+                "unavailable_tracks": sum(sample.status == "unavailable" for sample in samples),
                 "median_cold_seconds": median(cold) if cold else None,
                 "median_warm_seconds": median(warm) if warm else None,
                 "max_peak_rss_bytes": max(rss) if rss else None,
@@ -528,9 +502,7 @@ def scorecard(results: tuple[TrackResult, ...]) -> dict[str, object]:
         "dimensions": {
             "correctness": "validated results retained per engine and track",
             "safety": "failed, OOM, unsupported, and unknown metrics are retained",
-            "scale": {
-                "rows_per_track": {result.track: result.rows for result in results}
-            },
+            "scale": {"rows_per_track": {result.track: result.rows for result in results}},
             "observability": [
                 "planning_seconds",
                 "peak_rss_bytes",
@@ -593,9 +565,7 @@ def main() -> None:
         args.output.write_text(output + "\n", encoding="utf-8")
     if args.scorecard_output is not None:
         args.scorecard_output.parent.mkdir(parents=True, exist_ok=True)
-        args.scorecard_output.write_text(
-            scorecard_json(results) + "\n", encoding="utf-8"
-        )
+        args.scorecard_output.write_text(scorecard_json(results) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

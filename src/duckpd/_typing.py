@@ -92,13 +92,9 @@ def common_union_type(types: Iterable[str]) -> str:
     has_float = any(dtype in {"FLOAT", "DOUBLE"} for dtype in concrete)
     if has_decimal and has_float:
         joined = ", ".join(concrete)
-        raise TypeError(
-            f"concat cannot losslessly reconcile decimal and floating types: {joined}"
-        )
+        raise TypeError(f"concat cannot losslessly reconcile decimal and floating types: {joined}")
 
-    if all(
-        dtype in _INTEGER_BOUNDS or dtype in {"FLOAT", "DOUBLE"} for dtype in concrete
-    ):
+    if all(dtype in _INTEGER_BOUNDS or dtype in {"FLOAT", "DOUBLE"} for dtype in concrete):
         return "DOUBLE"
 
     joined = ", ".join(concrete)
@@ -109,9 +105,7 @@ def _common_integer_type(types: tuple[str, ...]) -> str:
     minimum = min(_INTEGER_BOUNDS[dtype][0] for dtype in types)
     maximum = max(_INTEGER_BOUNDS[dtype][1] for dtype in types)
     candidates = (
-        _SIGNED_INTEGER_TYPES
-        if minimum < 0
-        else (*_UNSIGNED_INTEGER_TYPES, *_SIGNED_INTEGER_TYPES)
+        _SIGNED_INTEGER_TYPES if minimum < 0 else (*_UNSIGNED_INTEGER_TYPES, *_SIGNED_INTEGER_TYPES)
     )
     for candidate in candidates:
         lower, upper = _INTEGER_BOUNDS[candidate]
@@ -166,18 +160,10 @@ def binary_numeric_type(left: str, right: str, operator: str) -> str:
             return "DOUBLE"
         left_precision, left_scale = left_decimal
         right_precision, right_scale = right_decimal
-        scale = (
-            left_scale + right_scale
-            if operator == "multiply"
-            else max(left_scale, right_scale)
-        )
+        scale = left_scale + right_scale if operator == "multiply" else max(left_scale, right_scale)
         if operator == "multiply":
             raw_precision = left_precision + right_precision
-            if (
-                raw_precision > 18
-                and max(left_precision, right_precision) <= 18
-                and scale < 18
-            ):
+            if raw_precision > 18 and max(left_precision, right_precision) <= 18 and scale < 18:
                 precision = 18
             else:
                 precision = min(38, raw_precision)

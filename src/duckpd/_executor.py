@@ -260,8 +260,7 @@ def _execution_context(
             except duckdb.Error:
                 provenance = plan.metadata.provenance
                 locations = tuple(
-                    sanitize_source_location(location)
-                    for location in provenance.locations
+                    sanitize_source_location(location) for location in provenance.locations
                 )
                 context = (
                     f"plan={type(plan).__name__}, "
@@ -338,14 +337,9 @@ def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
     }
     index_ids = set(plan.metadata.index.columns)
     materialized_columns = tuple(
-        column
-        for column in plan.metadata.columns
-        if not column.hidden or column.id in index_ids
+        column for column in plan.metadata.columns if not column.hidden or column.id in index_ids
     )
-    if any(
-        column.duckdb_type.upper() not in fixed_width_types
-        for column in materialized_columns
-    ):
+    if any(column.duckdb_type.upper() not in fixed_width_types for column in materialized_columns):
         return None
 
     def row_upper_bound(node: LogicalPlan) -> int | None:
@@ -384,9 +378,7 @@ def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
     rows = row_upper_bound(plan)
     if rows is None:
         return None
-    label_bytes = sum(
-        len(str(column.label).encode()) for column in materialized_columns
-    )
+    label_bytes = sum(len(str(column.label).encode()) for column in materialized_columns)
     per_row = 64 * (len(materialized_columns) + max(len(index_ids), 1))
     return 65_536 + label_bytes * 4 + rows * per_row
 
@@ -448,20 +440,14 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
                 kind = node.metadata.provenance.kind
                 source_name = source.qualified_name
                 capabilities = source.capabilities
-            elif isinstance(source, ParquetSource) and any(
-                "://" in path for path in source.paths
-            ):
+            elif isinstance(source, ParquetSource) and any("://" in path for path in source.paths):
                 kind = SourceKind.PARQUET
-                source_name = ",".join(
-                    sanitize_source_location(path) for path in source.paths
-                )
+                source_name = ",".join(sanitize_source_location(path) for path in source.paths)
                 capabilities = _REMOTE_PARQUET_CAPABILITIES
             else:
                 return
             ordered = tuple(
-                operation
-                for operation in _SOURCE_OPERATION_ORDER
-                if operation in requested
+                operation for operation in _SOURCE_OPERATION_ORDER if operation in requested
             )
             pushdown_candidates = tuple(
                 operation
@@ -498,14 +484,9 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
         blocked_operations: set[SourceOperation] = set()
         if isinstance(node, ProjectPlan):
             operations.add(SourceOperation.PROJECTION)
-            if not all(
-                isinstance(item.expression, ColumnRef) for item in node.projections
-            ):
+            if not all(isinstance(item.expression, ColumnRef) for item in node.projections):
                 blocked_operations.add(SourceOperation.PROJECTION)
-            if any(
-                expression_metadata(item.expression).has_window
-                for item in node.projections
-            ):
+            if any(expression_metadata(item.expression).has_window for item in node.projections):
                 operations.add(SourceOperation.WINDOW)
         elif isinstance(node, FilterPlan):
             operations.add(SourceOperation.FILTER)
@@ -534,9 +515,7 @@ def _fragment_to_dict(fragment: SourceFragment) -> dict[str, object]:
         "kind": fragment.kind.value,
         "source": fragment.source,
         "requested": [operation.value for operation in fragment.requested],
-        "pushdown_candidates": [
-            operation.value for operation in fragment.pushdown_candidates
-        ],
+        "pushdown_candidates": [operation.value for operation in fragment.pushdown_candidates],
         "local_required": [operation.value for operation in fragment.local_required],
         "estimated_transfer_bytes": fragment.estimated_transfer_bytes,
     }
@@ -552,10 +531,7 @@ def _movement_plans(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
             return (
                 (
                     provenance.kind.value,
-                    tuple(
-                        sanitize_source_location(location)
-                        for location in provenance.locations
-                    ),
+                    tuple(sanitize_source_location(location) for location in provenance.locations),
                 ),
             )
         if isinstance(node, JoinPlan):
@@ -574,8 +550,7 @@ def _movement_plans(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
                         "kind": "cross_source_join",
                         "strategy": "stream_inputs_to_duckdb",
                         "left": [
-                            {"kind": kind, "locations": list(locations)}
-                            for kind, locations in left
+                            {"kind": kind, "locations": list(locations)} for kind, locations in left
                         ],
                         "right": [
                             {"kind": kind, "locations": list(locations)}
@@ -601,9 +576,7 @@ def _remote_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
     """Describe remote source movement and known native pushdown."""
     boundaries: list[dict[str, object]] = []
     for node in _plan_nodes(plan):
-        if not isinstance(node, ScanPlan) or not isinstance(
-            node.source, RemoteTableSource
-        ):
+        if not isinstance(node, ScanPlan) or not isinstance(node.source, RemoteTableSource):
             continue
         source = node.source
         capabilities = source.capabilities
@@ -660,15 +633,12 @@ class Executor:
         decimal_labels = {
             compiled.bindings[column.id]
             for column in plan.metadata.columns
-            if column.duckdb_type.startswith("DECIMAL(")
-            and column.id in compiled.bindings
+            if column.duckdb_type.startswith("DECIMAL(") and column.id in compiled.bindings
         }
         if decimal_labels:
             rel = rel.project(
                 *(
-                    duckdb.SQLExpression(quote_identifier(label))
-                    .cast("VARCHAR")
-                    .alias(label)
+                    duckdb.SQLExpression(quote_identifier(label)).cast("VARCHAR").alias(label)
                     if label in decimal_labels
                     else duckdb.SQLExpression(quote_identifier(label))
                     for label in compiled.bindings.values()
@@ -720,9 +690,7 @@ class Executor:
                 and dtype_name == "boolean"
                 and result[label].isna().any()
             ):
-                result[label] = (
-                    result[label].astype(object).where(result[label].notna(), np.nan)
-                )
+                result[label] = result[label].astype(object).where(result[label].notna(), np.nan)
 
         index_ids = plan.metadata.index.columns
         if index_ids:
@@ -818,9 +786,7 @@ class Executor:
         self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
-        result = self._compiler.project_visible(
-            compiled, plan
-        ).relation.to_arrow_table()
+        result = self._compiler.project_visible(compiled, plan).relation.to_arrow_table()
         self._session._last_materialization_report = MaterializationReport(
             reason="explicit to_arrow",
             estimated_bytes=_materialization_upper_bound(plan),
@@ -830,15 +796,11 @@ class Executor:
         return result
 
     @_execution_context("to_arrow_batches")
-    def to_arrow_batches(
-        self, plan: LogicalPlan, *, batch_size: int
-    ) -> pa.RecordBatchReader:
+    def to_arrow_batches(self, plan: LogicalPlan, *, batch_size: int) -> pa.RecordBatchReader:
         self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
-        return self._compiler.project_visible(compiled, plan).relation.to_arrow_reader(
-            batch_size
-        )
+        return self._compiler.project_visible(compiled, plan).relation.to_arrow_reader(batch_size)
 
     @_execution_context("write_parquet")
     def write_parquet(
@@ -898,9 +860,7 @@ class Executor:
         """Save the plan to a DuckDB table with mode and schema validation."""
         valid_modes = {"error", "overwrite", "append"}
         if mode not in valid_modes:
-            raise ValueError(
-                f"Unknown mode: {mode!r}; expected one of {sorted(valid_modes)}"
-            )
+            raise ValueError(f"Unknown mode: {mode!r}; expected one of {sorted(valid_modes)}")
 
         self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
@@ -912,8 +872,7 @@ class Executor:
 
         escaped_table = quote_identifier(name)
         tables_query = (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'main'"
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
         )
         existing_tables = {row[0] for row in con.sql(tables_query).fetchall()}
         table_exists = name in existing_tables
@@ -932,20 +891,14 @@ class Executor:
                 if not table_exists:
                     visible_rel.create(name)
                 else:
-                    info_rows = con.sql(
-                        f"PRAGMA table_info({escaped_table})"
-                    ).fetchall()
+                    info_rows = con.sql(f"PRAGMA table_info({escaped_table})").fetchall()
                     existing_columns = [str(row[1]) for row in info_rows]
-                    existing_types = {
-                        str(row[1]): str(row[2]).upper() for row in info_rows
-                    }
+                    existing_types = {str(row[1]): str(row[2]).upper() for row in info_rows}
 
                     incoming_columns = list(visible_rel.columns)
                     incoming_types = {
                         str(col): str(dtype).upper()
-                        for col, dtype in zip(
-                            visible_rel.columns, visible_rel.dtypes, strict=True
-                        )
+                        for col, dtype in zip(visible_rel.columns, visible_rel.dtypes, strict=True)
                     }
 
                     if set(existing_columns) != set(incoming_columns):
@@ -963,8 +916,7 @@ class Executor:
                         raise ValueError(msg)
 
                     type_mismatches = [
-                        f"column '{col}': expected {existing_types[col]}, "
-                        f"got {incoming_types[col]}"
+                        f"column '{col}': expected {existing_types[col]}, got {incoming_types[col]}"
                         for col in existing_columns
                         if existing_types[col] != incoming_types[col]
                     ]
@@ -977,8 +929,7 @@ class Executor:
 
                     if existing_columns != incoming_columns:
                         project_exprs = [
-                            duckdb.SQLExpression(quote_identifier(col))
-                            for col in existing_columns
+                            duckdb.SQLExpression(quote_identifier(col)) for col in existing_columns
                         ]
                         insert_rel = visible_rel.project(*project_exprs)
                     else:
@@ -998,9 +949,7 @@ class Executor:
         compression: ParquetCompression = "snappy",
         retain_previous: bool = False,
         _failure_injector: Callable[[CommitFailurePoint], None] | None = None,
-        _replace_file: Callable[[Path, Path], None] = (
-            _replace_file_preserving_metadata
-        ),
+        _replace_file: Callable[[Path, Path], None] = (_replace_file_preserving_metadata),
     ) -> CommitReport:
         import time
 
@@ -1043,16 +992,10 @@ class Executor:
             )
         scan = scans[0]
         if not isinstance(scan.source, ParquetSource):
-            msg = (
-                f"commit() only supports ParquetSource, "
-                f"got {type(scan.source).__name__}"
-            )
+            msg = f"commit() only supports ParquetSource, got {type(scan.source).__name__}"
             raise UnsupportedOperationError(msg)
         if len(scan.source.paths) != 1:
-            msg = (
-                "commit() currently requires a single Parquet file, "
-                "not multi-file paths"
-            )
+            msg = "commit() currently requires a single Parquet file, not multi-file paths"
             raise UnsupportedOperationError(msg)
         provenance = plan.metadata.provenance
         if provenance.kind is not SourceKind.PARQUET or not provenance.writable:
@@ -1062,15 +1005,11 @@ class Executor:
 
         source_path_str = scan.source.paths[0]
         if any(c in source_path_str for c in "*?[]"):
-            raise UnsupportedOperationError(
-                "commit() does not support wildcard or glob paths"
-            )
+            raise UnsupportedOperationError("commit() does not support wildcard or glob paths")
 
         source_path = Path(source_path_str).resolve()
         if not source_path.is_file():
-            raise FileNotFoundError(
-                f"Source Parquet file does not exist: {source_path}"
-            )
+            raise FileNotFoundError(f"Source Parquet file does not exist: {source_path}")
         # 2. Capture initial source fingerprint before reading and compilation
         initial_stat = source_path.stat()
         initial_mtime_ns = initial_stat.st_mtime_ns
@@ -1109,9 +1048,9 @@ class Executor:
         self._session._begin_execution()
 
         project_exprs = [
-            duckdb.SQLExpression(
-                quote_identifier(compiled.bindings[col_by_label[col].id])
-            ).alias(col)
+            duckdb.SQLExpression(quote_identifier(compiled.bindings[col_by_label[col].id])).alias(
+                col
+            )
             for col in orig_columns
         ]
         commit_rel = compiled.relation.project(*project_exprs)
@@ -1120,16 +1059,11 @@ class Executor:
         commit_types = [str(t).upper() for t in commit_rel.dtypes]
         type_mismatches = [
             f"column '{col}': expected {orig_t}, got {cur_t}"
-            for col, orig_t, cur_t in zip(
-                orig_columns, orig_types, commit_types, strict=True
-            )
+            for col, orig_t, cur_t in zip(orig_columns, orig_types, commit_types, strict=True)
             if orig_t != cur_t
         ]
         if type_mismatches:
-            msg = (
-                f"commit() cannot alter source column types: "
-                f"{', '.join(type_mismatches)}"
-            )
+            msg = f"commit() cannot alter source column types: {', '.join(type_mismatches)}"
             raise UnsupportedOperationError(msg)
 
         # 6. Create a unique staging file in the same directory.
@@ -1147,9 +1081,7 @@ class Executor:
             metadata_fields = ", ".join(
                 f"{quote_identifier(key.decode('utf-8'))}: ?" for key in metadata
             )
-            metadata_option = (
-                f", KV_METADATA {{{metadata_fields}}}" if metadata_fields else ""
-            )
+            metadata_option = f", KV_METADATA {{{metadata_fields}}}" if metadata_fields else ""
             copy_sql = (
                 f"COPY ({commit_rel.sql_query()}) TO ? "
                 f"(FORMAT PARQUET, COMPRESSION ?, RETURN_STATS{metadata_option})"
@@ -1186,29 +1118,16 @@ class Executor:
 
             staging_columns = list(staging_rel.columns)
             if staging_columns != orig_columns:
-                msg = (
-                    f"Committed schema {staging_columns} "
-                    f"does not match original {orig_columns}"
-                )
+                msg = f"Committed schema {staging_columns} does not match original {orig_columns}"
                 raise ValueError(msg)
             staging_arrow_schema = staging_parquet.schema_arrow
-            if not staging_arrow_schema.equals(
-                source_arrow_schema, check_metadata=True
-            ):
-                raise ValueError(
-                    "Committed Parquet schema metadata does not match source"
-                )
+            if not staging_arrow_schema.equals(source_arrow_schema, check_metadata=True):
+                raise ValueError("Committed Parquet schema metadata does not match source")
 
             # 9. Concurrency guard: verify source has not been modified
             current_stat = source_path.stat()
-            if (
-                current_stat.st_mtime_ns != initial_mtime_ns
-                or current_stat.st_size != initial_size
-            ):
-                msg = (
-                    f"Source file '{source_path}' was modified concurrently "
-                    "during commit"
-                )
+            if current_stat.st_mtime_ns != initial_mtime_ns or current_stat.st_size != initial_size:
+                msg = f"Source file '{source_path}' was modified concurrently during commit"
                 raise ConcurrentModificationError(msg)
 
             # 10. Optional retention of previous version
@@ -1216,9 +1135,7 @@ class Executor:
             if retain_previous:
                 if _failure_injector is not None:
                     _failure_injector("before_backup")
-                backup_file = (
-                    dest_dir / f"{source_path.stem}_backup_{uuid4().hex[:8]}.parquet"
-                )
+                backup_file = dest_dir / f"{source_path.stem}_backup_{uuid4().hex[:8]}.parquet"
                 shutil.copy2(source_path, backup_file)
                 backup_path = str(backup_file)
                 if _failure_injector is not None:
@@ -1262,28 +1179,19 @@ class Executor:
         self,
         plan: LogicalPlan,
         *,
-        mode: Literal[
-            "all", "logical", "optimized", "json", "sql", "physical", "analyze"
-        ] = "all",
+        mode: Literal["all", "logical", "optimized", "json", "sql", "physical", "analyze"] = "all",
     ) -> str:
         optimization = self._compiler.optimize(plan)
         logical = json.dumps(plan_to_dict(plan), indent=2)
         optimized = json.dumps(plan_to_dict(optimization.plan), indent=2)
         fallback_boundaries = _fallback_boundaries(plan)
         fallback_text = (
-            f"explicit typed Arrow UDFs {fallback_boundaries}"
-            if fallback_boundaries
-            else "none"
+            f"explicit typed Arrow UDFs {fallback_boundaries}" if fallback_boundaries else "none"
         )
         remote_boundaries = _remote_boundaries(plan)
-        remote_text = (
-            json.dumps(remote_boundaries, sort_keys=True)
-            if remote_boundaries
-            else "none"
-        )
+        remote_text = json.dumps(remote_boundaries, sort_keys=True) if remote_boundaries else "none"
         source_fragments = tuple(
-            _fragment_to_dict(fragment)
-            for fragment in _source_fragments(optimization.plan)
+            _fragment_to_dict(fragment) for fragment in _source_fragments(optimization.plan)
         )
         movement_plans = _movement_plans(optimization.plan)
         boundaries = (
@@ -1329,9 +1237,7 @@ class Executor:
             analyzed = _redact_plan_text(str(row[1]), plan)
             return f"{boundaries}\nDuckDB analyzed physical plan:\n{analyzed}"
         if mode == "all":
-            changed = [
-                snapshot.name for snapshot in optimization.snapshots if snapshot.changed
-            ]
+            changed = [snapshot.name for snapshot in optimization.snapshots if snapshot.changed]
             sql = _redact_plan_text(relation.sql_query(), plan)
             physical = _redact_plan_text(relation.explain(), plan)
             return (
@@ -1363,11 +1269,7 @@ class Executor:
         nodes = tuple(_plan_nodes(plan))
         blocking_types = (SortPlan, TopKPlan, AggregatePlan, JoinPlan, LocIndexPlan)
         blocking = tuple(
-            dict.fromkeys(
-                type(node).__name__
-                for node in nodes
-                if isinstance(node, blocking_types)
-            )
+            dict.fromkeys(type(node).__name__ for node in nodes if isinstance(node, blocking_types))
         )
         locations = plan.metadata.provenance.locations
         local_paths = tuple(
@@ -1383,9 +1285,7 @@ class Executor:
             else None
         )
         estimate_text = f"{estimate:,} bytes" if estimate is not None else "unknown"
-        extra_disk = (
-            estimate_text if blocking and estimate is not None else "engine-dependent"
-        )
+        extra_disk = estimate_text if blocking and estimate is not None else "engine-dependent"
         physical = _redact_plan_text(visible_rel.explain(), plan)
         target = sanitize_source_location(path)
         return (
@@ -1418,9 +1318,7 @@ class Executor:
             planning_started = perf_counter()
             optimization = self._compiler.optimize(plan)
             compiled = self._compiler.compile(optimization.plan, optimize=False)
-            visible_rel = self._compiler.project_visible(
-                compiled, optimization.plan
-            ).relation
+            visible_rel = self._compiler.project_visible(compiled, optimization.plan).relation
             planning_seconds = perf_counter() - planning_started
             execution_started = perf_counter()
             reader = visible_rel.to_arrow_reader()
@@ -1453,8 +1351,7 @@ class Executor:
             fallback_boundaries=_fallback_boundaries(plan),
             remote_boundaries=_remote_boundaries(plan),
             source_fragments=tuple(
-                _fragment_to_dict(fragment)
-                for fragment in _source_fragments(optimization.plan)
+                _fragment_to_dict(fragment) for fragment in _source_fragments(optimization.plan)
             ),
             movement_plans=_movement_plans(optimization.plan),
             measured_transfer_bytes=None,
@@ -1529,8 +1426,7 @@ class Executor:
                 population = int(cast("int", count_row[0]))
                 if plan.n > population:
                     raise ValueError(
-                        "Cannot take a larger sample than population "
-                        "when 'replace=False'"
+                        "Cannot take a larger sample than population when 'replace=False'"
                     )
             return
         if isinstance(
@@ -1544,12 +1440,8 @@ class Executor:
         index_ids = plan.input.metadata.index.columns
         index_labels = [compiled_input.bindings[column_id] for column_id in index_ids]
 
-        keys_df = cast(
-            "pd.DataFrame", self._session._get_registered_source(plan.source_key)
-        )
-        keys_relation = self._session._connection.from_df(keys_df).set_alias(
-            "__duckpd_loc_keys__"
-        )
+        keys_df = cast("pd.DataFrame", self._session._get_registered_source(plan.source_key))
+        keys_relation = self._session._connection.from_df(keys_df).set_alias("__duckpd_loc_keys__")
 
         input_alias = "__duckpd_loc_input__"
         matched_label = f"__duckpd_loc_matched_{plan.source_key}__"
@@ -1560,9 +1452,7 @@ class Executor:
         conditions = [
             f"__duckpd_loc_keys__.{quote_identifier(key_label)} "
             f"IS NOT DISTINCT FROM {input_alias}.{quote_identifier(index_label)}"
-            for key_label, index_label in zip(
-                plan.key_labels, index_labels, strict=True
-            )
+            for key_label, index_label in zip(plan.key_labels, index_labels, strict=True)
         ]
         joined = keys_relation.join(flagged_input, " AND ".join(conditions), how="left")
         self._session._begin_execution()
@@ -1622,8 +1512,7 @@ class Executor:
             limit_rel = compiled.relation.limit(2)
             if len(limit_rel.fetchall()) > 1:
                 raise MergeError(
-                    f"Merge keys are not unique in {side} dataset; "
-                    f"not a {relationship} merge"
+                    f"Merge keys are not unique in {side} dataset; not a {relationship} merge"
                 )
             return
 
@@ -1636,6 +1525,5 @@ class Executor:
         )
         if len(dup_check.fetchall()) > 0:
             raise MergeError(
-                f"Merge keys are not unique in {side} dataset; "
-                f"not a {relationship} merge"
+                f"Merge keys are not unique in {side} dataset; not a {relationship} merge"
             )

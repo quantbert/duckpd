@@ -181,9 +181,7 @@ def _worker_wrapper(
         t1 = time.perf_counter()
         tracemalloc.stop()
         peak_rss = get_peak_rss_bytes()
-        queue.put(
-            (None, t1 - t0, peak_rss, 0, 0, False, f"{type(exc).__name__}: {exc}")
-        )
+        queue.put((None, t1 - t0, peak_rss, 0, 0, False, f"{type(exc).__name__}: {exc}"))
 
 
 def _run_in_subprocess(
@@ -236,9 +234,7 @@ def _run_in_subprocess(
     )
 
 
-def aggregate_runs(
-    runs: list[RunMetric], file_size_bytes: int, row_count: int
-) -> AggregatedMetric:
+def aggregate_runs(runs: list[RunMetric], file_size_bytes: int, row_count: int) -> AggregatedMetric:
     """Aggregate repeated benchmark runs into statistical summary."""
     if not runs:
         raise ValueError("Cannot aggregate empty runs")
@@ -320,9 +316,7 @@ def run_benchmark(
     last_pandas_df: pd_orig.DataFrame | None = None
 
     for rep in range(repetitions):
-        run_pandas_first = (
-            (rep % 2 == 1) and not skip_pandas and not pandas_auto_skipped
-        )
+        run_pandas_first = (rep % 2 == 1) and not skip_pandas and not pandas_auto_skipped
         engines = ("pandas", "duckpd") if run_pandas_first else ("duckpd", "pandas")
         for engine in engines:
             if engine == "duckpd":
@@ -342,9 +336,7 @@ def run_benchmark(
 
     pandas_summary: AggregatedMetric | None = None
     if not skip_pandas and not pandas_auto_skipped:
-        pandas_summary = aggregate_runs(
-            pandas_runs, dataset.file_size_bytes, dataset.row_count
-        )
+        pandas_summary = aggregate_runs(pandas_runs, dataset.file_size_bytes, dataset.row_count)
 
     # Verification
     if (
@@ -357,18 +349,14 @@ def run_benchmark(
         try:
             workload.verify(last_duck_df, last_pandas_df)
             verified = True
-            verification_notes = (
-                f"Verified identical ({repetitions}/{repetitions} runs)"
-            )
+            verification_notes = f"Verified identical ({repetitions}/{repetitions} runs)"
         except Exception as exc:
             verified = False
             verification_notes = f"Mismatch: {exc}"
     elif skip_pandas:
         verification_notes = "pandas skipped by user flag"
     elif pandas_summary is not None and not pandas_summary.success:
-        verification_notes = (
-            f"pandas failed: {pandas_summary.error_message or 'unknown error'}"
-        )
+        verification_notes = f"pandas failed: {pandas_summary.error_message or 'unknown error'}"
 
     # Compute comparative ratios
     speedup: float | None = None
@@ -379,13 +367,9 @@ def run_benchmark(
         if duck_summary.median_time > 0:
             speedup = pandas_summary.median_time / duck_summary.median_time
         if duck_summary.median_rss_bytes > 0:
-            rss_reduction = (
-                pandas_summary.median_rss_bytes / duck_summary.median_rss_bytes
-            )
+            rss_reduction = pandas_summary.median_rss_bytes / duck_summary.median_rss_bytes
         if duck_summary.median_heap_bytes > 0:
-            heap_reduction = (
-                pandas_summary.median_heap_bytes / duck_summary.median_heap_bytes
-            )
+            heap_reduction = pandas_summary.median_heap_bytes / duck_summary.median_heap_bytes
 
     return BenchmarkComparison(
         preset=dataset.preset,

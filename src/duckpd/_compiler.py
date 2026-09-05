@@ -92,9 +92,7 @@ class DuckDBCompiler:
         columns: list[Column] = []
         for label, duckdb_type in zip(labels, relation.types, strict=True):
             dtype = str(duckdb_type)
-            if dtype.endswith("[]") or dtype.startswith(
-                ("STRUCT(", "MAP(", "UNION(", "ENUM(")
-            ):
+            if dtype.endswith("[]") or dtype.startswith(("STRUCT(", "MAP(", "UNION(", "ENUM(")):
                 raise UnsupportedOperationError(
                     f"DuckPD does not yet define pandas collection semantics for "
                     f"nested DuckDB type {dtype} in column {label!r}"
@@ -105,15 +103,11 @@ class DuckDBCompiler:
             columns.append(Column(ColumnId.create(), stable_order_label, "BIGINT"))
         return tuple(columns)
 
-    def project_visible(
-        self, compiled: CompiledFrame, plan: LogicalPlan
-    ) -> CompiledFrame:
+    def project_visible(self, compiled: CompiledFrame, plan: LogicalPlan) -> CompiledFrame:
         """Drop hidden metadata columns at non-pandas output boundaries."""
         visible = plan.metadata.visible_columns
         expressions = tuple(
-            duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
-                column.label
-            )
+            duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(column.label)
             for column in visible
         )
         relation = compiled.relation.project(*expressions)
@@ -153,14 +147,11 @@ class DuckDBCompiler:
                 (
                     duckdb.SQLExpression(
                         "file_row_number"
-                        if isinstance(plan.source, ParquetSource)
-                        and plan.source.native_order
+                        if isinstance(plan.source, ParquetSource) and plan.source.native_order
                         else "row_number() OVER ()"
                     ).alias(column.label)
                     if column.label == getattr(plan.source, "stable_order_label", None)
-                    else duckdb.SQLExpression(quote_identifier(column.label)).alias(
-                        column.label
-                    )
+                    else duckdb.SQLExpression(quote_identifier(column.label)).alias(column.label)
                 )
                 for column in plan.columns
             )
@@ -180,20 +171,17 @@ class DuckDBCompiler:
         compiled_input = self._compile(plan.input)
         if isinstance(plan, FilterPlan):
             predicate = self.compile_expression(plan.predicate, compiled_input.bindings)
-            return CompiledFrame(
-                compiled_input.relation.filter(predicate), compiled_input.bindings
-            )
+            return CompiledFrame(compiled_input.relation.filter(predicate), compiled_input.bindings)
         if isinstance(plan, ProjectPlan):
             expressions = tuple(
-                self.compile_expression(
-                    projection.expression, compiled_input.bindings
-                ).alias(projection.column.label)
+                self.compile_expression(projection.expression, compiled_input.bindings).alias(
+                    projection.column.label
+                )
                 for projection in plan.projections
             )
             relation = compiled_input.relation.project(*expressions)
             bindings = {
-                projection.column.id: projection.column.label
-                for projection in plan.projections
+                projection.column.id: projection.column.label for projection in plan.projections
             }
             return CompiledFrame(relation, bindings)
         if isinstance(plan, AggregatePlan):
@@ -202,9 +190,7 @@ class DuckDBCompiler:
                 # filter out rows where any group key is null
                 for key_id in plan.keys:
                     key_label = quote_identifier(compiled_input.bindings[key_id])
-                    input_rel = input_rel.filter(
-                        duckdb.SQLExpression(f"{key_label} IS NOT NULL")
-                    )
+                    input_rel = input_rel.filter(duckdb.SQLExpression(f"{key_label} IS NOT NULL"))
 
             expressions = [
                 self._compile_aggregate(aggregate, compiled_input.bindings).alias(
@@ -214,52 +200,35 @@ class DuckDBCompiler:
             ]
             if plan.keys:
                 key_labels = [
-                    quote_identifier(compiled_input.bindings[key_id])
-                    for key_id in plan.keys
+                    quote_identifier(compiled_input.bindings[key_id]) for key_id in plan.keys
                 ]
                 groups_spec = ", ".join(key_labels)
                 relation = input_rel.aggregate(expressions, groups_spec)
                 if plan.sort:
-                    sort_keys = [
-                        duckdb.SQLExpression(k).asc().nulls_last() for k in key_labels
-                    ]
+                    sort_keys = [duckdb.SQLExpression(k).asc().nulls_last() for k in key_labels]
                     relation = relation.sort(*sort_keys)
             else:
                 relation = input_rel.aggregate(expressions)
 
             return CompiledFrame(
                 relation,
-                {
-                    aggregate.column.id: aggregate.column.label
-                    for aggregate in plan.aggregates
-                },
+                {aggregate.column.id: aggregate.column.label for aggregate in plan.aggregates},
             )
         if isinstance(plan, TopKPlan):
-            keys = tuple(
-                self._compile_sort_key(key, compiled_input.bindings)
-                for key in plan.keys
-            )
+            keys = tuple(self._compile_sort_key(key, compiled_input.bindings) for key in plan.keys)
             relation = compiled_input.relation.sort(*keys).limit(
                 plan.count,
                 offset=plan.offset,
             )
             return CompiledFrame(relation, compiled_input.bindings)
         if isinstance(plan, SortPlan):
-            keys = tuple(
-                self._compile_sort_key(key, compiled_input.bindings)
-                for key in plan.keys
-            )
-            return CompiledFrame(
-                compiled_input.relation.sort(*keys), compiled_input.bindings
-            )
+            keys = tuple(self._compile_sort_key(key, compiled_input.bindings) for key in plan.keys)
+            return CompiledFrame(compiled_input.relation.sort(*keys), compiled_input.bindings)
         if isinstance(plan, SamplePlan):
             if plan.frac is not None or plan.seed is not None:
                 if plan.seed is not None:
                     hash_args = [
-                        *(
-                            quote_identifier(column)
-                            for column in compiled_input.relation.columns
-                        ),
+                        *(quote_identifier(column) for column in compiled_input.relation.columns),
                         str(plan.seed),
                     ]
                     order_expression = f"hash({', '.join(hash_args)})"
@@ -285,9 +254,9 @@ class DuckDBCompiler:
                 query = f"SELECT * FROM _subquery_to_sample USING SAMPLE {clause}"
             sampled = compiled_input.relation.query("_subquery_to_sample", query)
             expressions = tuple(
-                duckdb.SQLExpression(
-                    quote_identifier(compiled_input.bindings[column.id])
-                ).alias(column.label)
+                duckdb.SQLExpression(quote_identifier(compiled_input.bindings[column.id])).alias(
+                    column.label
+                )
                 for column in plan.metadata.columns
             )
             relation = sampled.project(*expressions)
@@ -319,14 +288,10 @@ class DuckDBCompiler:
         for column in plan.metadata.columns:
             binding = compiled.bindings.get(column.id)
             if binding is None:
-                raise AssertionError(
-                    f"Compiler omitted logical column {column.label!r}"
-                )
+                raise AssertionError(f"Compiler omitted logical column {column.label!r}")
             actual = actual_types.get(binding)
             if actual is None:
-                raise AssertionError(
-                    f"Compiler binding {binding!r} is absent from physical schema"
-                )
+                raise AssertionError(f"Compiler binding {binding!r} is absent from physical schema")
             if canonical(column.duckdb_type) == "UNKNOWN":
                 continue
             if canonical(actual) != canonical(column.duckdb_type):
@@ -348,16 +313,12 @@ class DuckDBCompiler:
             try:
                 label = bindings[expression.column_id]
             except KeyError as error:
-                msg = (
-                    f"Column {expression.column_id.value} is not available in this plan"
-                )
+                msg = f"Column {expression.column_id.value} is not available in this plan"
                 raise KeyError(msg) from error
             return duckdb.SQLExpression(quote_identifier(label))
         if isinstance(expression, LiteralValue):
             literal = duckdb.ConstantExpression(expression.value)
-            if isinstance(expression.value, int) and not isinstance(
-                expression.value, bool
-            ):
+            if isinstance(expression.value, int) and not isinstance(expression.value, bool):
                 return literal.cast("BIGINT")
             return literal
         if isinstance(expression, UnaryExpression):
@@ -378,14 +339,12 @@ class DuckDBCompiler:
             other = self.compile_expression(expression.otherwise, bindings)
             return duckdb.CaseExpression(cond, val).otherwise(other)
         if isinstance(expression, FunctionCall):
-            compiled_args = [
-                self.compile_expression(arg, bindings) for arg in expression.arguments
-            ]
+            compiled_args = [self.compile_expression(arg, bindings) for arg in expression.arguments]
             name = expression.name.lower()
             if name == "coalesce" and len(compiled_args) == 2:
-                return duckdb.CaseExpression(
-                    compiled_args[0].isnull(), compiled_args[1]
-                ).otherwise(compiled_args[0])
+                return duckdb.CaseExpression(compiled_args[0].isnull(), compiled_args[1]).otherwise(
+                    compiled_args[0]
+                )
             if name == "isnull" and len(compiled_args) == 1:
                 return compiled_args[0].isnull()
             if name == "notnull" and len(compiled_args) == 1:
@@ -426,9 +385,7 @@ class DuckDBCompiler:
             return left | right
         raise AssertionError(f"Unknown binary operator: {operator}")
 
-    def _expression_to_sql(
-        self, expression: Expression, bindings: dict[ColumnId, str]
-    ) -> str:
+    def _expression_to_sql(self, expression: Expression, bindings: dict[ColumnId, str]) -> str:
         """Convert an expression to an equivalent SQL fragment."""
         if isinstance(expression, ColumnRef):
             return quote_identifier(bindings[expression.column_id])
@@ -498,14 +455,10 @@ class DuckDBCompiler:
             op_str = op_map[expression.operator]
             return f"(({left_sql}) {op_str} ({right_sql}))"
 
-        args_str = ", ".join(
-            self._expression_to_sql(arg, bindings) for arg in expression.arguments
-        )
+        args_str = ", ".join(self._expression_to_sql(arg, bindings) for arg in expression.arguments)
         window_parts: list[str] = []
         if expression.partition_by:
-            parts = ", ".join(
-                self._expression_to_sql(p, bindings) for p in expression.partition_by
-            )
+            parts = ", ".join(self._expression_to_sql(p, bindings) for p in expression.partition_by)
             window_parts.append(f"PARTITION BY {parts}")
         if expression.order_by:
             order_strs: list[str] = []
@@ -513,9 +466,7 @@ class DuckDBCompiler:
                 expr_sql = self._expression_to_sql(k.expression, bindings)
                 dir_sql = "ASC" if k.direction is SortDirection.ASCENDING else "DESC"
                 null_sql = (
-                    "NULLS FIRST"
-                    if k.null_placement is NullPlacement.FIRST
-                    else "NULLS LAST"
+                    "NULLS FIRST" if k.null_placement is NullPlacement.FIRST else "NULLS LAST"
                 )
                 order_strs.append(f"{expr_sql} {dir_sql} {null_sql}")
             window_parts.append(f"ORDER BY {', '.join(order_strs)}")
@@ -573,9 +524,7 @@ class DuckDBCompiler:
                 auto_detect=source.auto_detect,
             )
 
-        paths: str | list[str] = (
-            source.paths[0] if len(source.paths) == 1 else list(source.paths)
-        )
+        paths: str | list[str] = source.paths[0] if len(source.paths) == 1 else list(source.paths)
         return self._session._connection.read_parquet(
             paths,
             hive_partitioning=source.hive_partitioning,
@@ -583,13 +532,9 @@ class DuckDBCompiler:
             file_row_number=include_native_order and source.native_order,
         )
 
-    def _compile_sort_key(
-        self, key: SortKey, bindings: dict[ColumnId, str]
-    ) -> duckdb.Expression:
+    def _compile_sort_key(self, key: SortKey, bindings: dict[ColumnId, str]) -> duckdb.Expression:
         result = self.compile_expression(key.expression, bindings)
-        result = (
-            result.asc() if key.direction is SortDirection.ASCENDING else result.desc()
-        )
+        result = result.asc() if key.direction is SortDirection.ASCENDING else result.desc()
         return (
             result.nulls_first()
             if key.null_placement is NullPlacement.FIRST
@@ -599,9 +544,7 @@ class DuckDBCompiler:
     @staticmethod
     def _order_column_to_sql(key: OrderColumn, bindings: dict[ColumnId, str]) -> str:
         direction = "ASC" if key.direction is SortDirection.ASCENDING else "DESC"
-        nulls = (
-            "NULLS FIRST" if key.null_placement is NullPlacement.FIRST else "NULLS LAST"
-        )
+        nulls = "NULLS FIRST" if key.null_placement is NullPlacement.FIRST else "NULLS LAST"
         return f"{quote_identifier(bindings[key.column_id])} {direction} {nulls}"
 
     def _compile_aggregate(
@@ -629,9 +572,7 @@ class DuckDBCompiler:
             # ColumnRef this is the quoted binding label.
             if isinstance(aggregate.expression, ColumnRef):
                 label = bindings[aggregate.expression.column_id]
-                return duckdb.SQLExpression(
-                    f"count(DISTINCT {quote_identifier(label)})"
-                )
+                return duckdb.SQLExpression(f"count(DISTINCT {quote_identifier(label)})")
             # For non-column expressions, fall back to a subquery-free approach:
             # cast the expression to a SQL fragment via the relation's SQL.
             # This is a limitation; for now only ColumnRef is supported.
@@ -648,9 +589,7 @@ class DuckDBCompiler:
                 bool_op = duckdb.FunctionExpression("length", operand) > 0
             else:
                 bool_op = operand.cast("BOOLEAN")
-            func_name = (
-                "bool_or" if aggregate.operator is AggregateOperator.ANY else "bool_and"
-            )
+            func_name = "bool_or" if aggregate.operator is AggregateOperator.ANY else "bool_and"
             raw_val = duckdb.FunctionExpression(func_name, bool_op)
             default_val = aggregate.operator is AggregateOperator.ALL
             # When skipna is True, all-null gives False for any, True for all.
@@ -688,15 +627,11 @@ class DuckDBCompiler:
                 )
             if aggregate.ddof == 0:
                 func_name = (
-                    "stddev_pop"
-                    if aggregate.operator is AggregateOperator.STD
-                    else "var_pop"
+                    "stddev_pop" if aggregate.operator is AggregateOperator.STD else "var_pop"
                 )
             else:
                 func_name = (
-                    "stddev_samp"
-                    if aggregate.operator is AggregateOperator.STD
-                    else "var_samp"
+                    "stddev_samp" if aggregate.operator is AggregateOperator.STD else "var_samp"
                 )
             agg_operand = operand
             if aggregate.input_duckdb_type == "BOOLEAN":
@@ -764,8 +699,7 @@ class DuckDBCompiler:
             ).otherwise(value)
             if aggregate.input_duckdb_type == "BOOLEAN" or (
                 aggregate.input_duckdb_type is not None
-                and aggregate.input_duckdb_type
-                in {"TINYINT", "SMALLINT", "INTEGER", "BIGINT"}
+                and aggregate.input_duckdb_type in {"TINYINT", "SMALLINT", "INTEGER", "BIGINT"}
             ):
                 value = value.cast("BIGINT")
             elif aggregate.input_duckdb_type in {
@@ -798,9 +732,9 @@ class DuckDBCompiler:
         for col in plan.left.columns:
             temp_name = f"l_{col.id.value.hex[:8]}"
             left_proj.append(
-                duckdb.SQLExpression(
-                    quote_identifier(left_compiled.bindings[col.id])
-                ).alias(temp_name)
+                duckdb.SQLExpression(quote_identifier(left_compiled.bindings[col.id])).alias(
+                    temp_name
+                )
             )
             left_temp_bindings[col.id] = temp_name
 
@@ -809,9 +743,9 @@ class DuckDBCompiler:
         for col in plan.right.columns:
             temp_name = f"r_{col.id.value.hex[:8]}"
             right_proj.append(
-                duckdb.SQLExpression(
-                    quote_identifier(right_compiled.bindings[col.id])
-                ).alias(temp_name)
+                duckdb.SQLExpression(quote_identifier(right_compiled.bindings[col.id])).alias(
+                    temp_name
+                )
             )
             right_temp_bindings[col.id] = temp_name
 
@@ -886,14 +820,10 @@ class DuckDBCompiler:
             elif l_bind is not None:
                 source_col = f"{lhs_alias}.{quote_identifier(l_bind)}"
             elif col.id in right_temp_bindings:
-                source_col = (
-                    f"{rhs_alias}.{quote_identifier(right_temp_bindings[col.id])}"
-                )
+                source_col = f"{rhs_alias}.{quote_identifier(right_temp_bindings[col.id])}"
             else:
                 # Could happen if a key column was synthesized
-                raise AssertionError(
-                    f"Column {col.id} not found in join input bindings"
-                )
+                raise AssertionError(f"Column {col.id} not found in join input bindings")
 
             final_proj.append(duckdb.SQLExpression(source_col).alias(col.label))
             final_bindings[col.id] = col.label
@@ -902,9 +832,7 @@ class DuckDBCompiler:
 
         if plan.sort and plan.left_keys:
             sort_keys = [
-                duckdb.SQLExpression(quote_identifier(final_bindings[column_id]))
-                .asc()
-                .nulls_last()
+                duckdb.SQLExpression(quote_identifier(final_bindings[column_id])).asc().nulls_last()
                 for column_id in plan.left_keys
                 if column_id in final_bindings
             ]
@@ -941,23 +869,15 @@ class DuckDBCompiler:
                     )
                 elif target_col.id == plan.source_row_id:
                     row_sql = f"row_number() OVER (ORDER BY {input_order_sql}) - 1"
-                    expr = (
-                        duckdb.SQLExpression(row_sql)
-                        .cast("UBIGINT")
-                        .alias(target_temp_name)
-                    )
+                    expr = duckdb.SQLExpression(row_sql).cast("UBIGINT").alias(target_temp_name)
                 elif target_col.label in input_col_map:
                     matching_input_col = input_col_map[target_col.label]
-                    source_label = quote_identifier(
-                        compiled.bindings[matching_input_col.id]
-                    )
+                    source_label = quote_identifier(compiled.bindings[matching_input_col.id])
                     cast_sql = f"CAST({source_label} AS {target_col.duckdb_type})"
                     expr = duckdb.SQLExpression(cast_sql).alias(target_temp_name)
                 else:
                     target_type = (
-                        "VARCHAR"
-                        if target_col.duckdb_type == "UNKNOWN"
-                        else target_col.duckdb_type
+                        "VARCHAR" if target_col.duckdb_type == "UNKNOWN" else target_col.duckdb_type
                     )
                     cast_null_sql = f"CAST(NULL AS {target_type})"
                     expr = duckdb.SQLExpression(cast_null_sql).alias(target_temp_name)
@@ -972,9 +892,7 @@ class DuckDBCompiler:
 
         # Output projection to rename temp column names back to original target labels
         final_proj = [
-            duckdb.SQLExpression(quote_identifier(f"c_{col.id.value.hex[:8]}")).alias(
-                col.label
-            )
+            duckdb.SQLExpression(quote_identifier(f"c_{col.id.value.hex[:8]}")).alias(col.label)
             for col in target_columns
         ]
         final_bindings = {col.id: col.label for col in target_columns}
@@ -985,12 +903,8 @@ class DuckDBCompiler:
         index_ids = plan.input.metadata.index.columns
         index_cols = [compiled_input.bindings[column_id] for column_id in index_ids]
 
-        keys_df = cast(
-            "pd.DataFrame", self._session._get_registered_source(plan.source_key)
-        )
-        keys_rel = self._session._connection.from_df(keys_df).set_alias(
-            "__duckpd_loc_keys__"
-        )
+        keys_df = cast("pd.DataFrame", self._session._get_registered_source(plan.source_key))
+        keys_rel = self._session._connection.from_df(keys_df).set_alias("__duckpd_loc_keys__")
 
         input_alias = "__duckpd_loc_input__"
         matched_label = f"__duckpd_loc_matched_{plan.source_key}__"
@@ -1015,9 +929,7 @@ class DuckDBCompiler:
             final_bindings[column.id] = column.label
 
         order_column = next(
-            column
-            for column in plan.metadata.columns
-            if column.id == plan.order_column_id
+            column for column in plan.metadata.columns if column.id == plan.order_column_id
         )
         final_projection.append(
             duckdb.SQLExpression(quote_identifier(plan.source_order_label)).alias(
@@ -1027,9 +939,7 @@ class DuckDBCompiler:
         final_bindings[plan.order_column_id] = order_column.label
 
         sort_keys: list[duckdb.Expression] = [
-            duckdb.SQLExpression(quote_identifier(order_column.label))
-            .asc()
-            .nulls_last()
+            duckdb.SQLExpression(quote_identifier(order_column.label)).asc().nulls_last()
         ]
         for key in plan.input.metadata.ordering.keys:
             if key.column_id in final_bindings:

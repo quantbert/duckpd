@@ -100,9 +100,7 @@ def test_series_unique_with_nulls() -> None:
     result = frame["val"].unique()
     expected = source["val"].unique()
     # DuckDB DISTINCT drops nulls; pandas keeps one NaN
-    assert sorted(v for v in result if pd.notna(v)) == sorted(
-        v for v in expected if pd.notna(v)
-    )
+    assert sorted(v for v in result if pd.notna(v)) == sorted(v for v in expected if pd.notna(v))
 
 
 # --- value_counts -----------------------------------------------------------
@@ -197,9 +195,7 @@ def test_dataframe_drop_duplicates_subset_single_string(
 def test_dataframe_drop_duplicates_preserves_pandas_source_order(
     keep: Literal["first", "last", False],
 ) -> None:
-    source = pd.DataFrame(
-        {"key": ["a", "b", "a", "c", "b"], "payload": [1, 2, 3, 4, 5]}
-    )
+    source = pd.DataFrame({"key": ["a", "b", "a", "c", "b"], "payload": [1, 2, 3, 4, 5]})
     frame = duckpd.from_pandas(source)
 
     result = frame.drop_duplicates(subset="key", keep=keep).collect()
@@ -265,9 +261,7 @@ def test_dataframe_nsmallest_matches_pandas(numeric_source: pd.DataFrame) -> Non
 
 
 def test_dataframe_nlargest_multiple_columns() -> None:
-    source = pd.DataFrame(
-        {"a": [1, 2, 2, 1], "b": [10, 20, 30, 40], "c": ["w", "x", "y", "z"]}
-    )
+    source = pd.DataFrame({"a": [1, 2, 2, 1], "b": [10, 20, 30, 40], "c": ["w", "x", "y", "z"]})
     frame = duckpd.from_pandas(source)
 
     result = frame.nlargest(2, ["a", "b"])
@@ -277,9 +271,7 @@ def test_dataframe_nlargest_multiple_columns() -> None:
 
 @pytest.mark.parametrize("keep", ["first", "last"])
 def test_top_n_ties_match_pandas(keep: Literal["first", "last"]) -> None:
-    source = pd.DataFrame(
-        {"value": [3, 3, 2, 2, 1], "payload": ["a", "b", "c", "d", "e"]}
-    )
+    source = pd.DataFrame({"value": [3, 3, 2, 2, 1], "payload": ["a", "b", "c", "d", "e"]})
     frame = duckpd.from_pandas(source)
 
     largest = frame.nlargest(1, "value", keep=keep).collect()
@@ -350,15 +342,10 @@ def test_drop_duplicates_then_nlargest_pipeline(numeric_source: pd.DataFrame) ->
     frame = duckpd.from_pandas(numeric_source)
 
     result = (
-        frame.drop_duplicates(subset=["grp"])
-        .nlargest(1, "val")
-        .collect()
-        .reset_index(drop=True)
+        frame.drop_duplicates(subset=["grp"]).nlargest(1, "val").collect().reset_index(drop=True)
     )
     expected = (
-        numeric_source.drop_duplicates(subset=["grp"])
-        .nlargest(1, "val")
-        .reset_index(drop=True)
+        numeric_source.drop_duplicates(subset=["grp"]).nlargest(1, "val").reset_index(drop=True)
     )
     assert_frame_equal(result, expected)
 

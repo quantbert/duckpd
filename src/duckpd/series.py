@@ -102,9 +102,7 @@ class Series:
         if level is not None:
             raise UnsupportedOperationError("DuckPD does not support MultiIndex levels")
         if isinstance(index, dict):
-            raise UnsupportedOperationError(
-                "DuckPD does not yet support renaming index labels"
-            )
+            raise UnsupportedOperationError("DuckPD does not yet support renaming index labels")
         new_name = str(index) if index is not None else None
         return Series(self._session, self._plan, self._expression, new_name)
 
@@ -120,17 +118,11 @@ class Series:
     ) -> Series:
         """Return a random sample of items from the Series."""
         if axis not in (0, "index", None):
-            raise UnsupportedOperationError(
-                "DuckPD sample supports only axis=0 or axis='index'"
-            )
+            raise UnsupportedOperationError("DuckPD sample supports only axis=0 or axis='index'")
         if replace is not False:
-            raise UnsupportedOperationError(
-                "DuckPD sample does not currently support replace=True"
-            )
+            raise UnsupportedOperationError("DuckPD sample does not currently support replace=True")
         if weights is not None:
-            raise UnsupportedOperationError(
-                "DuckPD sample does not currently support weights"
-            )
+            raise UnsupportedOperationError("DuckPD sample does not currently support weights")
         if n is not None and frac is not None:
             raise ValueError("Only one of 'n' or 'frac' can be specified")
         if n is None and frac is None:
@@ -141,9 +133,7 @@ class Series:
             if n < 0:
                 raise ValueError("A negative number of rows was requested")
         if frac is not None:
-            if isinstance(frac, bool) or not isinstance(
-                cast("object", frac), (int, float)
-            ):
+            if isinstance(frac, bool) or not isinstance(cast("object", frac), (int, float)):
                 raise ValueError(f"'frac' must be a float, got {type(frac).__name__}")
             if not isfinite(float(frac)):
                 raise ValueError("'frac' must be finite")
@@ -152,8 +142,7 @@ class Series:
             if frac > 1.0:
                 raise ValueError("Replace has to be set to True when frac > 1")
         if random_state is not None and (
-            isinstance(random_state, bool)
-            or not isinstance(cast("object", random_state), int)
+            isinstance(random_state, bool) or not isinstance(cast("object", random_state), int)
         ):
             raise ValueError("random_state must be an integer seed or None")
         if random_state is not None and not 0 <= random_state <= 2_147_483_647:
@@ -192,9 +181,7 @@ class Series:
             expression_type(self._plan, self._expression),
             nullable=expression_nullability(self._expression, self._plan.metadata),
             alias_of=(
-                self._expression.column_id
-                if isinstance(self._expression, ColumnRef)
-                else None
+                self._expression.column_id if isinstance(self._expression, ColumnRef) else None
             ),
         )
         all_cols = projection_columns(self._plan.metadata, (out_col,))
@@ -207,9 +194,7 @@ class Series:
             for col in all_cols
         ]
         metadata = after_projection(self._plan.metadata, all_cols)
-        return DataFrame(
-            self._session, ProjectPlan(self._plan, tuple(projections), metadata)
-        )
+        return DataFrame(self._session, ProjectPlan(self._plan, tuple(projections), metadata))
 
     def collect(self) -> pd.Series:
         """Execute the Series plan and return a pandas Series."""
@@ -337,9 +322,7 @@ class Series:
             )
         input_type = expression_type(self._plan, self._expression)
         if input_type != spec.input_types[0]:
-            raise TypeError(
-                f"Arrow UDF {name!r} expects {spec.input_types[0]}, got {input_type}"
-            )
+            raise TypeError(f"Arrow UDF {name!r} expects {spec.input_types[0]}, got {input_type}")
         return Series(
             self._session,
             self._plan,
@@ -390,9 +373,7 @@ class Series:
             raise ValueError("Series.dropna supports only axis=0 or axis='index'")
 
         not_null_pred = FunctionCall("notnull", (self._expression,))
-        filtered_plan = FilterPlan(
-            self._plan, not_null_pred, after_filter(self._plan.metadata)
-        )
+        filtered_plan = FilterPlan(self._plan, not_null_pred, after_filter(self._plan.metadata))
         return Series(self._session, filtered_plan, self._expression, self.name)
 
     def where(
@@ -451,11 +432,7 @@ class Series:
         if lower is None and upper is None:
             return self
 
-        if (
-            isinstance(lower, (int, float))
-            and isinstance(upper, (int, float))
-            and lower > upper
-        ):
+        if isinstance(lower, (int, float)) and isinstance(upper, (int, float)) and lower > upper:
             raise ValueError("Cannot set lower > upper")
 
         lower_expr: Expression | None = None
@@ -514,9 +491,7 @@ class Series:
         if inplace:
             raise UnsupportedOperationError("DuckPD does not support inplace=True")
         if regex:
-            raise UnsupportedOperationError(
-                "DuckPD replace does not yet support regex=True"
-            )
+            raise UnsupportedOperationError("DuckPD replace does not yet support regex=True")
         if limit is not None or method is not None:
             raise UnsupportedOperationError(
                 "DuckPD replace does not support limit or method parameters"
@@ -547,9 +522,7 @@ class Series:
             if val is None or val is pd.NA:
                 return True
             if is_numeric_type(duckdb_type):
-                return isinstance(val, (int, float, Decimal)) and not isinstance(
-                    val, bool
-                )
+                return isinstance(val, (int, float, Decimal)) and not isinstance(val, bool)
             if duckdb_type in {"VARCHAR", "TEXT"}:
                 return isinstance(val, str)
             if duckdb_type == "BOOLEAN":
@@ -557,25 +530,19 @@ class Series:
             return True
 
         target_type = expression_type(self._plan, self._expression)
-        applicable_pairs = [
-            p for p in pairs if _is_replace_compatible(p[0], target_type)
-        ]
+        applicable_pairs = [p for p in pairs if _is_replace_compatible(p[0], target_type)]
 
         expr = self._expression
         cur_expr: Expression = expr
         for old_v, new_v in reversed(applicable_pairs):
             is_null_val = (
-                old_v is None
-                or old_v is pd.NA
-                or (isinstance(old_v, float) and pd.isna(old_v))
+                old_v is None or old_v is pd.NA or (isinstance(old_v, float) and pd.isna(old_v))
             )
             if is_null_val:
                 cond: Expression = FunctionCall("isnull", (expr,))
             else:
                 old_scalar = cast("ScalarValue", old_v)
-                cond = BinaryExpression(
-                    expr, BinaryOperator.EQUAL, LiteralValue(old_scalar)
-                )
+                cond = BinaryExpression(expr, BinaryOperator.EQUAL, LiteralValue(old_scalar))
             new_scalar = cast("ScalarValue", new_v)
             cur_expr = CaseWhen(cond, LiteralValue(new_scalar), cur_expr)
         return Series(self._session, self._plan, cur_expr, self.name)
@@ -584,8 +551,7 @@ class Series:
         if isinstance(cond, Series):
             if cond._session is not self._session or cond._plan is not self._plan:
                 raise AlignmentError(
-                    "Condition Series from a different frame "
-                    "requires explicit index alignment"
+                    "Condition Series from a different frame requires explicit index alignment"
                 )
             return cond._expression
         if isinstance(cond, bool):
@@ -723,9 +689,7 @@ class Series:
     ) -> bool:
         """Return True if any element is True."""
         validate_axis(axis, series=True)
-        if bool_only and not is_numeric_type(
-            expression_type(self._plan, self._expression)
-        ):
+        if bool_only and not is_numeric_type(expression_type(self._plan, self._expression)):
             return False
         res = self._reduce(AggregateOperator.ANY, skipna=skipna)
         return bool(res)
@@ -739,9 +703,7 @@ class Series:
     ) -> bool:
         """Return True if all elements are True."""
         validate_axis(axis, series=True)
-        if bool_only and not is_numeric_type(
-            expression_type(self._plan, self._expression)
-        ):
+        if bool_only and not is_numeric_type(expression_type(self._plan, self._expression)):
             return True
         res = self._reduce(AggregateOperator.ALL, skipna=skipna)
         return bool(res)
@@ -844,15 +806,11 @@ class Series:
         result = self._session._executor.collect(plan)
         return result.iloc[:, 0]
 
-    def nlargest(
-        self, n: int = 5, *, keep: Literal["first", "last"] = "first"
-    ) -> Series:
+    def nlargest(self, n: int = 5, *, keep: Literal["first", "last"] = "first") -> Series:
         """Return the largest ``n`` elements."""
         return self._top_n(n, largest=True, keep=keep)
 
-    def nsmallest(
-        self, n: int = 5, *, keep: Literal["first", "last"] = "first"
-    ) -> Series:
+    def nsmallest(self, n: int = 5, *, keep: Literal["first", "last"] = "first") -> Series:
         """Return the smallest ``n`` elements."""
         return self._top_n(n, largest=False, keep=keep)
 
@@ -1054,9 +1012,7 @@ class Series:
         order_keys = self._require_order()
         in_type = expression_type(self._plan, self._expression)
         op = (
-            CastExpression(self._expression, "BIGINT")
-            if in_type == "BOOLEAN"
-            else self._expression
+            CastExpression(self._expression, "BIGINT") if in_type == "BOOLEAN" else self._expression
         )
         window: Expression = WindowExpression(
             function="sum",
@@ -1159,9 +1115,7 @@ class Series:
         order_keys = self._require_order()
         in_type = expression_type(self._plan, self._expression)
         op = (
-            CastExpression(self._expression, "BIGINT")
-            if in_type == "BOOLEAN"
-            else self._expression
+            CastExpression(self._expression, "BIGINT") if in_type == "BOOLEAN" else self._expression
         )
         window: Expression = WindowExpression(
             function="product",
@@ -1249,17 +1203,11 @@ class Series:
         """Percentage change between the current and a prior element."""
         validate_axis(axis, series=True)
         if fill_method is not None:
-            raise UnsupportedOperationError(
-                "DuckPD does not support fill_method in pct_change"
-            )
+            raise UnsupportedOperationError("DuckPD does not support fill_method in pct_change")
         if limit is not None:
-            raise UnsupportedOperationError(
-                "DuckPD does not support limit in pct_change"
-            )
+            raise UnsupportedOperationError("DuckPD does not support limit in pct_change")
         if freq is not None:
-            raise UnsupportedOperationError(
-                "DuckPD does not support freq in pct_change"
-            )
+            raise UnsupportedOperationError("DuckPD does not support freq in pct_change")
         shifted = self.shift(periods=periods, axis=axis)
         diff_val = self - shifted
         return diff_val / shifted
@@ -1277,9 +1225,7 @@ class Series:
         validate_axis(axis, series=True)
         self._validate_numeric_only(numeric_only)
         if method not in {"average", "min", "max", "first", "dense"}:
-            raise ValueError(
-                "method must be 'average', 'min', 'max', 'first', or 'dense'"
-            )
+            raise ValueError("method must be 'average', 'min', 'max', 'first', or 'dense'")
         if na_option not in {"keep", "top", "bottom"}:
             raise ValueError("na_option must be 'keep', 'top', or 'bottom'")
 
@@ -1442,6 +1388,4 @@ class Series:
     @staticmethod
     def _validate_numeric_only(numeric_only: bool) -> None:
         if numeric_only:
-            raise UnsupportedOperationError(
-                "Series reductions do not support numeric_only=True"
-            )
+            raise UnsupportedOperationError("Series reductions do not support numeric_only=True")

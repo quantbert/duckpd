@@ -63,9 +63,7 @@ class DuckPDExpr:
     @property
     def _metadata(self) -> ExprMetadata:
         if self._opt_metadata is None:
-            raise AssertionError(
-                "Narwhals expression metadata has not been initialized"
-            )
+            raise AssertionError("Narwhals expression metadata has not been initialized")
         return self._opt_metadata
 
     def __call__(self, frame: DuckPDLazyFrame) -> Sequence[Series]:
@@ -98,18 +96,14 @@ class DuckPDExpr:
         if partition_by:
             from duckpd.errors import UnsupportedOperationError
 
-            raise UnsupportedOperationError(
-                "DuckPD Narwhals partitioned windows are not supported"
-            )
+            raise UnsupportedOperationError("DuckPD Narwhals partitioned windows are not supported")
 
         def call(frame: DuckPDLazyFrame) -> Sequence[Series]:
             from duckpd.errors import UnorderedOperationError
 
             metadata = frame.native._plan.metadata
             labels_by_id = {column.id: column.label for column in metadata.columns}
-            actual = tuple(
-                labels_by_id[key.column_id] for key in metadata.ordering.keys
-            )
+            actual = tuple(labels_by_id[key.column_id] for key in metadata.ordering.keys)
             expected = tuple(order_by)
             if not expected or actual[: len(expected)] != expected:
                 raise UnorderedOperationError(
@@ -207,9 +201,7 @@ class DuckPDExpr:
         if not math.isfinite(base) or base <= 0 or base == 1:
             raise ValueError("log base must be finite, positive, and not equal to 1")
         denominator = math.log(base)
-        return self._elementwise(
-            lambda series: series._call_function("ln") / denominator
-        )
+        return self._elementwise(lambda series: series._call_function("ln") / denominator)
 
     def clip(self, lower_bound: DuckPDExpr, upper_bound: DuckPDExpr) -> DuckPDExpr:
         return self.clip_lower(lower_bound).clip_upper(upper_bound)
@@ -229,9 +221,7 @@ class DuckPDExpr:
     def fill_nan(self, value: DuckPDExpr) -> DuckPDExpr:
         return self._binary(
             value,
-            lambda series, replacement: series.where(
-                ~series._call_function("isnan"), replacement
-            ),
+            lambda series, replacement: series.where(~series._call_function("isnan"), replacement),
         )
 
     def fill_null(
@@ -248,29 +238,19 @@ class DuckPDExpr:
             )
         if value is None:
             raise TypeError("fill_null requires a replacement value")
-        return self._binary(
-            value, lambda series, replacement: series.fillna(replacement)
-        )
+        return self._binary(value, lambda series, replacement: series.fillna(replacement))
 
     def cum_sum(self, *, reverse: bool) -> DuckPDExpr:
-        return self._ordered(
-            lambda series: series.cumsum(), reverse=reverse, name="cum_sum"
-        )
+        return self._ordered(lambda series: series.cumsum(), reverse=reverse, name="cum_sum")
 
     def cum_min(self, *, reverse: bool) -> DuckPDExpr:
-        return self._ordered(
-            lambda series: series.cummin(), reverse=reverse, name="cum_min"
-        )
+        return self._ordered(lambda series: series.cummin(), reverse=reverse, name="cum_min")
 
     def cum_max(self, *, reverse: bool) -> DuckPDExpr:
-        return self._ordered(
-            lambda series: series.cummax(), reverse=reverse, name="cum_max"
-        )
+        return self._ordered(lambda series: series.cummax(), reverse=reverse, name="cum_max")
 
     def cum_prod(self, *, reverse: bool) -> DuckPDExpr:
-        return self._ordered(
-            lambda series: series.cumprod(), reverse=reverse, name="cum_prod"
-        )
+        return self._ordered(lambda series: series.cumprod(), reverse=reverse, name="cum_prod")
 
     def cum_count(self, *, reverse: bool) -> DuckPDExpr:
         return self._ordered(
@@ -297,27 +277,19 @@ class DuckPDExpr:
             )
         )
 
-    def rolling_sum(
-        self, window_size: int, *, min_samples: int, center: bool
-    ) -> DuckPDExpr:
+    def rolling_sum(self, window_size: int, *, min_samples: int, center: bool) -> DuckPDExpr:
         return self._elementwise(
             lambda series: cast(
                 "Series",
-                series.rolling(
-                    window_size, min_periods=min_samples, center=center
-                ).sum(),
+                series.rolling(window_size, min_periods=min_samples, center=center).sum(),
             )
         )
 
-    def rolling_mean(
-        self, window_size: int, *, min_samples: int, center: bool
-    ) -> DuckPDExpr:
+    def rolling_mean(self, window_size: int, *, min_samples: int, center: bool) -> DuckPDExpr:
         return self._elementwise(
             lambda series: cast(
                 "Series",
-                series.rolling(
-                    window_size, min_periods=min_samples, center=center
-                ).mean(),
+                series.rolling(window_size, min_periods=min_samples, center=center).mean(),
             )
         )
 
@@ -332,9 +304,7 @@ class DuckPDExpr:
         return self._elementwise(
             lambda series: cast(
                 "Series",
-                series.rolling(window_size, min_periods=min_samples, center=center).var(
-                    ddof=ddof
-                ),
+                series.rolling(window_size, min_periods=min_samples, center=center).var(ddof=ddof),
             )
         )
 
@@ -349,9 +319,7 @@ class DuckPDExpr:
         return self._elementwise(
             lambda series: cast(
                 "Series",
-                series.rolling(window_size, min_periods=min_samples, center=center).std(
-                    ddof=ddof
-                ),
+                series.rolling(window_size, min_periods=min_samples, center=center).std(ddof=ddof),
             )
         )
 
@@ -365,9 +333,7 @@ class DuckPDExpr:
         if reverse:
             from duckpd.errors import UnsupportedOperationError
 
-            raise UnsupportedOperationError(
-                f"DuckPD Narwhals {name} does not support reverse=True"
-            )
+            raise UnsupportedOperationError(f"DuckPD Narwhals {name} does not support reverse=True")
         return self._elementwise(function)
 
     def _aggregate(self, name: str, *, ddof: int = 1) -> DuckPDExpr:
@@ -436,9 +402,7 @@ class DuckPDExpr:
         return self._binary(other, lambda left, right: right % left).alias("literal")
 
     def __floordiv__(self, other: object) -> DuckPDExpr:
-        return self._binary(
-            other, lambda left, right: (left / right)._call_function("floor")
-        )
+        return self._binary(other, lambda left, right: (left / right)._call_function("floor"))
 
     def __rfloordiv__(self, other: object) -> DuckPDExpr:
         return self._binary(
@@ -467,9 +431,7 @@ class DuckPDExpr:
             self._call,
             evaluate_output_names=self._evaluate_output_names,
             alias_output_names=(
-                self._alias_output_names
-                if alias_output_names is None
-                else alias_output_names
+                self._alias_output_names if alias_output_names is None else alias_output_names
             ),
             version=self._version,
             aggregation=self._aggregation if aggregation is None else aggregation,
@@ -536,29 +498,21 @@ class DuckPDExprStringNamespace:
         self._expression = expression
 
     def to_uppercase(self) -> DuckPDExpr:
-        return self._expression._elementwise(
-            lambda series: _require_string(series).str.upper()
-        )
+        return self._expression._elementwise(lambda series: _require_string(series).str.upper())
 
     def to_lowercase(self) -> DuckPDExpr:
-        return self._expression._elementwise(
-            lambda series: _require_string(series).str.lower()
-        )
+        return self._expression._elementwise(lambda series: _require_string(series).str.lower())
 
     def strip_chars(self, characters: str | None) -> DuckPDExpr:
         from duckpd._logical import LiteralValue
 
         chars = string.whitespace if characters is None else characters
         return self._expression._elementwise(
-            lambda series: _require_string(series)._call_function(
-                "trim", LiteralValue(chars)
-            )
+            lambda series: _require_string(series)._call_function("trim", LiteralValue(chars))
         )
 
     def len_chars(self) -> DuckPDExpr:
-        return self._expression._elementwise(
-            lambda series: _require_string(series).str.len()
-        )
+        return self._expression._elementwise(lambda series: _require_string(series).str.len())
 
     def starts_with(self, prefix: DuckPDExpr) -> DuckPDExpr:
         return self._expression._binary(
@@ -657,16 +611,16 @@ class DuckPDExprDatetimeNamespace:
 
     def date(self) -> DuckPDExpr:
         return self._expression._elementwise(
-            lambda series: _require_temporal(
-                series, allow_date=True, allow_time=False
-            ).astype("DATE")
+            lambda series: _require_temporal(series, allow_date=True, allow_time=False).astype(
+                "DATE"
+            )
         )
 
     def to_string(self, format: str) -> DuckPDExpr:
         return self._expression._elementwise(
-            lambda series: _require_temporal(
-                series, allow_date=True, allow_time=True
-            ).dt.strftime(format)
+            lambda series: _require_temporal(series, allow_date=True, allow_time=True).dt.strftime(
+                format
+            )
         )
 
     def _date_field(self, field: str) -> DuckPDExpr:
@@ -693,9 +647,7 @@ def _require_string(series: Series) -> Series:
 
     dtype = expression_type(series._plan, series._expression)
     if dtype not in {"VARCHAR", "UNKNOWN"}:
-        raise InvalidOperationError(
-            f"String operation requires VARCHAR input, found {dtype}"
-        )
+        raise InvalidOperationError(f"String operation requires VARCHAR input, found {dtype}")
     return series
 
 
@@ -714,9 +666,7 @@ def _require_temporal(
     supported = supported or (allow_date and dtype == "DATE")
     supported = supported or (allow_time and dtype.startswith("TIME"))
     if not supported:
-        raise InvalidOperationError(
-            f"Datetime operation requires temporal input, found {dtype}"
-        )
+        raise InvalidOperationError(f"Datetime operation requires temporal input, found {dtype}")
     return series
 
 
@@ -805,9 +755,7 @@ def _literal_name(_frame: DuckPDLazyFrame) -> Sequence[str]:
     return ["literal"]
 
 
-def _evaluate_exprs(
-    frame: DuckPDLazyFrame, expressions: Sequence[DuckPDExpr]
-) -> dict[str, Series]:
+def _evaluate_exprs(frame: DuckPDLazyFrame, expressions: Sequence[DuckPDExpr]) -> dict[str, Series]:
     evaluated: list[tuple[str, Series]] = []
     for expression in expressions:
         values = expression(frame)
@@ -835,9 +783,7 @@ def _evaluate_aggregations(
         if expression._aggregation is None:
             from narwhals.exceptions import InvalidOperationError
 
-            raise InvalidOperationError(
-                "DuckPD aggregate requires aggregation expressions"
-            )
+            raise InvalidOperationError("DuckPD aggregate requires aggregation expressions")
         function, ddof = expression._aggregation
         evaluated.extend(
             (name, series, function, ddof)
@@ -867,9 +813,7 @@ class DuckPDNamespace:
             except KeyError as error:
                 from narwhals.exceptions import ColumnNotFoundError
 
-                raise ColumnNotFoundError(
-                    f"Column not found: {error.args[0]!r}"
-                ) from None
+                raise ColumnNotFoundError(f"Column not found: {error.args[0]!r}") from None
 
         return DuckPDExpr(
             call,
@@ -889,9 +833,7 @@ class DuckPDNamespace:
                 expression,
                 "literal",
             )
-            return (
-                [result.astype(_narwhals_dtype_to_duckdb(dtype))] if dtype else [result]
-            )
+            return [result.astype(_narwhals_dtype_to_duckdb(dtype))] if dtype else [result]
 
         return DuckPDExpr(
             call,
@@ -909,8 +851,7 @@ class DuckPDNamespace:
             from duckpd.errors import UnsupportedOperationError
 
             raise UnsupportedOperationError(
-                "DuckPD Narwhals expressions do not support "
-                "all_horizontal(ignore_nulls=True)"
+                "DuckPD Narwhals expressions do not support all_horizontal(ignore_nulls=True)"
             )
         if not expressions:
             return self.lit(True, None)
@@ -983,9 +924,7 @@ class DuckPDLazyFrame:
         if len(values) != 1:
             from narwhals.exceptions import MultiOutputExpressionError
 
-            raise MultiOutputExpressionError(
-                f"Expected one expression output, found {len(values)}"
-            )
+            raise MultiOutputExpressionError(f"Expected one expression output, found {len(values)}")
         return values[0]
 
     @staticmethod
@@ -1082,9 +1021,7 @@ class DuckPDLazyFrame:
         return self._with_native(self._native_frame.assign(**outputs))
 
     def filter(self, predicate: DuckPDExpr) -> DuckPDLazyFrame:
-        return self._with_native(
-            self._native_frame[self._evaluate_single_output_expr(predicate)]
-        )
+        return self._with_native(self._native_frame[self._evaluate_single_output_expr(predicate)])
 
     def group_by(
         self,
@@ -1117,14 +1054,8 @@ class DuckPDLazyFrame:
         keep: str,
         order_by: Sequence[str] | None,
     ) -> DuckPDLazyFrame:
-        keep_value: str | bool = (
-            False if keep == "none" else ("first" if keep == "any" else keep)
-        )
-        frame = (
-            self._native_frame.sort_values(list(order_by))
-            if order_by
-            else self._native_frame
-        )
+        keep_value: str | bool = False if keep == "none" else ("first" if keep == "any" else keep)
+        frame = self._native_frame.sort_values(list(order_by)) if order_by else self._native_frame
         return self._with_native(
             frame.drop_duplicates(
                 subset=subset,
@@ -1156,14 +1087,10 @@ class DuckPDLazyFrame:
         from duckpd.errors import UnsupportedOperationError
 
         if how in {"semi", "anti"}:
-            raise UnsupportedOperationError(
-                f"DuckPD Narwhals join does not support how={how!r}"
-            )
+            raise UnsupportedOperationError(f"DuckPD Narwhals join does not support how={how!r}")
         merge_how = "outer" if how == "full" else how
         matching_keys = (
-            left_on is not None
-            and right_on is not None
-            and tuple(left_on) == tuple(right_on)
+            left_on is not None and right_on is not None and tuple(left_on) == tuple(right_on)
         )
         return self._with_native(
             self._native_frame.merge(
@@ -1195,9 +1122,7 @@ class DuckPDLazyFrame:
     def explode(self, columns: Sequence[str]) -> DuckPDLazyFrame:
         from duckpd.errors import UnsupportedOperationError
 
-        raise UnsupportedOperationError(
-            "DuckPD Narwhals explode requires nested dtype semantics"
-        )
+        raise UnsupportedOperationError("DuckPD Narwhals explode requires nested dtype semantics")
 
     def unpivot(
         self,
@@ -1253,10 +1178,7 @@ class DuckPDLazyFrame:
         columns = (output, *metadata.columns)
         projections = (
             NamedExpression(output, row_number),
-            *(
-                NamedExpression(column, ColumnRef(column.id))
-                for column in metadata.columns
-            ),
+            *(NamedExpression(column, ColumnRef(column.id)) for column in metadata.columns),
         )
         plan = ProjectPlan(
             ordered._plan,
@@ -1279,9 +1201,7 @@ class DuckPDLazyFrame:
         nulls_last: bool,
     ) -> DuckPDLazyFrame:
         ascending = (
-            not descending
-            if isinstance(descending, bool)
-            else [not value for value in descending]
+            not descending if isinstance(descending, bool) else [not value for value in descending]
         )
         return self._with_native(
             self._native_frame.sort_values(
@@ -1318,8 +1238,7 @@ class DuckPDLazyFrame:
             )
         if backend in (Implementation.POLARS, "polars"):
             raise ValueError(
-                "DuckPD Narwhals collection does not support the optional "
-                "Polars backend"
+                "DuckPD Narwhals collection does not support the optional Polars backend"
             )
         raise ValueError(f"Unsupported collect backend: {backend!r}")
 

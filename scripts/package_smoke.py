@@ -25,9 +25,7 @@ def _forbidden(path: str) -> bool:
         "__pycache__" in parts
         or path.endswith((".pyc", ".pyo"))
         or any(part.startswith(".env") for part in parts)
-        or any(
-            part in {".git", ".venv", ".pytest_cache", ".ruff_cache"} for part in parts
-        )
+        or any(part in {".git", ".venv", ".pytest_cache", ".ruff_cache"} for part in parts)
     )
 
 
@@ -50,9 +48,7 @@ def check_artifacts(root: Path, dist: Path) -> Path:
                 raise RuntimeError(f"Wheel is missing {suffix}")
         if any(_forbidden(name) for name in names):
             raise RuntimeError("Wheel contains cache, environment, or secret files")
-        metadata_name = next(
-            name for name in names if name.endswith(".dist-info/METADATA")
-        )
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = archive.read(metadata_name).decode()
         if f"Version: {expected_version}" not in metadata:
             raise RuntimeError("Wheel metadata version does not match pyproject.toml")
@@ -60,10 +56,7 @@ def check_artifacts(root: Path, dist: Path) -> Path:
             name for name in names if name.endswith(".dist-info/entry_points.txt")
         )
         entrypoints = archive.read(entrypoint_name).decode()
-        if (
-            "[narwhals.plugins]" not in entrypoints
-            or "duckpd._narwhals_plugin" not in entrypoints
-        ):
+        if "[narwhals.plugins]" not in entrypoints or "duckpd._narwhals_plugin" not in entrypoints:
             raise RuntimeError("Wheel is missing the Narwhals plugin entry point")
 
     with tarfile.open(sdist, "r:gz") as archive:
@@ -84,9 +77,7 @@ def smoke_install(wheel: Path, python_spec: str) -> None:
             ["uv", "venv", "--python", python_spec, str(environment)],
             check=True,
         )
-        python = environment / (
-            "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
-        )
+        python = environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         subprocess.run(
             ["uv", "pip", "install", "--python", str(python), str(wheel)],
             check=True,

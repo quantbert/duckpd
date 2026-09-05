@@ -154,10 +154,7 @@ class AttachedDatabase:
         self._session._detach_remote(self.alias)
 
     def __repr__(self) -> str:
-        return (
-            f"AttachedDatabase(alias={self.alias!r}, engine={self.engine!r}, "
-            f"read_only=True)"
-        )
+        return f"AttachedDatabase(alias={self.alias!r}, engine={self.engine!r}, read_only=True)"
 
 
 _POSTGRES_CAPABILITIES = SourceCapabilities(projection=True, filter=True)
@@ -297,9 +294,7 @@ class Session:
         try:
             return self._arrow_udfs[name.casefold()]
         except KeyError:
-            raise KeyError(
-                f"Arrow UDF {name!r} is not registered in this session"
-            ) from None
+            raise KeyError(f"Arrow UDF {name!r} is not registered in this session") from None
 
     def from_pandas(
         self,
@@ -374,9 +369,7 @@ class Session:
         """Create a temporary scoped S3 secret without storing credentials in plans."""
         if credential_chain:
             if key_id is not None or secret is not None:
-                raise ValueError(
-                    "credential_chain cannot be combined with key_id or secret"
-                )
+                raise ValueError("credential_chain cannot be combined with key_id or secret")
             return self._create_object_store_secret(
                 "s3",
                 name,
@@ -469,8 +462,7 @@ class Session:
             )
         except duckdb.Error as error:
             raise RemoteAttachmentError(
-                f"Failed to create {secret_type} secret {name!r} "
-                f"({type(error).__name__})"
+                f"Failed to create {secret_type} secret {name!r} ({type(error).__name__})"
             ) from None
         self._object_store_secrets[name] = _ObjectStoreSecretState(name, secret_type)
         return ObjectStoreSecret(self, name, secret_type)
@@ -478,9 +470,7 @@ class Session:
     def _drop_object_store_secret(self, name: str) -> None:
         self._ensure_open()
         if name not in self._object_store_secrets:
-            raise RemoteAttachmentError(
-                f"Object-store secret {name!r} is not available"
-            )
+            raise RemoteAttachmentError(f"Object-store secret {name!r} is not available")
         try:
             self._connection.execute(f"DROP SECRET {quote_identifier(name)}")
         except duckdb.Error as error:
@@ -507,8 +497,7 @@ class Session:
         else:
             raw_paths = tuple(str(item) for item in path)
         paths = tuple(
-            item if "://" in item else str(Path(item).expanduser().resolve())
-            for item in raw_paths
+            item if "://" in item else str(Path(item).expanduser().resolve()) for item in raw_paths
         )
         if not paths:
             msg = "At least one Parquet path is required"
@@ -519,9 +508,7 @@ class Session:
                 continue
             parsed = urlsplit(item)
             if parsed.scheme not in {"http", "https", "s3", "gcs", "gs"}:
-                raise ValueError(
-                    "Remote Parquet paths must use http, https, s3, gcs, or gs"
-                )
+                raise ValueError("Remote Parquet paths must use http, https, s3, gcs, or gs")
             if (
                 parsed.username is not None
                 or parsed.password is not None
@@ -548,9 +535,7 @@ class Session:
             hive_partitioning,
             union_by_name,
             stable_order_label=ordinal_label,
-            native_order=(
-                len(paths) == 1 and not any(char in paths[0] for char in "*?[]")
-            ),
+            native_order=(len(paths) == 1 and not any(char in paths[0] for char in "*?[]")),
         )
         try:
             plan = self._source_plan(
@@ -581,11 +566,7 @@ class Session:
         from duckpd.frame import DataFrame
 
         self._ensure_open()
-        paths = (
-            (str(path),)
-            if isinstance(path, (str, Path))
-            else tuple(str(item) for item in path)
-        )
+        paths = (str(path),) if isinstance(path, (str, Path)) else tuple(str(item) for item in path)
         if not paths:
             msg = "At least one CSV path is required"
             raise ValueError(msg)
@@ -689,13 +670,11 @@ class Session:
             self._connection.install_extension("sqlite")
             self._connection.load_extension("sqlite")
             self._connection.execute(
-                f"ATTACH {quote_literal(str(path))} AS {quoted_alias} "
-                "(TYPE sqlite, READ_ONLY)"
+                f"ATTACH {quote_literal(str(path))} AS {quoted_alias} (TYPE sqlite, READ_ONLY)"
             )
         except duckdb.Error as error:
             raise RemoteAttachmentError(
-                f"Failed to attach SQLite database as {alias!r} "
-                f"({type(error).__name__})"
+                f"Failed to attach SQLite database as {alias!r} ({type(error).__name__})"
             ) from None
         self._attachments[alias] = _RemoteAttachmentState(
             alias=alias,
@@ -755,8 +734,7 @@ class Session:
             missing = [name for name, value in required.items() if value is None]
             if missing:
                 raise ValueError(
-                    "structured connection parameters are missing: "
-                    + ", ".join(missing)
+                    "structured connection parameters are missing: " + ", ".join(missing)
                 )
             if any(value == "" for value in required.values()):
                 raise ValueError("structured connection parameters must be non-empty")
@@ -764,13 +742,8 @@ class Session:
         else:
             if not secret:
                 raise ValueError("secret must be non-empty")
-            if any(
-                value is not None
-                for value in (host, database, user, password, port, sslmode)
-            ):
-                raise ValueError(
-                    "secret cannot be combined with structured connection parameters"
-                )
+            if any(value is not None for value in (host, database, user, password, port, sslmode)):
+                raise ValueError("secret cannot be combined with structured connection parameters")
             secret_name = secret
 
         default_port = 5432 if engine == "postgres" else 3306
@@ -803,8 +776,7 @@ class Session:
                 self._connection.execute(secret_sql, parameters)
 
             attach_sql = (
-                f"ATTACH '' AS {quoted_alias} "
-                f"(TYPE {engine}, SECRET {quoted_secret}, READ_ONLY"
+                f"ATTACH '' AS {quoted_alias} (TYPE {engine}, SECRET {quoted_secret}, READ_ONLY"
             )
             if engine == "postgres" and schema is not None:
                 attach_sql += f", SCHEMA {quote_literal(schema)}"
@@ -819,8 +791,7 @@ class Session:
                 with suppress(duckdb.Error):
                     self._connection.execute(f"DROP SECRET {quoted_secret}")
             raise RemoteAttachmentError(
-                f"Failed to attach {engine} database as {alias!r} "
-                f"({type(error).__name__})"
+                f"Failed to attach {engine} database as {alias!r} ({type(error).__name__})"
             ) from None
 
         location = (
@@ -835,9 +806,7 @@ class Session:
             secret_name=secret_name,
             owns_secret=owns_secret,
             default_schema=schema,
-            capabilities=(
-                _POSTGRES_CAPABILITIES if engine == "postgres" else _MYSQL_CAPABILITIES
-            ),
+            capabilities=(_POSTGRES_CAPABILITIES if engine == "postgres" else _MYSQL_CAPABILITIES),
             unbounded_scan=unbounded_scan,
         )
         self._attachments[alias] = state
@@ -859,9 +828,7 @@ class Session:
         try:
             attachment = self._attachments[alias]
         except KeyError:
-            raise RemoteAttachmentError(
-                f"Remote attachment {alias!r} is not available"
-            ) from None
+            raise RemoteAttachmentError(f"Remote attachment {alias!r} is not available") from None
         if not name:
             raise ValueError("remote table name must be non-empty")
         effective_schema = attachment.default_schema if schema is None else schema
@@ -893,9 +860,7 @@ class Session:
         try:
             attachment = self._attachments[alias]
         except KeyError:
-            raise RemoteAttachmentError(
-                f"Remote attachment {alias!r} is not available"
-            ) from None
+            raise RemoteAttachmentError(f"Remote attachment {alias!r} is not available") from None
         if attachment.engine == "sqlite":
             location = Path(attachment.location)
             self._connection.execute(f"DETACH {quote_identifier(alias)}")
@@ -906,15 +871,12 @@ class Session:
                 unbounded_scan=attachment.unbounded_scan,
             )
             return
-        function = (
-            "pg_clear_cache" if attachment.engine == "postgres" else "mysql_clear_cache"
-        )
+        function = "pg_clear_cache" if attachment.engine == "postgres" else "mysql_clear_cache"
         try:
             self._connection.execute(f"CALL {function}()")
         except duckdb.Error as error:
             raise RemoteAttachmentError(
-                f"Failed to refresh {attachment.engine} schema cache "
-                f"({type(error).__name__})"
+                f"Failed to refresh {attachment.engine} schema cache ({type(error).__name__})"
             ) from None
 
     def _detach_remote(self, alias: str) -> None:
@@ -922,19 +884,14 @@ class Session:
         try:
             attachment = self._attachments[alias]
         except KeyError:
-            raise RemoteAttachmentError(
-                f"Remote attachment {alias!r} is not available"
-            ) from None
+            raise RemoteAttachmentError(f"Remote attachment {alias!r} is not available") from None
         try:
             self._connection.execute(f"DETACH {quote_identifier(alias)}")
             if attachment.owns_secret and attachment.secret_name is not None:
-                self._connection.execute(
-                    f"DROP SECRET {quote_identifier(attachment.secret_name)}"
-                )
+                self._connection.execute(f"DROP SECRET {quote_identifier(attachment.secret_name)}")
         except duckdb.Error as error:
             raise RemoteAttachmentError(
-                f"Failed to detach {attachment.engine} database {alias!r} "
-                f"({type(error).__name__})"
+                f"Failed to detach {attachment.engine} database {alias!r} ({type(error).__name__})"
             ) from None
         del self._attachments[alias]
 
@@ -1077,9 +1034,7 @@ class Session:
         stable_order_key: OrderColumn | None = None
         if stable_order_label is not None:
             stable_column = next(
-                column
-                for column in metadata.columns
-                if column.label == stable_order_label
+                column for column in metadata.columns if column.label == stable_order_label
             )
             stable_order_key = OrderColumn(
                 stable_column.id,
@@ -1087,9 +1042,7 @@ class Session:
                 NullPlacement.LAST,
             )
             updated_columns = tuple(
-                replace(column, hidden=True)
-                if column.id == stable_column.id
-                else column
+                replace(column, hidden=True) if column.id == stable_column.id else column
                 for column in metadata.columns
             )
             metadata = replace(
@@ -1100,9 +1053,7 @@ class Session:
                     (stable_column.id,),
                     stable=True,
                     unique=True,
-                    source_key=(
-                        provenance.locations[0] if provenance.locations else None
-                    ),
+                    source_key=(provenance.locations[0] if provenance.locations else None),
                 ),
             )
         scan = ScanPlan(source, metadata)
@@ -1147,11 +1098,7 @@ class Session:
             )
         if isinstance(source, (ParquetSource, CsvSource)):
             canonical = tuple(
-                (
-                    sanitize_source_location(path)
-                    if "://" in path
-                    else str(Path(path).resolve())
-                )
+                (sanitize_source_location(path) if "://" in path else str(Path(path).resolve()))
                 for path in source.paths
             )
             fingerprints: list[str] = []
@@ -1186,9 +1133,7 @@ class Session:
                 kind = SourceKind.MYSQL
             else:
                 kind = SourceKind.SQLITE
-            location = (
-                f"{sanitize_source_location(source.location)}/{source.qualified_name}"
-            )
+            location = f"{sanitize_source_location(source.location)}/{source.qualified_name}"
             return SourceProvenance(
                 kind,
                 (location,),

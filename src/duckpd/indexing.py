@@ -75,9 +75,7 @@ class LocIndexer:
             self._frame._require_same_plan(row_key)
             filtered_df = self._frame[row_key]
         elif isinstance(row_key, set):
-            raise TypeError(
-                "Passing a set as an indexer is not supported. Use a list instead."
-            )
+            raise TypeError("Passing a set as an indexer is not supported. Use a list instead.")
         elif isinstance(row_key, list):
             if not row_key:
                 filtered_df = self._frame.limit(0)
@@ -87,18 +85,14 @@ class LocIndexer:
                     raise UnsupportedOperationError(
                         "DataFrame has no explicit index to match labels"
                     )
-                filtered_df = self._build_loc_index_frame(
-                    cast("Sequence[object]", row_key)
-                )
+                filtered_df = self._build_loc_index_frame(cast("Sequence[object]", row_key))
         else:
             pred = self._index_predicate(row_key)
             from duckpd.frame import DataFrame as DataFrameClass
 
             filtered_df = DataFrameClass(
                 self._frame._session,
-                FilterPlan(
-                    self._frame._plan, pred, after_filter(self._frame._plan.metadata)
-                ),
+                FilterPlan(self._frame._plan, pred, after_filter(self._frame._plan.metadata)),
             )
 
         # Resolve columns
@@ -116,8 +110,7 @@ class LocIndexer:
         index_ids = self._frame._plan.metadata.index.columns
         source_key = uuid4().hex
         key_labels = tuple(
-            f"__duckpd_loc_key_{source_key}_{position}__"
-            for position in range(len(index_ids))
+            f"__duckpd_loc_key_{source_key}_{position}__" for position in range(len(index_ids))
         )
         source_order_label = f"__duckpd_loc_request_order_{source_key}__"
         order_col_id = ColumnId.create()
@@ -138,9 +131,7 @@ class LocIndexer:
                 values = (cast("object", key),)
             if len(values) != len(index_ids):
                 raise KeyError("Index key has the wrong number of levels")
-            record = {
-                label: value for label, value in zip(key_labels, values, strict=True)
-            }
+            record = {label: value for label, value in zip(key_labels, values, strict=True)}
             record[source_order_label] = position
             records.append(record)
 
@@ -206,9 +197,7 @@ class LocIndexer:
     def _index_predicate(self, key: object) -> Expression:
         index_ids = self._frame._plan.metadata.index.columns
         if not index_ids:
-            raise UnsupportedOperationError(
-                "DataFrame has no explicit index to match labels"
-            )
+            raise UnsupportedOperationError("DataFrame has no explicit index to match labels")
         values: tuple[object, ...] = (
             cast("tuple[object, ...]", key) if isinstance(key, tuple) else (key,)
         )
@@ -245,9 +234,7 @@ class LocIndexer:
             if len(tup_key) == 2:
                 row_key, col_key = tup_key[0], tup_key[1]
             else:
-                raise UnsupportedOperationError(
-                    "DuckPD .loc assignment supports (row_mask, col)"
-                )
+                raise UnsupportedOperationError("DuckPD .loc assignment supports (row_mask, col)")
         else:
             row_key = key
 
@@ -259,17 +246,13 @@ class LocIndexer:
 
         if col_key is None:
             # Masked assignment to all visible columns
-            target_cols: list[str] = [
-                c.label for c in self._frame._plan.metadata.visible_columns
-            ]
+            target_cols: list[str] = [c.label for c in self._frame._plan.metadata.visible_columns]
         elif isinstance(col_key, str):
             target_cols = [col_key]
         elif isinstance(col_key, Sequence):
             target_cols = list(cast("Sequence[str]", col_key))
         else:
-            raise UnsupportedOperationError(
-                f"Unsupported column target in .loc: {col_key!r}"
-            )
+            raise UnsupportedOperationError(f"Unsupported column target in .loc: {col_key!r}")
 
         targets = [self._frame._column(label) for label in target_cols]
         protected = protected_column_ids(self._frame._plan.metadata)
@@ -299,9 +282,7 @@ class LocIndexer:
 
         output_columns = tuple(p.column for p in new_projections)
         metadata = after_projection(self._frame._plan.metadata, output_columns)
-        self._frame._plan = ProjectPlan(
-            self._frame._plan, tuple(new_projections), metadata
-        )
+        self._frame._plan = ProjectPlan(self._frame._plan, tuple(new_projections), metadata)
 
 
 class ILocIndexer:
@@ -322,18 +303,14 @@ class ILocIndexer:
             row_key, column_key = tuple_key
 
         result = self._select_rows(row_key)
-        if column_key is None or (
-            isinstance(column_key, slice) and column_key == slice(None)
-        ):
+        if column_key is None or (isinstance(column_key, slice) and column_key == slice(None)):
             return result
         visible = result._plan.metadata.visible_columns
         if isinstance(column_key, int):
             try:
                 return result[visible[column_key].label]
             except IndexError as error:
-                raise IndexError(
-                    "single positional indexer is out-of-bounds"
-                ) from error
+                raise IndexError("single positional indexer is out-of-bounds") from error
         if isinstance(column_key, slice):
             labels = [column.label for column in visible[column_key]]
             return result[labels]
@@ -344,9 +321,7 @@ class ILocIndexer:
             except IndexError as error:
                 raise IndexError("positional indexers are out-of-bounds") from error
             return result[labels]
-        raise UnsupportedOperationError(
-            f"Unsupported column key in .iloc: {column_key!r}"
-        )
+        raise UnsupportedOperationError(f"Unsupported column key in .iloc: {column_key!r}")
 
     def _select_rows(self, key: object) -> DataFrame:
         if isinstance(key, slice):
@@ -366,9 +341,7 @@ class ILocIndexer:
 
             start = start_val if start_val is not None else 0
             if step_val is not None and step_val != 1:
-                raise UnsupportedOperationError(
-                    "DuckPD .iloc does not support step != 1"
-                )
+                raise UnsupportedOperationError("DuckPD .iloc does not support step != 1")
             if start < 0 or (stop_val is not None and stop_val < 0):
                 raise UnsupportedOperationError(
                     "DuckPD .iloc does not support negative slice indices"

@@ -166,9 +166,7 @@ def validate_quantile(q: object) -> float:
         if 0.0 <= val <= 1.0:
             return val
         raise ValueError("quantile must be between 0 and 1")
-    raise UnsupportedOperationError(
-        "DuckPD currently supports only scalar float/int quantiles"
-    )
+    raise UnsupportedOperationError("DuckPD currently supports only scalar float/int quantiles")
 
 
 def aggregate_plan(

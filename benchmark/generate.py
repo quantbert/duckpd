@@ -40,9 +40,7 @@ def canonicalize_preset(name: str) -> str:
         return "50mb"
     if clean in PRESET_SIZES:
         return clean
-    raise ValueError(
-        f"Unknown preset size {name!r}. Available: {', '.join(CANONICAL_PRESETS)}"
-    )
+    raise ValueError(f"Unknown preset size {name!r}. Available: {', '.join(CANONICAL_PRESETS)}")
 
 
 def market_query(rows: int) -> str:
@@ -88,9 +86,7 @@ def market_query(rows: int) -> str:
     """
 
 
-def estimate_row_count(
-    calibration_rows: int, calibration_bytes: int, target_bytes: int
-) -> int:
+def estimate_row_count(calibration_rows: int, calibration_bytes: int, target_bytes: int) -> int:
     """Estimate rows required for a compressed target size."""
     if calibration_rows <= 0:
         raise ValueError("calibration_rows must be positive")
@@ -166,10 +162,7 @@ def generate_dataset(
     temp_path = output_dir / f".market-data-{canonical}.tmp.parquet"
     con = duckdb.connect()
     try:
-        sql = (
-            f"COPY ({market_query(rows)}) TO '{temp_path}' "
-            "(FORMAT PARQUET, COMPRESSION ZSTD)"
-        )
+        sql = f"COPY ({market_query(rows)}) TO '{temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
         con.execute(sql)
         if target_path.exists():
             target_path.unlink()

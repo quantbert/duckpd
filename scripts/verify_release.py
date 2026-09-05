@@ -23,9 +23,7 @@ def verify_version() -> str:
     """Verify that project metadata has a corresponding immutable changelog entry."""
     version = project_version()
     if version not in changelog_versions():
-        raise SystemExit(
-            f"docs/CHANGELOG.md has no dated release section for {version!r}"
-        )
+        raise SystemExit(f"docs/CHANGELOG.md has no dated release section for {version!r}")
     return version
 
 
@@ -43,9 +41,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Verify project/changelog versions and an optional release tag."
     )
-    parser.add_argument(
-        "tag", nargs="?", help="Git release tag, including the v prefix"
-    )
+    parser.add_argument("tag", nargs="?", help="Git release tag, including the v prefix")
     args = parser.parse_args()
     if args.tag is None:
         verify_version()

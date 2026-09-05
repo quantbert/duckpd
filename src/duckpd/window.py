@@ -227,9 +227,7 @@ class Rolling(WindowBase):
         if window <= 0:
             raise ValueError("window must be a positive integer")
         if center:
-            raise UnsupportedOperationError(
-                "DuckPD does not support center=True in rolling"
-            )
+            raise UnsupportedOperationError("DuckPD does not support center=True in rolling")
         if min_periods is not None and (type(min_periods) is not int):
             raise ValueError("min_periods must be an integer")
         min_p = window if min_periods is None else min_periods
@@ -286,18 +284,14 @@ class Rolling(WindowBase):
 
         if isinstance(self._parent, Series):
             return self._apply_series_agg(self._parent, "std", ddof=ddof)
-        return self._apply_frame_agg(
-            self._parent, "std", numeric_only=numeric_only, ddof=ddof
-        )
+        return self._apply_frame_agg(self._parent, "std", numeric_only=numeric_only, ddof=ddof)
 
     def var(self, ddof: int = 1, numeric_only: bool = False) -> DataFrame | Series:
         from duckpd.series import Series
 
         if isinstance(self._parent, Series):
             return self._apply_series_agg(self._parent, "var", ddof=ddof)
-        return self._apply_frame_agg(
-            self._parent, "var", numeric_only=numeric_only, ddof=ddof
-        )
+        return self._apply_frame_agg(self._parent, "var", numeric_only=numeric_only, ddof=ddof)
 
 
 class GroupedRolling(Rolling):
@@ -396,9 +390,7 @@ class GroupedRolling(Rolling):
                 )
 
         if not calculations:
-            raise UnsupportedOperationError(
-                f"No valid columns for grouped rolling {func}"
-            )
+            raise UnsupportedOperationError(f"No valid columns for grouped rolling {func}")
 
         result_source = source_plan
         source_index: list[tuple[Expression, str, str]] = []
@@ -406,22 +398,14 @@ class GroupedRolling(Rolling):
         source_metadata = source_plan.metadata
         if source_metadata.index.columns:
             index_names = source_metadata.index.names or tuple(
-                next(
-                    column.label
-                    for column in source_metadata.columns
-                    if column.id == column_id
-                )
+                next(column.label for column in source_metadata.columns if column.id == column_id)
                 for column_id in source_metadata.index.columns
             )
             for column_id in source_metadata.index.columns:
                 column = next(
-                    column
-                    for column in source_metadata.columns
-                    if column.id == column_id
+                    column for column in source_metadata.columns if column.id == column_id
                 )
-                source_index.append(
-                    (ColumnRef(column.id), column.label, column.duckdb_type)
-                )
+                source_index.append((ColumnRef(column.id), column.label, column.duckdb_type))
         elif (
             source_metadata.row_identity.stable
             and source_metadata.row_identity.unique
@@ -547,9 +531,7 @@ class GroupedRolling(Rolling):
 
         output_columns = tuple(item.column for item in projections)
         metadata = after_projection(result_source.metadata, output_columns)
-        index_columns = (
-            (*key_outputs, *index_outputs) if self._as_index else tuple(index_outputs)
-        )
+        index_columns = (*key_outputs, *index_outputs) if self._as_index else tuple(index_outputs)
         grouped_index_names = (
             (*tuple(column.label for column in self._key_columns), *index_names)
             if self._as_index
@@ -586,9 +568,7 @@ class GroupedRolling(Rolling):
                     source_key.direction,
                     source_key.null_placement,
                 )
-                for output, source_key in zip(
-                    group_order_outputs, order_keys, strict=True
-                )
+                for output, source_key in zip(group_order_outputs, order_keys, strict=True)
             )
         sort_keys.extend(
             SortKey(
@@ -677,15 +657,11 @@ class Expanding(WindowBase):
 
         if isinstance(self._parent, Series):
             return self._apply_series_agg(self._parent, "std", ddof=ddof)
-        return self._apply_frame_agg(
-            self._parent, "std", numeric_only=numeric_only, ddof=ddof
-        )
+        return self._apply_frame_agg(self._parent, "std", numeric_only=numeric_only, ddof=ddof)
 
     def var(self, ddof: int = 1, numeric_only: bool = False) -> DataFrame | Series:
         from duckpd.series import Series
 
         if isinstance(self._parent, Series):
             return self._apply_series_agg(self._parent, "var", ddof=ddof)
-        return self._apply_frame_agg(
-            self._parent, "var", numeric_only=numeric_only, ddof=ddof
-        )
+        return self._apply_frame_agg(self._parent, "var", numeric_only=numeric_only, ddof=ddof)

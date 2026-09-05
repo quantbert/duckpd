@@ -67,9 +67,7 @@ def _pandas_filter_groupby_agg(
     )
 
 
-def _verify_filter_groupby_agg(
-    duck_df: pd_orig.DataFrame, pandas_df: pd_orig.DataFrame
-) -> None:
+def _verify_filter_groupby_agg(duck_df: pd_orig.DataFrame, pandas_df: pd_orig.DataFrame) -> None:
     d_sorted = duck_df.sort_values("ticker").reset_index(drop=True)
     p_sorted = pandas_df.sort_values("ticker").reset_index(drop=True)
     assert_frame_equal(d_sorted, p_sorted, check_dtype=False, atol=1e-4, rtol=1e-4)
@@ -104,9 +102,7 @@ def _pandas_full_scan_agg(parquet_path: str) -> pd_orig.DataFrame:
     )
 
 
-def _verify_full_scan_agg(
-    duck_df: pd_orig.DataFrame, pandas_df: pd_orig.DataFrame
-) -> None:
+def _verify_full_scan_agg(duck_df: pd_orig.DataFrame, pandas_df: pd_orig.DataFrame) -> None:
     d_sorted = duck_df.sort_values("ticker").reset_index(drop=True)
     p_sorted = pandas_df.sort_values("ticker").reset_index(drop=True)
     assert_frame_equal(d_sorted, p_sorted, check_dtype=False, atol=1e-4, rtol=1e-4)

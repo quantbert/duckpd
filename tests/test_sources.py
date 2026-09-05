@@ -46,9 +46,7 @@ def test_from_pandas_preserves_supported_nullable_and_temporal_dtypes() -> None:
             "unsigned": pd.Series([1, None], dtype="UInt32"),
             "boolean": pd.Series([True, None], dtype="boolean"),
             "string": pd.Series(["value", None], dtype="string"),
-            "timestamp": pd.Series(
-                [pd.Timestamp("2025-01-01"), pd.NaT], dtype="datetime64[ns]"
-            ),
+            "timestamp": pd.Series([pd.Timestamp("2025-01-01"), pd.NaT], dtype="datetime64[ns]"),
             "zoned": pd.Series([pd.Timestamp("2025-01-01", tz="UTC"), pd.NaT]),
             "duration": pd.Series([pd.Timedelta(days=1), pd.NaT]),
             "date": pd.Series([date(2025, 1, 1), None], dtype=object),
@@ -211,9 +209,7 @@ def test_module_helpers_share_a_context_local_session() -> None:
 def test_explicit_session_override_remains_isolated() -> None:
     implicit = duckpd.from_pandas(pd.DataFrame({"value": [1]}))
     explicit_session = duckpd.connect()
-    explicit = duckpd.from_pandas(
-        pd.DataFrame({"value": [2]}), session=explicit_session
-    )
+    explicit = duckpd.from_pandas(pd.DataFrame({"value": [2]}), session=explicit_session)
 
     assert implicit._session is not explicit._session
 

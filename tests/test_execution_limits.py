@@ -83,9 +83,7 @@ def test_constrained_memory_execution_completes() -> None:
             )
 
             sorted_out = Path(tmpdir) / "stress_sorted.parquet"
-            frame.sort_values(["val1", "val2"], ascending=[False, True]).write_parquet(
-                sorted_out
-            )
+            frame.sort_values(["val1", "val2"], ascending=[False, True]).write_parquet(sorted_out)
             assert sorted_out.exists()
             assert sorted_out.stat().st_size > 0
 

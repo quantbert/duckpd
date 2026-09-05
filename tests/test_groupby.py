@@ -81,18 +81,14 @@ def test_groupby_dropna_behavior(sample_sales: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(df_with_nulls)
 
     # dropna=True (default)
-    result_dropna = frame.groupby("group", as_index=False, dropna=True).agg(
-        total=("val", "sum")
-    )
+    result_dropna = frame.groupby("group", as_index=False, dropna=True).agg(total=("val", "sum"))
     expected_dropna = df_with_nulls.groupby("group", as_index=False, dropna=True).agg(
         total=("val", "sum")
     )
     assert_frame_equal(result_dropna.collect(), expected_dropna)
 
     # dropna=False
-    result_keepna = frame.groupby("group", as_index=False, dropna=False).agg(
-        total=("val", "sum")
-    )
+    result_keepna = frame.groupby("group", as_index=False, dropna=False).agg(total=("val", "sum"))
     expected_keepna = df_with_nulls.groupby("group", as_index=False, dropna=False).agg(
         total=("val", "sum")
     )
@@ -162,14 +158,10 @@ def test_groupby_dict_agg_matches_pandas(sample_sales: pd.DataFrame) -> None:
     session = duckpd.connect()
     frame = session.from_pandas(sample_sales)
 
-    result = frame.groupby("dept", as_index=True).agg(
-        {"revenue": "sum", "units": "mean"}
-    )
+    result = frame.groupby("dept", as_index=True).agg({"revenue": "sum", "units": "mean"})
     assert session.execution_count == 0
 
-    expected = sample_sales.groupby("dept", as_index=True).agg(
-        {"revenue": "sum", "units": "mean"}
-    )
+    expected = sample_sales.groupby("dept", as_index=True).agg({"revenue": "sum", "units": "mean"})
     assert_frame_equal(result.collect(), expected)
     assert session.execution_count == 1
 
@@ -210,21 +202,11 @@ def test_groupby_column_indexing_matches_pandas(sample_sales: pd.DataFrame) -> N
     g = frame.groupby("dept", as_index=True)
     pg = sample_sales.groupby("dept", as_index=True)
 
-    assert_frame_equal(
-        g["revenue"].sum().collect(), pg["revenue"].sum().to_frame("revenue")
-    )
-    assert_frame_equal(
-        g["revenue"].mean().collect(), pg["revenue"].mean().to_frame("revenue")
-    )
-    assert_frame_equal(
-        g["revenue"].min().collect(), pg["revenue"].min().to_frame("revenue")
-    )
-    assert_frame_equal(
-        g["revenue"].max().collect(), pg["revenue"].max().to_frame("revenue")
-    )
-    assert_frame_equal(
-        g[["revenue", "units"]].sum().collect(), pg[["revenue", "units"]].sum()
-    )
+    assert_frame_equal(g["revenue"].sum().collect(), pg["revenue"].sum().to_frame("revenue"))
+    assert_frame_equal(g["revenue"].mean().collect(), pg["revenue"].mean().to_frame("revenue"))
+    assert_frame_equal(g["revenue"].min().collect(), pg["revenue"].min().to_frame("revenue"))
+    assert_frame_equal(g["revenue"].max().collect(), pg["revenue"].max().to_frame("revenue"))
+    assert_frame_equal(g[["revenue", "units"]].sum().collect(), pg[["revenue", "units"]].sum())
 
 
 def test_series_groupby_matches_pandas(sample_sales: pd.DataFrame) -> None:
@@ -280,9 +262,7 @@ def test_groupby_invalid_arguments_raise_early(sample_sales: pd.DataFrame) -> No
     with pytest.raises(UnsupportedOperationError, match="Callable aggregators"):
         g.agg(out=("revenue", dummy_func))
 
-    with pytest.raises(
-        UnsupportedOperationError, match="Unsupported aggregate function"
-    ):
+    with pytest.raises(UnsupportedOperationError, match="Unsupported aggregate function"):
         g.agg(out=("revenue", "invalid_agg_func"))
 
     with pytest.raises(UnsupportedOperationError, match="requires numeric or boolean"):
@@ -332,14 +312,10 @@ def test_groupby_error_cases(sample_sales: pd.DataFrame) -> None:
     frame = duckpd.from_pandas(sample_sales)
     g = frame.groupby("dept")
 
-    with pytest.raises(
-        UnsupportedOperationError, match="Unsupported agg argument type"
-    ):
+    with pytest.raises(UnsupportedOperationError, match="Unsupported agg argument type"):
         g.agg(123)  # type: ignore[arg-type]
 
-    with pytest.raises(
-        TypeError, match="Dictionary aggregation keys must be column name strings"
-    ):
+    with pytest.raises(TypeError, match="Dictionary aggregation keys must be column name strings"):
         g.agg({123: "sum"})  # type: ignore[dict-item]
 
     with pytest.raises(UnsupportedOperationError, match="only single string function"):
