@@ -8,8 +8,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 
 ## User guides
 
-- [Getting started](GETTING_STARTED.md) — installation, the supported acceptance
-  workflow, execution boundaries, ordering, and resource-bounded sessions.
+- [Getting started](GETTING_STARTED.md) — installation, execution boundaries,
+  ordering, resource-bounded sessions, and read-only PostgreSQL/MySQL
+  attachments.
 - [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
   supported arguments, intentional deviations, and unsupported behavior.
 

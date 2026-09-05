@@ -38,6 +38,64 @@ Grouped moving averages remain aligned to their originating ticker rows without
 materialization. `head()` materializes only a bounded pandas preview, while
 `write_parquet()` executes the full pipeline directly in DuckDB.
 
+## Query PostgreSQL and MySQL without loading them into pandas
+
+DuckPD attaches remote databases through DuckDB's PostgreSQL and MySQL
+extensions. The attachment is read-only, table access is lazy, and credentials
+do not appear in logical plans, `explain()` output, exceptions, or reprs.
+
+```python
+import os
+
+import duckpd as pd
+
+with pd.connect(memory_limit="2GB") as session:
+    warehouse = session.attach_postgres(
+        "warehouse",
+        host=os.environ["PGHOST"],
+        port=int(os.environ.get("PGPORT", "5432")),
+        database=os.environ["PGDATABASE"],
+        user=os.environ["PGUSER"],
+        password=os.environ["PGPASSWORD"],
+        # Remote transfer is intentional for this pipeline.
+        unbounded_scan="allow",
+    )
+
+    orders = warehouse.table(
+        "orders",
+        schema="reporting",
+        order_by="order_id",
+    )
+    open_orders = orders[orders["status"] == "open"][
+        ["order_id", "customer_id", "total"]
+    ]
+
+    # Planning and inspection do not fetch rows.
+    print(open_orders.explain("json"))
+    result = open_orders.collect()
+```
+
+Each execution reads the latest committed remote data. Call `persist()` when
+you want a DuckDB-owned snapshot instead. The default
+`unbounded_scan="warn"` warns when DuckPD cannot prove a network-transfer
+bound; choose `"error"` to prohibit such scans or `"allow"` when the transfer
+is deliberate. MySQL uses the same flow:
+
+```python
+with pd.connect() as session:
+    catalog = session.attach_mysql(
+        "catalog",
+        host=os.environ["MYSQL_HOST"],
+        database=os.environ["MYSQL_DATABASE"],
+        user=os.environ["MYSQL_USER"],
+        password=os.environ["MYSQL_PASSWORD"],
+    )
+    products = catalog.table("products")
+```
+
+See [Read-only remote databases](docs/GETTING_STARTED.md#read-only-remote-databases)
+for secrets, schema refresh, cleanup, and scan-policy details.
+
 ## Project directives
 
 These principles define the direction of DuckPD and should guide API and implementation decisions:

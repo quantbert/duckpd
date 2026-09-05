@@ -99,31 +99,134 @@ DataFrame. Individual DuckDB operators may still require blocking state; use
 
 ## Read-only remote databases
 
-Attach PostgreSQL or MySQL with structured parameters; connection credentials
-are stored in a temporary DuckDB secret rather than in the logical plan:
+DuckPD uses DuckDB's `postgres` and `mysql` extensions rather than loading
+remote tables through pandas. Each attachment call ensures that the
+corresponding extension is installed and loaded, then creates the attachment
+with `READ_ONLY`.
+
+### Structured connection parameters
+
+Pass credentials as structured values. DuckPD binds them into a temporary
+DuckDB secret; they are never embedded in table names, logical plans,
+`explain()` output, exceptions, or attachment reprs.
 
 ```python
+import os
+
 import duckpd as pd
 
 with pd.connect() as session:
     postgres = session.attach_postgres(
         "warehouse",
-        host="db.example.com",
-        database="analytics",
-        user="reader",
-        password="...",
-        unbounded_scan="error",
+        host=os.environ["PGHOST"],
+        port=int(os.environ.get("PGPORT", "5432")),
+        database=os.environ["PGDATABASE"],
+        user=os.environ["PGUSER"],
+        password=os.environ["PGPASSWORD"],
+        sslmode="require",
+        unbounded_scan="allow",
     )
-    orders = postgres.table("orders", schema="reporting", order_by="order_id")
-    result = orders[orders["status"] == "open"].collect()
+
+    orders = postgres.table(
+        "orders",
+        schema="reporting",
+        order_by="order_id",
+    )
+    open_orders = orders[orders["status"] == "open"][
+        ["order_id", "customer_id", "total"]
+    ]
+
+    # No rows are fetched until an explicit execution boundary.
+    print(open_orders.explain("json"))
+    result = open_orders.collect()
 ```
 
-Attachments are always `READ_ONLY`. A remote frame re-reads committed data on
-each execution; call `persist()` for a DuckDB-owned snapshot. The default
-`unbounded_scan="warn"` emits a warning when DuckPD cannot prove a network
-transfer bound; use `"error"` for strict prevention or `"allow"` when the scan
-is intentional. `attachment.refresh_schema()` clears DuckDB's extension schema
-cache after remote DDL, and `attachment.detach()` releases it early.
+Use `attach_mysql()` with the same `host`, `port`, `database`, `user`, and
+`password` structure:
+
+```python
+with pd.connect() as session:
+    mysql = session.attach_mysql(
+        "catalog",
+        host=os.environ["MYSQL_HOST"],
+        port=int(os.environ.get("MYSQL_PORT", "3306")),
+        database=os.environ["MYSQL_DATABASE"],
+        user=os.environ["MYSQL_USER"],
+        password=os.environ["MYSQL_PASSWORD"],
+    )
+    products = mysql.table("products")
+```
+
+### Existing DuckDB secrets
+
+An existing persistent DuckDB secret avoids passing credentials to DuckPD.
+Provide only its name:
+
+```python
+with pd.connect() as session:
+    warehouse = session.attach_postgres(
+        "warehouse",
+        secret="production_postgres_readonly",
+        schema="reporting",
+    )
+```
+
+The caller owns an existing secret, so detaching or closing the session does
+not delete it. DuckPD deletes temporary secrets that it creates from structured
+parameters.
+
+### Freshness and schema changes
+
+A remote `DataFrame` is a lazy query, not a snapshot. Repeated execution of the
+same frame sees data committed before each execution:
+
+```python
+first = orders.collect()
+# Another transaction commits remote inserts or updates.
+second = orders.collect()
+
+snapshot = orders.persist()
+```
+
+`snapshot` is DuckDB-owned and does not change with the source. DuckDB caches
+remote schemas separately. After remote DDL, clear that cache and construct a
+new frame:
+
+```python
+warehouse.refresh_schema()
+orders_with_new_schema = warehouse.table("orders", schema="reporting")
+```
+
+### Network-scan policy and explain output
+
+`unbounded_scan` controls execution when DuckPD cannot prove a bound on data
+transferred from the remote server:
+
+| Value | Behavior |
+| :--- | :--- |
+| `"warn"` | Default. Emit `RemoteScanWarning`, then execute. |
+| `"error"` | Raise `MaterializationError` before DuckDB executes the plan. |
+| `"allow"` | Execute without the unbounded-transfer warning. |
+
+The guard is intentionally conservative. A local output `limit()` does not
+prove a network-transfer bound unless the remote extension can establish that
+the limit executes remotely. Set the policy on the attachment, or override it
+for one table:
+
+```python
+customers = warehouse.table("customers", unbounded_scan="error")
+```
+
+`explain("json")` reports the sanitized remote source, backend, scan policy,
+unknown transfer estimate, and statically known projection/filter pushdown
+capabilities. It never reports credentials.
+
+### Cleanup
+
+`attachment.detach()` releases one attachment early. Closing its owning
+`Session` detaches every remaining remote database and removes every temporary
+secret created by DuckPD. Frames belonging to a detached attachment cannot be
+executed or used to construct new table scans.
 
 ## Unsupported behavior
 

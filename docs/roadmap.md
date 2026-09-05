@@ -797,10 +797,10 @@ decomposed into independently testable milestones below.
           keys, insufficient window periods, and unordered-input failures.
     - [x] Update the compatibility matrix and README with a validated
           multi-ticker moving-average crossover example.
-21. [ ] Add safe, read-only `Session.attach_postgres()` and
-      `Session.attach_mysql()` APIs as the next product priority, with
-      refresh-on-execution semantics, credential redaction, explicit
-      pushdown reporting, and network-transfer safety guards.
+21. [x] Add safe, read-only `Session.attach_postgres()` and
+      `Session.attach_mysql()` APIs with refresh-on-execution semantics,
+      credential redaction, explicit pushdown reporting, and network-transfer
+      safety guards.
 
 ### Active Linux-beta workstreams and goals
 

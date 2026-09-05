@@ -608,7 +608,13 @@ class Session:
             capabilities=attachment.capabilities,
             unbounded_scan=policy,
         )
-        plan = self._source_plan(source, index=index, order_by=order_by)
+        try:
+            plan = self._source_plan(source, index=index, order_by=order_by)
+        except duckdb.Error as error:
+            raise RemoteAttachmentError(
+                f"Failed to inspect {attachment.engine} table from attachment "
+                f"{alias!r} ({type(error).__name__})"
+            ) from None
         return DataFrame(self, plan)
 
     def _refresh_remote_schema(self, alias: str) -> None:

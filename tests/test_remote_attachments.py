@@ -26,12 +26,15 @@ class _FakeRelation:
 
 
 class _FakeConnection:
-    def __init__(self, *, fail_attach: bool = False) -> None:
+    def __init__(
+        self, *, fail_attach: bool = False, fail_inspect: bool = False
+    ) -> None:
         self.queries: list[tuple[str, tuple[object, ...]]] = []
         self.installed: list[str] = []
         self.loaded: list[str] = []
         self.closed = False
         self._fail_attach = fail_attach
+        self._fail_inspect = fail_inspect
 
     def install_extension(self, name: str) -> None:
         self.installed.append(name)
@@ -51,6 +54,8 @@ class _FakeConnection:
         return self
 
     def sql(self, _query: str) -> _FakeRelation:
+        if self._fail_inspect:
+            raise duckdb.IOException("connection exposed reader and super-secret")
         return _FakeRelation()
 
     def close(self) -> None:
@@ -58,11 +63,16 @@ class _FakeConnection:
 
 
 def _session_with_fake(
-    *, fail_attach: bool = False
+    *,
+    fail_attach: bool = False,
+    fail_inspect: bool = False,
 ) -> tuple[duckpd.Session, _FakeConnection]:
     session = duckpd.connect()
     session._connection.close()
-    connection = _FakeConnection(fail_attach=fail_attach)
+    connection = _FakeConnection(
+        fail_attach=fail_attach,
+        fail_inspect=fail_inspect,
+    )
     session._connection = cast("Any", connection)
     return session, connection
 
@@ -242,6 +252,18 @@ def test_attachment_validation_and_failure_redact_credentials() -> None:
     assert any(
         query.startswith("DROP SECRET") for query, _ in failed_connection.queries
     )
+
+
+def test_remote_schema_inspection_failure_redacts_credentials() -> None:
+    session, _ = _session_with_fake(fail_inspect=True)
+    attachment = session.attach_postgres("analytics", secret="managed")
+
+    with pytest.raises(RemoteAttachmentError) as captured:
+        attachment.table("orders")
+
+    message = str(captured.value)
+    assert "reader" not in message
+    assert "super-secret" not in message
 
 
 class _RemoteSettings(TypedDict):
