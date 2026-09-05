@@ -326,7 +326,8 @@ Goal: make metadata trustworthy before implementing many methods.
       assignment length, and operations that require an explicit order.
 - [x] Implement explicit `set_index()` and `reset_index()` without assuming
       uniqueness.
-- [x] Add `order_by=` declarations at data-source boundaries.
+- [x] Add `order_by=` declarations to establish or override ordering at
+      data-source boundaries.
 - [x] Reject order-dependent methods when `OrderSpec` is unknown.
 - [x] Define collection behavior for absent, explicit, duplicate, named, and
       null-containing indexes.
@@ -454,8 +455,9 @@ Goal: add positional and order-sensitive behavior only on sound foundations.
 
 Exit gate:
 
-- [x] Every positional/window test fails with `UnorderedOperationError` when
-      the same fixture is loaded without `order_by=`.
+- [x] Positional/window tests use automatic CSV/Parquet and snapshot order;
+      equivalent SQL/table inputs fail with `UnorderedOperationError` until an
+      explicit order is established.
 - [x] Ordered cases match pandas with duplicate sort keys and nulls.
 
 ### Phase 7: string, datetime, and categorical accessors

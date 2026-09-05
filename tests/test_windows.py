@@ -99,13 +99,13 @@ def test_cumulative_uses_stable_pandas_snapshot_order() -> None:
     pd.testing.assert_frame_equal(df.cumsum().collect(), pdf.cumsum())
 
 
-def test_cumulative_requires_order_for_external_scan(tmp_path: Path) -> None:
-    path = tmp_path / "unordered.csv"
-    pd.DataFrame({"a": [1, 2, 3]}).to_csv(path, index=False)
+def test_cumulative_uses_csv_source_order(tmp_path: Path) -> None:
+    path = tmp_path / "ordered.csv"
+    source = pd.DataFrame({"a": [1, 2, 3]})
+    source.to_csv(path, index=False)
     df = dp.read_csv(path)
 
-    with pytest.raises(UnorderedOperationError):
-        df["a"].cumsum()
+    pd.testing.assert_series_equal(df["a"].cumsum().collect(), source["a"].cumsum())
 
 
 def test_shift_diff_pct_change_differential() -> None:
@@ -547,16 +547,11 @@ def test_multi_ticker_moving_average_crossover_pipeline() -> None:
     assert session.execution_count == 1
 
 
-def test_grouped_rolling_rejects_unordered_input_before_execution(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "unordered-grouped.csv"
-    pd.DataFrame({"group": ["a", "a"], "value": [1.0, 2.0]}).to_csv(
-        path,
-        index=False,
-    )
+def test_grouped_rolling_rejects_unordered_input_before_execution() -> None:
     session = dp.connect()
-    frame = session.read_csv(path)
+    frame = session.sql(
+        "select * from (values ('a', 1.0), ('a', 2.0)) t(\"group\", value)"
+    )
 
     with pytest.raises(UnorderedOperationError):
         frame.groupby("group")["value"].rolling(2).sum()
@@ -585,12 +580,9 @@ SERIES_ORDER_OPERATIONS: tuple[Callable[[dp.Series], object], ...] = (
 
 @pytest.mark.parametrize("operation", SERIES_ORDER_OPERATIONS)
 def test_every_series_order_dependent_operation_rejects_unordered_input(
-    tmp_path: Path,
     operation: Callable[[dp.Series], object],
 ) -> None:
-    path = tmp_path / "unordered-series.csv"
-    pd.DataFrame({"value": [3, 1, 2]}).to_csv(path, index=False)
-    series = dp.read_csv(path)["value"]
+    series = dp.connect().sql("select * from (values (3), (1), (2)) t(value)")["value"]
 
     with pytest.raises(UnorderedOperationError):
         operation(series)
@@ -613,12 +605,11 @@ DATAFRAME_ORDER_OPERATIONS: tuple[Callable[[dp.DataFrame], object], ...] = (
 
 @pytest.mark.parametrize("operation", DATAFRAME_ORDER_OPERATIONS)
 def test_every_dataframe_order_dependent_operation_rejects_unordered_input(
-    tmp_path: Path,
     operation: Callable[[dp.DataFrame], object],
 ) -> None:
-    path = tmp_path / "unordered-frame.csv"
-    pd.DataFrame({"left": [3, 1, 2], "right": [6, 4, 5]}).to_csv(path, index=False)
-    frame = dp.read_csv(path)
+    frame = dp.connect().sql(
+        'select * from (values (3, 6), (1, 4), (2, 5)) t("left", "right")'
+    )
 
     with pytest.raises(UnorderedOperationError):
         operation(frame)

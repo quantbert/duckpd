@@ -100,6 +100,9 @@ class DuckDBCompiler:
                     f"nested DuckDB type {dtype} in column {label!r}"
                 )
             columns.append(Column(ColumnId.create(), label, dtype))
+        stable_order_label = getattr(source, "stable_order_label", None)
+        if stable_order_label is not None:
+            columns.append(Column(ColumnId.create(), stable_order_label, "BIGINT"))
         return tuple(columns)
 
     def project_visible(
@@ -142,9 +145,23 @@ class DuckDBCompiler:
     def _compile(self, plan: LogicalPlan) -> CompiledFrame:
         self._session._ensure_open()
         if isinstance(plan, ScanPlan):
-            source_relation = self._relation_for_source(plan.source)
+            source_relation = self._relation_for_source(
+                plan.source,
+                include_native_order=True,
+            )
             expressions = tuple(
-                duckdb.SQLExpression(quote_identifier(column.label)).alias(column.label)
+                (
+                    duckdb.SQLExpression(
+                        "file_row_number"
+                        if isinstance(plan.source, ParquetSource)
+                        and plan.source.native_order
+                        else "row_number() OVER ()"
+                    ).alias(column.label)
+                    if column.label == getattr(plan.source, "stable_order_label", None)
+                    else duckdb.SQLExpression(quote_identifier(column.label)).alias(
+                        column.label
+                    )
+                )
                 for column in plan.columns
             )
             relation = source_relation.project(*expressions)
@@ -518,6 +535,8 @@ class DuckDBCompiler:
             | SqlSource
             | TableSource
         ),
+        *,
+        include_native_order: bool = False,
     ) -> duckdb.DuckDBPyRelation:
         self._session._ensure_open()
         if isinstance(source, PandasSource):
@@ -561,6 +580,7 @@ class DuckDBCompiler:
             paths,
             hive_partitioning=source.hive_partitioning,
             union_by_name=source.union_by_name,
+            file_row_number=include_native_order and source.native_order,
         )
 
     def _compile_sort_key(

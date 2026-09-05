@@ -1086,7 +1086,11 @@ class Executor:
         orig_count = source_parquet.metadata.num_rows
 
         # 3. Validate plan columns preserve schema (including hidden index columns)
-        col_by_label = {col.label: col for col in plan.metadata.columns}
+        col_by_label = {
+            col.label: col
+            for col in plan.metadata.columns
+            if col.label != scan.source.stable_order_label
+        }
         missing_cols = set(orig_columns) - set(col_by_label.keys())
         extra_cols = set(col_by_label.keys()) - set(orig_columns)
         if missing_cols or extra_cols:

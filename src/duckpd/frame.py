@@ -274,8 +274,18 @@ class DataFrame:
             compression=compression,
             retain_previous=retain_previous,
         )
+        identity_columns = self._plan.metadata.row_identity.columns
+        stable_order_label = (
+            self._column_by_id(identity_columns[0]).label
+            if len(identity_columns) == 1
+            else None
+        )
         self._plan = ScanPlan(
-            ParquetSource((report.source_path,)),
+            ParquetSource(
+                (report.source_path,),
+                stable_order_label=stable_order_label,
+                native_order=stable_order_label is not None,
+            ),
             self._plan.metadata,
         )
         return report
@@ -1978,8 +1988,8 @@ class DataFrame:
         if not self._plan.metadata.ordering.keys:
             raise UnorderedOperationError(
                 "head() requires a guaranteed row ordering. Specify "
-                "order_by on your data source (e.g. read_parquet(..., order_by=...)) "
-                "or sort first using .sort_values(...)"
+                "order_by when creating a SQL/table source or sort first using "
+                ".sort_values(...)"
             )
         return self.limit(count).collect()
 
@@ -2064,9 +2074,8 @@ class DataFrame:
         if keep in {"first", "last"} and not ordering_keys:
             raise UnorderedOperationError(
                 "drop_duplicates keep='first'/'last' requires a guaranteed row "
-                "ordering. Specify order_by on your data source "
-                "(e.g. read_parquet(..., order_by=...)) or sort first using "
-                ".sort_values(...)"
+                "ordering. Specify order_by when creating a SQL/table source or "
+                "sort first using .sort_values(...)"
             )
 
         # Window-based deduplication
@@ -2204,9 +2213,8 @@ class DataFrame:
         if not self._plan.metadata.ordering.keys:
             raise UnorderedOperationError(
                 "nlargest/nsmallest tie handling requires a guaranteed row "
-                "ordering. Specify order_by on your data source "
-                "(e.g. read_parquet(..., order_by=...)) or sort first using "
-                ".sort_values(...)"
+                "ordering. Specify order_by when creating a SQL/table source or "
+                "sort first using .sort_values(...)"
             )
         labels = (columns,) if isinstance(columns, str) else tuple(columns)
         value_direction = (

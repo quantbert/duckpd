@@ -65,8 +65,8 @@ class WindowBase:
         if not ordering.keys:
             raise UnorderedOperationError(
                 "Window operations require a guaranteed row ordering. Specify "
-                "order_by on your data source (e.g. read_parquet(..., order_by=...)) "
-                "or sort first using .sort_values(...)"
+                "order_by when creating a SQL/table source or sort first using "
+                ".sort_values(...)"
             )
         return tuple(
             SortKey(

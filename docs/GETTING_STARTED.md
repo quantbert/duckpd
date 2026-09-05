@@ -69,11 +69,57 @@ relation `map()` as a hidden fallback.
 
 ## Ordering and indexes
 
-Parquet, CSV, SQL, and table scans have no stable row order unless `order_by=`
-is declared. Positional, cumulative, ranking, and rolling operations reject an
-unordered plan with `UnorderedOperationError`. A later join clears total-order
-guarantees; call `sort_values()` with deterministic tie-breakers before another
-order-dependent operation.
+In pandas, files and in-memory frames have an implicit physical row order.
+DuckPD preserves that familiar behavior without exposing an implementation
+column:
+
+- **CSV and Parquet scans** automatically receive a hidden stable scan ordinal.
+    Their default order matches DuckDB's preserved file scan order, so `head()`,
+    `.iloc`, cumulative operations, and row windows work without `order_by=`.
+- **In-memory snapshots** (`from_pandas`, `from_arrow`) receive the same kind of
+    hidden stable row identity.
+- **SQL and table scans** remain unordered because their source relation does
+    not promise a row sequence. Declare `order_by=` or call `.sort_values()` when
+    using order-dependent operations on those sources.
+
+DuckPD enables DuckDB's `preserve_insertion_order` setting. Single-file Parquet
+scans use DuckDB's native file row number so predicate and projection pushdown
+remain available; other file scans capture the documented scan sequence as a
+hidden ordinal.
+
+### Unordered vs order-dependent operations
+
+- **Unordered operations** run without any sort keys or `order_by`:
+  - Column projections / selections (`df[["a", "b"]]`)
+  - Filtering / Boolean indexing (`df[df["status"] == "active"]`)
+  - Reductions and summary statistics (`.mean()`, `.sum()`, `.count()`, `.min()`, `.max()`, `.nunique()`)
+  - GroupBy aggregations (`df.groupby("category").agg(...)`)
+  - Vectorized column transformations (`.str`, `.dt`, `.assign()`, math operations)
+  - Direct file/table exports (`write_parquet()`, `write_csv()`, `to_arrow_batches()`)
+
+- **Order-dependent operations** require a guaranteed `OrderSpec` and raise
+  `UnorderedOperationError` on unordered plans:
+  - Positional previews and slicing: `head()`, `tail()`, `iloc[start:stop]`
+  - Window and cumulative operations: `rolling()`, `expanding()`, `cumsum()`, `shift()`, `diff()`, `pct_change()`, `rank()`
+  - Deduplication: `drop_duplicates(keep="first" | "last")`
+
+Joins and merges also clear total-order guarantees because relational joins lack
+deterministic tie-breakers for duplicate keys.
+
+### Overriding or establishing order
+
+File order is the default. Specify a domain-specific order only when the source
+sequence is not the sequence your computation needs:
+1. **At read time:** declare `order_by` on the reader:
+   ```python
+   orders = pd.read_parquet("orders.parquet", order_by=["created_at", "order_id"])
+   ```
+2. **In the pipeline:** sort lazily using `.sort_values()`:
+   ```python
+    orders = session.table("orders")  # unordered relation
+    ordered = orders.sort_values(["created_at", "order_id"])
+   ordered.head(10)  # works cleanly
+   ```
 
 Cross-frame alignment requires compatible explicit indexes. DuckPD rejects
 implicit positional alignment instead of guessing from scan order.

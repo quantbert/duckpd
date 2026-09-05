@@ -190,6 +190,7 @@ class Session:
             config["max_temp_directory_size"] = max_temp_directory_size
         if threads is not None:
             config["threads"] = threads
+        config["preserve_insertion_order"] = True
 
         self._connection = duckdb.connect(
             database=str(database),
@@ -541,9 +542,23 @@ class Session:
                     f"Failed to enable remote Parquet access ({type(error).__name__})"
                 ) from None
 
-        source = ParquetSource(paths, hive_partitioning, union_by_name)
+        ordinal_label = f"__duckpd_scan_ordinal_{uuid4().hex}__"
+        source = ParquetSource(
+            paths,
+            hive_partitioning,
+            union_by_name,
+            stable_order_label=ordinal_label,
+            native_order=(
+                len(paths) == 1 and not any(char in paths[0] for char in "*?[]")
+            ),
+        )
         try:
-            plan = self._source_plan(source, index=index, order_by=order_by)
+            plan = self._source_plan(
+                source,
+                index=index,
+                order_by=order_by,
+                stable_order_label=ordinal_label,
+            )
         except duckdb.Error as error:
             if not remote:
                 raise
@@ -566,21 +581,29 @@ class Session:
         from duckpd.frame import DataFrame
 
         self._ensure_open()
-        if isinstance(path, (str, Path)):
-            paths = (str(path),)
-        else:
-            paths = tuple(str(item) for item in path)
+        paths = (
+            (str(path),)
+            if isinstance(path, (str, Path))
+            else tuple(str(item) for item in path)
+        )
         if not paths:
             msg = "At least one CSV path is required"
             raise ValueError(msg)
 
+        ordinal_label = f"__duckpd_scan_ordinal_{uuid4().hex}__"
         source = CsvSource(
             paths,
             header=header,
             delimiter=delimiter,
             auto_detect=auto_detect,
+            stable_order_label=ordinal_label,
         )
-        plan = self._source_plan(source, index=index, order_by=order_by)
+        plan = self._source_plan(
+            source,
+            index=index,
+            order_by=order_by,
+            stable_order_label=ordinal_label,
+        )
         return DataFrame(self, plan)
 
     def attach_postgres(
@@ -1038,6 +1061,12 @@ class Session:
         stable_order_label: str | None = None,
     ) -> ScanPlan | SortPlan:
         columns = self._compiler.inspect_source(source)
+        if (
+            isinstance(source, ParquetSource)
+            and source.native_order
+            and any(column.label == "file_row_number" for column in columns)
+        ):
+            source = replace(source, native_order=False)
         index_labels = self._normalize_labels(index)
         provenance = self._source_provenance(source)
         metadata = source_metadata(

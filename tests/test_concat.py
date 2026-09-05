@@ -14,7 +14,6 @@ from pandas.testing import assert_frame_equal
 import duckpd
 from duckpd.errors import (
     AlignmentError,
-    UnorderedOperationError,
     UnsupportedOperationError,
 )
 
@@ -326,20 +325,21 @@ def test_concat_declared_orders_are_stable_with_duplicate_and_null_keys() -> Non
     assert_frame_equal(combined.collect().reset_index(drop=True), expected)
 
 
-def test_concat_with_unordered_input_rejects_positional_operations(
+def test_concat_preserves_automatic_csv_source_order(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "unordered.csv"
+    path = tmp_path / "ordered.csv"
     pd.DataFrame({"value": [3, 1, 2]}).to_csv(path, index=False)
     session = duckpd.connect()
     combined = duckpd.concat(
         [session.from_pandas(pd.DataFrame({"value": [0]})), session.read_csv(path)]
     )
 
-    with pytest.raises(UnorderedOperationError):
-        combined.iloc[1:]
-    with pytest.raises(UnorderedOperationError):
-        combined["value"].cumsum()
+    assert_frame_equal(
+        cast("duckpd.DataFrame", combined.iloc[1:]).collect().reset_index(drop=True),
+        pd.DataFrame({"value": [3, 1, 2]}),
+    )
+    assert combined["value"].cumsum().collect().tolist() == [0, 3, 4, 6]
 
 
 def test_concat_is_lazy(df1: pd.DataFrame, df2: pd.DataFrame) -> None:

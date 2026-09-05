@@ -40,5 +40,6 @@ specific exception.
 
 Error messages must be actionable, precise, and user-facing:
 - State what condition or contract failed.
-- Explain how the user can resolve the issue (e.g. declare `order_by=` on the data source reader or sort using `.sort_values(...)`).
+- Explain how the user can resolve the issue (e.g. declare `order_by=` when
+	creating a SQL/table source or sort using `.sort_values(...)`).
 - Distinguish API call-site parameters from pipeline configuration (avoid wording that implies an operation accepts an unsupported parameter).

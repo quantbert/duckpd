@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import duckdb
 import pandas as pd
@@ -131,6 +132,40 @@ def test_read_parquet_is_lazy_until_collect(tmp_path: Path) -> None:
     assert_frame_equal(frame.collect(), source)
 
 
+@pytest.mark.parametrize("file_format", ["csv", "parquet"])
+def test_file_scan_preserves_source_order_by_default(
+    tmp_path: Path,
+    file_format: str,
+) -> None:
+    source = pd.DataFrame({"value": [30, 10, 20]})
+    path = tmp_path / f"source.{file_format}"
+    if file_format == "csv":
+        source.to_csv(path, index=False)
+        frame = duckpd.read_csv(path)
+    else:
+        source.to_parquet(path, index=False)
+        frame = duckpd.read_parquet(path)
+
+    assert frame.ordering == ()
+    assert_frame_equal(frame.head(2), source.head(2))
+    assert_frame_equal(
+        cast("duckpd.DataFrame", frame.iloc[1:3]).collect().reset_index(drop=True),
+        source.iloc[1:3].reset_index(drop=True),
+    )
+    assert_frame_equal(frame.cumsum().collect(), source.cumsum())
+
+
+def test_parquet_scan_order_handles_file_row_number_column(tmp_path: Path) -> None:
+    source = pd.DataFrame({"file_row_number": [30, 10, 20], "value": [3, 1, 2]})
+    path = tmp_path / "source.parquet"
+    source.to_parquet(path, index=False)
+
+    frame = duckpd.read_parquet(path)
+
+    assert_frame_equal(frame.head(2), source.head(2))
+    assert_frame_equal(frame.cumsum().collect(), source.cumsum())
+
+
 def test_parquet_explain_analyze_reports_filter_and_projection_pruning(
     tmp_path: Path,
 ) -> None:
@@ -149,7 +184,8 @@ def test_parquet_explain_analyze_reports_filter_and_projection_pruning(
 
     assert "TABLE_SCAN" in analyzed
     assert "PARQUET_SCAN" in analyzed
-    assert "Projections: value" in analyzed
+    assert "value" in analyzed
+    assert "file_row_number" in analyzed
     assert "category='keep'" in analyzed
     assert session.execution_count == 1
 

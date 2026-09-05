@@ -40,9 +40,9 @@ uv run python demo/market_data_demo.py smoke
 - `DuckPD_Order_Index_Window_Workflows.ipynb` is a self-contained offline
   tutorial covering stable snapshot order, deterministic duplicate/top-N ties,
   MultiIndex and label-list `.loc[[...]]`, two-dimensional `.iloc`, cumulative
-  and row windows, external ordering requirements, masked assignment,
-  persistence, and direct DuckDB CSV/Parquet output with pandas differential
-  assertions.
+  and row windows, automatic file order and explicit relational ordering,
+  masked assignment, persistence, and direct DuckDB CSV/Parquet output with
+  pandas differential assertions.
 
 Run market data benchmarks:
 

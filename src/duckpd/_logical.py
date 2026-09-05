@@ -75,6 +75,8 @@ class ParquetSource:
     paths: tuple[str, ...]
     hive_partitioning: bool = False
     union_by_name: bool = False
+    stable_order_label: str | None = None
+    native_order: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ class CsvSource:
     header: bool = True
     delimiter: str = ","
     auto_detect: bool = True
+    stable_order_label: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1036,8 +1036,8 @@ class Series:
         if not ordering.keys:
             raise UnorderedOperationError(
                 "Operation requires a guaranteed row ordering. Specify order_by "
-                "on your data source (e.g. read_parquet(..., order_by=...)) or "
-                "sort first using .sort_values(...)"
+                "when creating a SQL/table source or sort first using "
+                ".sort_values(...)"
             )
         return tuple(
             SortKey(

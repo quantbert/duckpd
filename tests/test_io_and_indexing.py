@@ -229,13 +229,15 @@ def test_iloc_slicing_differential() -> None:
     )
 
 
-def test_iloc_rejects_external_scan_without_declared_order(tmp_path: Path) -> None:
-    path = tmp_path / "unordered.csv"
-    pd.DataFrame({"value": [3, 1, 2]}).to_csv(path, index=False)
+def test_iloc_uses_csv_source_order_without_declared_order(tmp_path: Path) -> None:
+    path = tmp_path / "ordered.csv"
+    source = pd.DataFrame({"value": [3, 1, 2]})
+    source.to_csv(path, index=False)
     frame = dp.read_csv(path)
 
-    with pytest.raises(UnorderedOperationError):
-        frame.iloc[1:3]
+    result = cast("dp.DataFrame", frame.iloc[1:3]).collect().reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(result, source.iloc[1:3].reset_index(drop=True))
 
 
 def test_loc_multiindex_exact_partial_and_null_keys_are_lazy() -> None:
@@ -378,9 +380,14 @@ def test_loc_list_internal_names_cannot_collide(index_label: str) -> None:
 def test_loc_list_unordered_duplicate_source_does_not_claim_total_order(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "duplicate-index.csv"
-    pd.DataFrame({"id": [1, 1, 2], "value": ["a", "b", "c"]}).to_csv(path, index=False)
-    selected = cast("dp.DataFrame", dp.read_csv(path, index="id").loc[[1, 2]])
+    session = dp.connect()
+    selected = cast(
+        "dp.DataFrame",
+        session.sql(
+            "select * from (values (1, 'a'), (1, 'b'), (2, 'c')) t(id, value)",
+            index="id",
+        ).loc[[1, 2]],
+    )
 
     assert selected._plan.metadata.ordering.keys == ()
     with pytest.raises(UnorderedOperationError):

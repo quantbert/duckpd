@@ -17,8 +17,11 @@ individual helper call.
 - Hidden row identity is a relational implementation detail, not a pandas
   index. It is excluded from every public schema and sink.
 - Declared sorts use row identity only as a final stable tie-breaker.
-- External Parquet, CSV, SQL, and table scans remain unordered unless callers
-  provide `order_by` or a future source adapter can prove a stable key.
+- CSV and Parquet scans capture DuckDB's preserved insertion order as hidden
+  row identity. Single-file Parquet uses its native file row number; other file
+  scans use a hidden scan ordinal.
+- SQL and table scans remain unordered unless callers provide `order_by` or a
+  source adapter can prove a stable key.
 - Ordering-sensitive APIs fail before execution when no guarantee exists.
 - Lazy `.loc` row selections return lazy DuckPD frames. Exact pandas dynamic
   Series/DataFrame switching is deferred until bounded eager lookup and index
@@ -33,7 +36,8 @@ individual helper call.
 
 - Snapshot-backed workflows gain deterministic `.iloc`, windows, duplicate
   retention, first-ranked ties, top-N ties, and first-seen group order.
-- External scans retain honest relational semantics and may require explicit
+- File-backed workflows inherit source order without reader boilerplate. SQL
+  and table scans retain relational semantics and may require explicit
   `order_by` where pandas code assumes physical order.
 - Join and union identity propagation must be implemented before DuckPD claims
   pandas-exact output order for those operations.

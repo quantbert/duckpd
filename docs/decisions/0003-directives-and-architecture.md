@@ -47,7 +47,8 @@ Session and executor (collect | Arrow streaming | Parquet/CSV sinks | persist)
 
 ### Ordering and Indexing Contracts
 - Pandas and Arrow inputs are treated as stable snapshots with hidden relational row identity.
-- External Parquet, CSV, SQL, and table scans remain unordered unless `order_by=` is declared.
+- CSV and Parquet scans carry hidden physical scan identity by default. SQL and
+   table scans remain unordered unless `order_by=` is declared.
 - Positional, ranking, cumulative, and window operations require a guaranteed `OrderSpec` and raise `UnorderedOperationError` otherwise.
 - SQL joins clear total ordering guarantees due to non-deterministic duplicate join key ties.
 - Label selections (`.loc`) return lazy handles; dynamic scalar/frame return-type switching is deferred to bounded eager APIs.

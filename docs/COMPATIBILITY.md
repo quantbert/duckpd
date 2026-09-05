@@ -25,7 +25,10 @@ DuckPD is a **lazy relational DataFrame library** powered by DuckDB with a panda
 * **Strict Column Label Uniqueness**:
   Every visible column in a DuckPD DataFrame must have a unique string label. Operations that would produce duplicate column labels (such as `merge` without suffixes or `concat` with overlapping names when `ignore_index=False`) raise `ValueError`.
 * **Ordering Observability**:
-  DuckDB relations are unordered multiset tables unless an explicit sort is declared. Positional and window operations strictly require a guaranteed `OrderSpec`, raising `UnorderedOperationError` before execution when ordering is unknown.
+  CSV and Parquet scans plus pandas and Arrow snapshots carry hidden source
+  order. SQL/table relations and joins are unordered unless order is declared
+  or established. Positional and window operations require a guaranteed
+  `OrderSpec`, raising `UnorderedOperationError` when ordering is unknown.
 
 ---
 
@@ -52,7 +55,7 @@ These functions and methods exist exclusively in DuckPD to control query plannin
 | **`session.table(name)`** | `duckpd.DataFrame` | `pd.read_sql_table(name, con)` | Scans an existing DuckDB catalog table as a lazy DuckPD `DataFrame`. |
 | **`from_pandas(df, ...)`** | `duckpd.DataFrame` | `pd.DataFrame(...)` | Copies a snapshot into an isolated session, appending a hidden stable row ordinal column (`__duckpd_row_ordinal_...__`) to track original row sequence. |
 | **`from_arrow(table, ...)`** | `duckpd.DataFrame` | `pd.DataFrame(...)` | Retains an Arrow table or RecordBatch snapshot, appending a hidden stable row ordinal column (`__duckpd_row_ordinal_...__`) to preserve source sequence. |
-| **`order_by=`** *(reader parameter)* | Metadata | `df.sort_values(...)` | Declares guaranteed physical sort keys at data-source boundaries (`read_parquet`, `read_csv`, `from_pandas`, `from_arrow`) so downstream positional and window operations are valid. |
+| **`order_by=`** *(reader parameter)* | Metadata | `df.sort_values(...)` | Overrides automatic file/snapshot order with domain sort keys, or establishes order for SQL and table sources, so downstream positional and window operations are valid. |
 
 ---
 
@@ -68,7 +71,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | **Cross-frame arithmetic** (`df1 + df2`, `s1 + s2`, and analogous numeric operators) | Aligns both axes, including implicit and duplicate indexes. | **Requires matching, unique explicit indexes** on separate plans and rejects different sessions, index level counts, names, or DuckDB key types with `AlignmentError`. Unknown uniqueness is validated lazily as one-to-one before result production; duplicate indexes raise `MergeError` rather than Cartesian-expanding. DataFrame columns use pandas-style sorted union alignment. | Positional and duplicate-key alignment across lazy relations is ambiguous without materializing index sequences. Explicit unique-index contracts prevent silent row multiplication or mismatches. |
 | **`to_csv(path, ...)`** | Supports `path_or_buf=None` to return a CSV string in memory; accepts many formatting options. | **Direct file export only**: requires a destination `path`, executes via DuckDB `COPY`, and never constructs a pandas DataFrame. Does not support returning a CSV string. | Avoids materializing entire datasets in Python heap memory. For small string serialization, use `df.collect().to_csv()`. |
 | **`df.loc[key]`** | Returns a `Series` if key matches 1 row; `DataFrame` if duplicate keys exist. | **Always returns a lazy `DataFrame`**. Ordered label-list reindexing (`df.loc[[...]]`) requires guaranteed input order. | Keeps plan return types deterministic before execution. |
-| **`df.iloc[start:stop]`** | Slices by physical memory row offset on any frame. | **Requires a guaranteed `OrderSpec`** (`UnorderedOperationError` if unordered). External scans require `order_by=`. | DuckDB relations are unordered multiset tables; positional slicing is non-deterministic without an explicit sort key. |
+| **`df.iloc[start:stop]`** | Slices by physical memory row offset on any frame. | **Requires a guaranteed `OrderSpec`** (`UnorderedOperationError` if unordered). CSV, Parquet, pandas, and Arrow sources provide one automatically; SQL and table scans require `order_by=`. | Positional slicing is non-deterministic when the source provides no row sequence. |
 | **Window & Cumulative Functions** (`cumsum`, `shift`, `diff`, `pct_change`, `rank`, `rolling`, `expanding`) | Assumes physical row order in memory. | **Requires a guaranteed `OrderSpec`**. Raises `UnorderedOperationError` before query execution if ordering is unknown. | Relational window functions require explicit `OVER (ORDER BY ...)` clauses to avoid non-deterministic output. |
 | **`merge()` & `join()` Ordering** | Preserves left/right order arbitrarily; `sort=True` produces an ordered frame. | **Explicitly clears total ordering guarantees** (`OrderSpec()`). | SQL joins lack deterministic tie-breakers for duplicate join keys. Downstream order-dependent operations must explicitly sort. |
 | **`df.replace()` / `s.replace()`** | Allows global replacement dictionaries with arbitrary heterogeneous types across columns. | Validates **type compatibility per column** (`_is_replace_compatible`). Incompatible types (e.g. strings on numeric columns) are skipped. | DuckDB SQL requires uniform return types across branches in a `CASE WHEN` expression; avoids runtime binder type mismatches. |
@@ -89,8 +92,8 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `Session.create_gcs_secret(name, ...)` | **`[DuckPD Extension]`** | HMAC `key_id`/`secret`; optional `scope` | `ObjectStoreSecret` | Creates a session-owned temporary GCS secret for `gcs://` or `gs://` objects. |
 | `AttachedDatabase.table(name, ...)` | **`[DuckPD Extension]`** | `schema`, `index`, `order_by`, `unbounded_scan` | `DataFrame` | Creates a lazy remote-table frame. Each execution sees data committed before that execution; `persist()` is the explicit snapshot boundary. |
 | `AttachedDatabase.refresh_schema()` / `.detach()` | **`[DuckPD Extension]`** | None | `None` | Clears a server extension schema cache, reattaches SQLite, or explicitly releases an attachment. Session shutdown also detaches and removes DuckPD-owned temporary secrets. |
-| `duckpd.read_parquet(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `hive_partitioning`, `union_by_name`, `index`, `order_by` | `DataFrame` | Lazy local or credential-free HTTP/HTTPS/S3/GCS/GS Parquet scan. URL credentials/query parameters are rejected; use a scoped temporary secret. |
-| `duckpd.read_csv(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `header`, `delimiter`, `auto_detect`, `index`, `order_by` | `DataFrame` | Lazy CSV scan via DuckDB reader. Supports `order_by` and `index` declarations. |
+| `duckpd.read_parquet(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `hive_partitioning`, `union_by_name`, `index`, `order_by` | `DataFrame` | Lazy local or credential-free HTTP/HTTPS/S3/GCS/GS Parquet scan with automatic hidden file-order identity. URL credentials/query parameters are rejected; use a scoped temporary secret. |
+| `duckpd.read_csv(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `header`, `delimiter`, `auto_detect`, `index`, `order_by` | `DataFrame` | Lazy CSV scan via DuckDB reader with automatic hidden file-order identity. Supports explicit `order_by` and `index` declarations. |
 | `duckpd.from_pandas(df, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a snapshot into a session, tracking hidden source row identity. |
 | `duckpd.from_arrow(table, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with an appended hidden stable row identity column. |
 | `duckpd.concat(objs, ...)` | **`[Intentional Deviation]`** | `objs`, `axis=0\|1`, `join='outer'\|'inner'`, `ignore_index=False`, `sort=False` | `DataFrame` | Supports `axis=0` (row-wise union) and `axis=1` (column-wise concatenation). Axis 1 optimizes same-plan Series into a single projection and aligns multi-frame inputs via explicit index joins. Rejects duplicate column labels when `ignore_index=False`. |
@@ -272,8 +275,8 @@ result to `narwhals.from_native()`; this remains lazy.
 
 ## 10. Ordering and Resource Contract
 
-* **Hidden Row Identity**: Pandas and Arrow snapshots carry a hidden stable row identity. It is never exposed in columns, indexes, Arrow output, or file sinks.
-* **Deterministic Tie-Breaking**: User sorts append row identity only as a final tie-breaker. External scans do not acquire an artificial order.
+* **Hidden Row Identity**: CSV and Parquet scans plus pandas and Arrow snapshots carry a hidden stable row identity. It is never exposed in columns, indexes, Arrow output, or file sinks.
+* **Deterministic Tie-Breaking**: User sorts append row identity only as a final tie-breaker. SQL and table scans remain unordered unless callers establish an order.
 * **Stable Identity Operations**: `drop_duplicates`, `rank(method="first")`, top-N ties, `groupby(sort=False)`, and grouped rolling alignment use stable row identity where available.
 * **Join Ordering Destruction**: Joins do not claim a total order, including with `sort=True`, because duplicate merge keys lack a stable tie-breaker. Ordering-sensitive follow-up operations must explicitly sort by enough columns to break ties.
 * **Explicit Session Isolation**: Module-level helpers share a weak context-local implicit session. Explicit sessions created via `duckpd.connect(...)` remain isolated, configurable, and authoritative for resource management and cleanup.

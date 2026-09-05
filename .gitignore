@@ -9,6 +9,9 @@ dist/
 *.egg-info/
 *.duckdb.tmp/
 demo/data/
+demo/.tmp/
+demo/language_summary.csv
+demo/stock_news_summary.parquet
 benchmark/data/
 # Byte-compiled / optimized / DLL files
 __pycache__/

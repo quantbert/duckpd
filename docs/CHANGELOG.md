@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
 the [release policy](RELEASES.md).
 
+## 0.1.3 - 2026-09-05
+
+### Changed
+
+- CSV and Parquet readers now preserve file scan order automatically with a
+  hidden stable row identity. Positional, cumulative, ranking, rolling, and
+  first/last-sensitive operations no longer require `order_by=` for file-backed
+  frames; SQL and table relations remain strict.
+- Explicit `order_by=` on file readers now uses the hidden source identity as a
+  final tie-breaker, preserving deterministic file order for duplicate sort
+  keys. Single-file Parquet scans use DuckDB's native row-number metadata so
+  predicate and projection pushdown remain available.
+
+### Fixed
+
+- Parquet scans fall back to a generated source ordinal when a physical column
+  is named `file_row_number`, avoiding a collision with DuckDB's virtual
+  metadata column.
+- `DataFrame.commit()` now preserves automatic Parquet row identity after file
+  replacement, while schema validation ignores only DuckPD's generated
+  identity and continues to validate user-defined hidden index columns.
+
 ## 0.1.2 - 2026-09-05
 
 ### Added
