@@ -33,6 +33,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
   covering laziness, execution boundaries, sessions, indexes, and fallback.
 - [Ordering, indexing, and session contract](decisions/0002-order-index-session-contract.md) — accepted decision
   covering hidden row identity, honest ordering guarantees, lazy `.loc`, and session isolation.
+- [Project directives and relational architecture](decisions/0003-directives-and-architecture.md) — foundational
+  engineering principles, execution invariants, and compiler layer boundaries.
 - [Early design exploration](design/early-ideation.md) — preserved feasibility
   analysis and initial architectural exploration; it is historical context, not
   the current implementation contract.
