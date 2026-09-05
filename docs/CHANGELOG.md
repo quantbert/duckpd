@@ -8,6 +8,21 @@ the [release policy](RELEASES.md).
 
 ## 0.1.3 - 2026-09-05
 
+### Added
+
+- Added native `duckpd.FeatureStore` and `Session.feature_store()` for multi-family
+  feature selection, exact multi-series time alignment, and point-in-time (`ASOF LEFT JOIN`)
+  alignment with `availability_delay` lookahead bias protection.
+- Partition-mirrored local caching: downloads and caches remote Hugging Face Parquet
+  datasets (`hf://datasets/...`) by calendar partition (`year={year}/data.parquet`),
+  pruning irrelevant years and projecting only requested feature columns to minimize disk
+  usage.
+- Transparent JIT remote fetching and partition caching at execution boundaries
+  (`.collect()`, `.to_arrow()`, `.to_arrow_batches()`) with lock-free atomic file replacement.
+- Headless `store.sync()` pre-fetching helper (`SyncReport`) for batch/cluster orchestration.
+- Lazy reference table access (`store.table()`) returning first-class plan-backed `DataFrame`s.
+- Time-windowed batch streaming via `store.feature_batches(window=...)`.
+
 ### Changed
 
 - CSV and Parquet readers now preserve file scan order automatically with a

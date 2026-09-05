@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -955,6 +955,38 @@ class Session:
         source = SqlSource(query)
         plan = self._source_plan(source, index=index, order_by=order_by)
         return DataFrame(self, plan)
+
+    def feature_store(
+        self,
+        source: str | Path,
+        *,
+        cache: str | Path | None = None,
+        token: str | None = None,
+        catalog_path: str | Path | None = None,
+        features: Sequence[str] | Mapping[str, str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        filters: Mapping[str, Sequence[str]] | None = None,
+        alignment: Literal["exact", "point_in_time"] | None = None,
+        spine: str | None = None,
+    ) -> Any:
+        """Create a FeatureStore bound to this session."""
+        from duckpd.featurestore import FeatureStore
+
+        self._ensure_open()
+        return FeatureStore(
+            source=source,
+            session=self,
+            cache=cache,
+            token=token,
+            catalog_path=catalog_path,
+            features=features,
+            start=start,
+            end=end,
+            filters=filters,
+            alignment=alignment,
+            spine=spine,
+        )
 
     def close(self) -> None:
         """Release attachments, temporary secrets, and retained sources."""

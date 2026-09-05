@@ -4,6 +4,7 @@ from importlib.metadata import version
 
 from duckpd._executor import CommitReport, MaterializationReport, ProfileResult
 from duckpd.errors import ConcurrentModificationError, MergeError
+from duckpd.featurestore import FeatureStore, SyncReport
 from duckpd.frame import DataFrame
 from duckpd.groupby import DataFrameGroupBy, SeriesGroupBy
 from duckpd.io import concat, from_arrow, from_pandas, read_csv, read_parquet
@@ -25,6 +26,7 @@ __all__ = [
     "ConcurrentModificationError",
     "DataFrame",
     "DataFrameGroupBy",
+    "FeatureStore",
     "MaterializationReport",
     "MergeError",
     "ObjectStoreSecret",
@@ -32,6 +34,7 @@ __all__ = [
     "Series",
     "SeriesGroupBy",
     "Session",
+    "SyncReport",
     "__version__",
     "concat",
     "connect",

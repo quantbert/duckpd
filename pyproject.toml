@@ -41,6 +41,11 @@ Changelog = "https://github.com/quantbert/duckpd/blob/main/docs/CHANGELOG.md"
 [project.entry-points."narwhals.plugins"]
 duckpd = "duckpd._narwhals_plugin"
 
+[project.optional-dependencies]
+featurestore = [
+    "huggingface-hub>=0.23.0",
+]
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.100",
