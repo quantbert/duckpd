@@ -1,3 +1,4 @@
+.temp/
 .venv/
 .pytest_cache/
 .ruff_cache/
@@ -6,6 +7,7 @@ __pycache__/
 *.py[cod]
 build/
 dist/
+data/
 *.egg-info/
 *.duckdb.tmp/
 demo/data/
