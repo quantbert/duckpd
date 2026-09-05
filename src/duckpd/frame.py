@@ -1977,7 +1977,9 @@ class DataFrame:
             raise ValueError("count must be non-negative")
         if not self._plan.metadata.ordering.keys:
             raise UnorderedOperationError(
-                "head() requires guaranteed row ordering; declare order_by first"
+                "head() requires a guaranteed row ordering. Specify "
+                "order_by on your data source (e.g. read_parquet(..., order_by=...)) "
+                "or sort first using .sort_values(...)"
             )
         return self.limit(count).collect()
 
@@ -2061,8 +2063,10 @@ class DataFrame:
         ordering_keys = self._plan.metadata.ordering.keys
         if keep in {"first", "last"} and not ordering_keys:
             raise UnorderedOperationError(
-                "drop_duplicates keep='first'/'last' requires guaranteed row "
-                "ordering; declare order_by first"
+                "drop_duplicates keep='first'/'last' requires a guaranteed row "
+                "ordering. Specify order_by on your data source "
+                "(e.g. read_parquet(..., order_by=...)) or sort first using "
+                ".sort_values(...)"
             )
 
         # Window-based deduplication
@@ -2199,8 +2203,10 @@ class DataFrame:
             )
         if not self._plan.metadata.ordering.keys:
             raise UnorderedOperationError(
-                "nlargest/nsmallest tie handling requires guaranteed row "
-                "ordering; declare order_by first"
+                "nlargest/nsmallest tie handling requires a guaranteed row "
+                "ordering. Specify order_by on your data source "
+                "(e.g. read_parquet(..., order_by=...)) or sort first using "
+                ".sort_values(...)"
             )
         labels = (columns,) if isinstance(columns, str) else tuple(columns)
         value_direction = (

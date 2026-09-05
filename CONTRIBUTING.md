@@ -35,3 +35,10 @@ differential tests against the supported pandas behavior.
 
 Do not add an automatic pandas fallback. Unsupported behavior should raise a
 specific exception.
+
+### Error Messages and Diagnostics
+
+Error messages must be actionable, precise, and user-facing:
+- State what condition or contract failed.
+- Explain how the user can resolve the issue (e.g. declare `order_by=` on the data source reader or sort using `.sort_values(...)`).
+- Distinguish API call-site parameters from pipeline configuration (avoid wording that implies an operation accepts an unsupported parameter).

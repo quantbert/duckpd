@@ -1034,7 +1034,11 @@ class Series:
         """Validate that the plan has guaranteed ordering and return SortKeys."""
         ordering = self._plan.metadata.ordering
         if not ordering.keys:
-            raise UnorderedOperationError("Operation requires a guaranteed row order")
+            raise UnorderedOperationError(
+                "Operation requires a guaranteed row ordering. Specify order_by "
+                "on your data source (e.g. read_parquet(..., order_by=...)) or "
+                "sort first using .sort_values(...)"
+            )
         return tuple(
             SortKey(
                 ColumnRef(k.column_id),

@@ -64,7 +64,9 @@ class WindowBase:
         ordering = self._parent._plan.metadata.ordering
         if not ordering.keys:
             raise UnorderedOperationError(
-                "Window operations require a guaranteed row order"
+                "Window operations require a guaranteed row ordering. Specify "
+                "order_by on your data source (e.g. read_parquet(..., order_by=...)) "
+                "or sort first using .sort_values(...)"
             )
         return tuple(
             SortKey(

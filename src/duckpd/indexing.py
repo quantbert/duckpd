@@ -355,7 +355,10 @@ class ILocIndexer:
             ordering = self._frame._plan.metadata.ordering
             if not ordering.keys:
                 raise UnorderedOperationError(
-                    "Positional .iloc slicing requires a guaranteed row order"
+                    "Positional .iloc slicing requires a guaranteed row ordering. "
+                    "Specify order_by on your data source "
+                    "(e.g. read_parquet(..., order_by=...)) or sort first using "
+                    ".sort_values(...)"
                 )
             slice_key = cast("slice[int | None, int | None, int | None]", key)
             start_val = slice_key.start

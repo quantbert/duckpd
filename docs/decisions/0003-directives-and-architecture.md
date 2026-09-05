@@ -13,7 +13,7 @@ DuckPD is designed as a lazy relational DataFrame library with a pandas-shaped A
 2. **Stay lazy by default.**
    Transformations build a query plan rather than executing immediately. Execution happens only at explicit and intentional boundaries such as `collect()`, `head()`, Arrow conversion, or direct file/table sinks.
 3. **Never silently fall back to pandas.**
-   Unsupported operations fail explicitly with descriptive errors rather than unexpectedly materializing an entire dataset into Python heap memory. Users can always reason about where computation happens.
+   Unsupported operations fail explicitly with descriptive, actionable errors rather than unexpectedly materializing an entire dataset into Python heap memory. Error messages guide users with concrete remediation steps (such as specifying `order_by` at the data source or using `.sort_values(...)`) without ambiguous parameter suggestions. Users can always reason about where computation happens.
 4. **Push work into DuckDB.**
    Filtering, projection, joins, aggregation, windowing, sorting, and expressions are translated into DuckDB operations so DuckDB can optimize the complete end-to-end query.
 5. **Preserve pandas semantics where compatibility is claimed.**
