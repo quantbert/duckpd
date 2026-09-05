@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sqlite3
 from collections.abc import Sequence
-from typing import Any, ClassVar, TypedDict, cast
+from pathlib import Path
+from typing import Any, TypedDict, cast
 from uuid import uuid4
 
 import duckdb
@@ -11,8 +14,14 @@ import pandas as pd
 import pytest
 
 import duckpd
-from duckpd._logical import RemoteTableSource, ScanPlan, SortPlan, TopKPlan
-from duckpd._quoting import quote_identifier
+from duckpd._logical import (
+    ParquetSource,
+    RemoteTableSource,
+    ScanPlan,
+    SortPlan,
+    TopKPlan,
+)
+from duckpd._quoting import quote_identifier, quote_literal
 from duckpd.errors import (
     MaterializationError,
     RemoteAttachmentError,
@@ -21,13 +30,28 @@ from duckpd.errors import (
 
 
 class _FakeRelation:
-    columns: ClassVar[list[str]] = ["id", "amount"]
-    types: ClassVar[list[str]] = ["INTEGER", "DOUBLE"]
+    def __init__(
+        self,
+        columns: Sequence[str] = ("id", "amount"),
+        types: Sequence[str] = ("INTEGER", "DOUBLE"),
+    ) -> None:
+        self.columns = list(columns)
+        self.types = list(types)
+
+    def sql_query(self) -> str:
+        return "SELECT * FROM remote_source"
+
+    def project(self, *_expressions: object) -> _FakeRelation:
+        return self
 
 
 class _FakeConnection:
     def __init__(
-        self, *, fail_attach: bool = False, fail_inspect: bool = False
+        self,
+        *,
+        fail_attach: bool = False,
+        fail_inspect: bool = False,
+        fail_prefix: str | None = None,
     ) -> None:
         self.queries: list[tuple[str, tuple[object, ...]]] = []
         self.installed: list[str] = []
@@ -35,6 +59,7 @@ class _FakeConnection:
         self.closed = False
         self._fail_attach = fail_attach
         self._fail_inspect = fail_inspect
+        self._fail_prefix = fail_prefix
 
     def install_extension(self, name: str) -> None:
         self.installed.append(name)
@@ -51,12 +76,31 @@ class _FakeConnection:
         self.queries.append((query, values))
         if self._fail_attach and query.startswith("ATTACH"):
             raise duckdb.IOException("connection exposed user and super-secret")
+        if self._fail_prefix is not None and query.startswith(self._fail_prefix):
+            raise duckdb.IOException("operation exposed reader and super-secret")
         return self
+
+    def fetchone(self) -> tuple[str, str]:
+        return ("analyzed_plan", "TABLE_SCAN")
 
     def sql(self, _query: str) -> _FakeRelation:
         if self._fail_inspect:
             raise duckdb.IOException("connection exposed reader and super-secret")
         return _FakeRelation()
+
+    def read_parquet(self, _paths: str | list[str], **_kwargs: object) -> _FakeRelation:
+        if self._fail_inspect:
+            raise duckdb.IOException("source exposed reader and super-secret")
+        return _FakeRelation()
+
+    def from_df(self, value: pd.DataFrame) -> _FakeRelation:
+        return _FakeRelation(
+            [str(column) for column in value.columns],
+            ["BIGINT"] * len(value.columns),
+        )
+
+    def create_function(self, *_args: object, **_kwargs: object) -> None:
+        return None
 
     def close(self) -> None:
         self.closed = True
@@ -66,12 +110,14 @@ def _session_with_fake(
     *,
     fail_attach: bool = False,
     fail_inspect: bool = False,
+    fail_prefix: str | None = None,
 ) -> tuple[duckpd.Session, _FakeConnection]:
     session = duckpd.connect()
     session._connection.close()
     connection = _FakeConnection(
         fail_attach=fail_attach,
         fail_inspect=fail_inspect,
+        fail_prefix=fail_prefix,
     )
     session._connection = cast("Any", connection)
     return session, connection
@@ -148,11 +194,18 @@ def test_structured_postgres_attachment_uses_secret_and_read_only() -> None:
 
     with pytest.raises(MaterializationError, match="no proven transfer bound"):
         frame.collect()
+    with pytest.raises(MaterializationError, match="no proven transfer bound"):
+        frame.explain("analyze")
     assert session.execution_count == 0
+    warn_frame = attachment.table("orders", unbounded_scan="warn")
+    with pytest.warns(RemoteScanWarning, match="no proven transfer bound"):
+        analyzed = warn_frame.explain("analyze")
+    assert "TABLE_SCAN" in analyzed
+    assert session.execution_count == 1
     topk = frame.nlargest(1, "amount")
     with pytest.raises(MaterializationError, match="no proven transfer bound"):
         topk.collect()
-    assert session.execution_count == 0
+    assert session.execution_count == 1
     optimized_topk = session._compiler.optimize(topk._plan).plan
     assert isinstance(optimized_topk, TopKPlan)
     with pytest.raises(MaterializationError, match="no proven transfer bound"):
@@ -183,7 +236,7 @@ def test_mysql_attachment_accepts_existing_secret_and_session_table() -> None:
     assert isinstance(frame._plan.source, RemoteTableSource)
     source = frame._plan.source
     assert source.capabilities.projection
-    assert not source.capabilities.filter
+    assert source.capabilities.filter
     assert not any(query.startswith("CREATE") for query, _ in connection.queries)
     assert 'SECRET "managed_mysql"' in connection.queries[0][0]
 
@@ -254,6 +307,41 @@ def test_attachment_validation_and_failure_redact_credentials() -> None:
     )
 
 
+def test_remote_fragment_and_cross_source_movement_are_explicit() -> None:
+    session, _ = _session_with_fake()
+    attachment = session.attach_postgres(
+        "analytics", secret="managed", unbounded_scan="allow"
+    )
+    remote = attachment.table("orders")
+    session.register_arrow_udf(
+        "adjust",
+        cast("Any", abs),
+        ["DOUBLE"],
+        "DOUBLE",
+    )
+    computed = remote.assign(adjusted=remote["amount"].map_arrow("adjust"))
+    computed_fragment = json.loads(computed.explain("json"))["execution_boundaries"][
+        "source_fragments"
+    ][0]
+    assert "projection" not in computed_fragment["pushdown_candidates"]
+    assert "projection" in computed_fragment["local_required"]
+    planned = remote[remote["amount"] > 0][["id"]].limit(5)
+
+    fragment = json.loads(planned.explain("json"))["execution_boundaries"][
+        "source_fragments"
+    ][0]
+    assert fragment["requested"] == ["projection", "filter", "limit"]
+    assert fragment["pushdown_candidates"] == ["projection", "filter"]
+    assert fragment["local_required"] == ["limit"]
+
+    local = session.from_pandas(pd.DataFrame({"id": [1], "amount": [2.0]}))
+    joined = remote.merge(local, on="id")
+    movement = json.loads(joined.explain("json"))["execution_boundaries"]["movement"]
+    assert movement[0]["kind"] == "cross_source_join"
+    assert movement[0]["strategy"] == "stream_inputs_to_duckdb"
+    assert movement[0]["materializes_in_python"] is False
+
+
 def test_remote_schema_inspection_failure_redacts_credentials() -> None:
     session, _ = _session_with_fake(fail_inspect=True)
     attachment = session.attach_postgres("analytics", secret="managed")
@@ -264,6 +352,181 @@ def test_remote_schema_inspection_failure_redacts_credentials() -> None:
     message = str(captured.value)
     assert "reader" not in message
     assert "super-secret" not in message
+
+
+def test_object_store_secrets_and_remote_parquet_are_credential_safe() -> None:
+    session, connection = _session_with_fake()
+
+    secret = session.create_s3_secret(
+        "warehouse",
+        key_id="reader",
+        secret="super-secret",
+        region="us-east-1",
+        scope="s3://analytics/reports",
+    )
+    query, parameters = connection.queries[-1]
+    assert "reader" not in query
+    assert "super-secret" not in query
+    assert parameters == (
+        "reader",
+        "super-secret",
+        "us-east-1",
+        "s3://analytics/reports",
+    )
+    assert "super-secret" not in repr(secret)
+
+    frame = session.read_parquet("s3://analytics/reports/orders.parquet")
+    assert isinstance(frame._plan, ScanPlan)
+    assert isinstance(frame._plan.source, ParquetSource)
+    assert connection.installed[-1] == "httpfs"
+    assert "super-secret" not in frame.explain("json")
+    gcs = session.create_gcs_secret(
+        "lake", key_id="gcs-reader", secret="gcs-secret", scope="gcs://lake/"
+    )
+    assert gcs.provider == "gcs"
+    gcs.drop()
+    assert gcs.closed
+    with pytest.raises(RemoteAttachmentError, match="not available"):
+        gcs.drop()
+
+    secret.drop()
+    assert secret.closed
+
+
+def test_object_store_secret_validation_and_failures_are_redacted() -> None:
+    session, connection = _session_with_fake()
+
+    chain = session.create_s3_secret(
+        "chain",
+        credential_chain=True,
+        region="us-west-2",
+        endpoint="s3.us-west-2.amazonaws.com",
+    )
+    assert chain.provider == "s3"
+    assert connection.installed[-1] == "aws"
+    assert connection.queries[-1][1] == (
+        "credential_chain",
+        "us-west-2",
+        "s3.us-west-2.amazonaws.com",
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        session.create_s3_secret(
+            "mixed", key_id="key", secret="secret", credential_chain=True
+        )
+    with pytest.raises(ValueError, match="both be non-empty"):
+        session.create_s3_secret("missing", key_id="key")
+    with pytest.raises(ValueError, match="both be non-empty"):
+        session.create_gcs_secret("gcs_missing", key_id="", secret="secret")
+    with pytest.raises(ValueError, match="secret name"):
+        session.create_s3_secret("bad.name", key_id="key", secret="secret")
+    with pytest.raises(ValueError, match="already in use"):
+        session.create_s3_secret("chain", credential_chain=True)
+    with pytest.raises(ValueError, match="credential-free"):
+        session.create_gcs_secret(
+            "bad_scope",
+            key_id="key",
+            secret="secret",
+            scope="s3://wrong-provider/path",
+        )
+
+    failed, _ = _session_with_fake(fail_prefix="CREATE TEMPORARY SECRET")
+    with pytest.raises(RemoteAttachmentError) as captured:
+        failed.create_s3_secret("failure", key_id="reader", secret="super-secret")
+    assert "reader" not in str(captured.value)
+    assert "super-secret" not in str(captured.value)
+
+    drop_failed, _ = _session_with_fake(fail_prefix="DROP SECRET")
+    owned = drop_failed.create_gcs_secret("owned", key_id="key", secret="secret")
+    with pytest.raises(RemoteAttachmentError, match="Failed to drop"):
+        owned.drop()
+
+    session.close()
+    assert chain.closed
+
+
+def test_remote_parquet_inspection_failure_is_redacted() -> None:
+    session, _ = _session_with_fake(fail_inspect=True)
+
+    with pytest.raises(RemoteAttachmentError) as captured:
+        session.read_parquet("https://example.test/data.parquet")
+
+    assert "reader" not in str(captured.value)
+    assert "super-secret" not in str(captured.value)
+
+
+def test_remote_parquet_rejects_credentials_and_unsupported_schemes() -> None:
+    session, _ = _session_with_fake()
+
+    with pytest.raises(ValueError, match="must not contain credentials"):
+        session.read_parquet("https://reader:secret@example.test/data.parquet")
+    with pytest.raises(ValueError, match="must not contain credentials"):
+        session.read_parquet("https://example.test/data.parquet?token=secret")
+    with pytest.raises(ValueError, match="must use http"):
+        session.read_parquet("ftp://example.test/data.parquet")
+    with pytest.raises(ValueError, match="credential-free s3"):
+        session.create_s3_secret(
+            "unsafe",
+            key_id="key",
+            secret="secret",
+            scope="s3://key:secret@bucket/path",
+        )
+
+
+def test_sqlite_attachment_is_read_only_and_refreshes(tmp_path: Path) -> None:
+    path = tmp_path / "source.sqlite"
+    path.touch()
+    session, connection = _session_with_fake()
+
+    attachment = session.attach_sqlite("catalog", path)
+    query, parameters = connection.queries[-1]
+    assert query == (
+        f"ATTACH {quote_literal(str(path.resolve()))} "
+        'AS "catalog" (TYPE sqlite, READ_ONLY)'
+    )
+    assert parameters == ()
+    assert attachment.engine == "sqlite"
+
+    frame = attachment.table("orders")
+    assert isinstance(frame._plan, ScanPlan)
+    source = cast("RemoteTableSource", frame._plan.source)
+    assert source.engine == "sqlite"
+    assert source.capabilities.filter
+
+    attachment.refresh_schema()
+    attach_queries = [sql for sql, _ in connection.queries if sql.startswith("ATTACH")]
+    assert len(attach_queries) == 2
+    attachment.detach()
+    assert attachment.closed
+
+
+def test_sqlite_attachment_reads_fresh_commits_without_write_access(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live.sqlite"
+    writer = sqlite3.connect(path)
+    writer.execute("CREATE TABLE orders(id INTEGER, amount REAL)")
+    writer.execute("INSERT INTO orders VALUES (1, 10.5)")
+    writer.commit()
+
+    with duckpd.connect() as session:
+        attachment = session.attach_sqlite("catalog", path)
+        frame = attachment.table("orders", order_by="id")
+        assert frame.collect()["id"].tolist() == [1]
+
+        writer.execute("INSERT INTO orders VALUES (2, 20.0)")
+        writer.commit()
+        assert frame.collect()["id"].tolist() == [1, 2]
+        with pytest.raises(duckdb.Error):
+            session._connection.execute(
+                'INSERT INTO "catalog"."orders" VALUES (3, 30.0)'
+            )
+
+        writer.execute("ALTER TABLE orders ADD COLUMN note TEXT")
+        writer.commit()
+        attachment.refresh_schema()
+        assert attachment.table("orders").columns == ("id", "amount", "note")
+
+    writer.close()
 
 
 class _RemoteSettings(TypedDict):
@@ -349,20 +612,40 @@ def test_remote_attachment_refresh_visibility_and_read_only(engine: str) -> None
         else f"writer.{quote_identifier(table_name)}"
     )
     writer = _attach_writer(engine, settings)
-    writer.execute(f"CREATE TABLE {qualified_writer}(id INTEGER, amount DOUBLE)")
-    writer.execute(f"INSERT INTO {qualified_writer} VALUES (1, 10.5)")
+    writer.execute(
+        f"CREATE TABLE {qualified_writer}"
+        "(id INTEGER, amount DOUBLE, ignored VARCHAR(16))"
+    )
+    writer.execute(f"INSERT INTO {qualified_writer} VALUES (1, 10.5, 'unused')")
 
     session = duckpd.connect()
     attachment = _attach_reader(engine, session, settings)
     frame = attachment.table(table_name, order_by="id")
     pd.testing.assert_frame_equal(
         frame.collect(),
-        pd.DataFrame({"id": [1], "amount": [10.5]}),
+        pd.DataFrame({"id": [1], "amount": [10.5], "ignored": ["unused"]}),
         check_dtype=False,
     )
+    filtered = attachment.table(table_name)
+    filtered = filtered[filtered["amount"] > 5][["id"]]
+    fragment = json.loads(filtered.explain("json"))["execution_boundaries"][
+        "source_fragments"
+    ][0]
+    assert fragment["pushdown_candidates"] == ["projection", "filter"]
+    assert fragment["local_required"] == []
+    analyzed = filtered.explain("analyze")
+    assert table_name in analyzed
+    physical_plan = analyzed.rsplit("TABLE_SCAN", 1)
+    assert len(physical_plan) == 2
+    scan_details = "\n".join(
+        line.replace("│", "").strip() for line in physical_plan[1].splitlines()
+    )
+    assert "ignored" not in scan_details
+    assert re.search(r"Projections:\s+(?:amount\s+id|id\s+amount)\b", scan_details)
+    assert re.search(r"Filters:\s+amount\s*>\s*5(?:\.0)?\b", scan_details)
 
     writer.execute("BEGIN")
-    writer.execute(f"INSERT INTO {qualified_writer} VALUES (2, 20.0)")
+    writer.execute(f"INSERT INTO {qualified_writer} VALUES (2, 20.0, 'unused')")
     assert frame.collect()["id"].tolist() == [1]
     writer.execute("COMMIT")
     assert frame.collect()["id"].tolist() == [1, 2]
@@ -373,7 +656,7 @@ def test_remote_attachment_refresh_visibility_and_read_only(engine: str) -> None
             if engine == "postgres"
             else f"remote.{quote_identifier(table_name)}"
         )
-        session._connection.execute(f"INSERT INTO {target} VALUES (3, 30.0)")
+        session._connection.execute(f"INSERT INTO {target} VALUES (3, 30.0, 'blocked')")
 
     if engine == "mysql":
         writer.execute(
@@ -383,7 +666,12 @@ def test_remote_attachment_refresh_visibility_and_read_only(engine: str) -> None
     else:
         writer.execute(f"ALTER TABLE {qualified_writer} ADD COLUMN note TEXT")
     attachment.refresh_schema()
-    assert attachment.table(table_name).columns == ("id", "amount", "note")
+    assert attachment.table(table_name).columns == (
+        "id",
+        "amount",
+        "ignored",
+        "note",
+    )
 
     attachment.detach()
     with pytest.raises(RemoteAttachmentError, match="not available"):

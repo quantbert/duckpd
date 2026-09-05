@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -28,7 +29,7 @@ from benchmark.metrics import (
 )
 from benchmark.report import generate_markdown_report
 from benchmark.runner import parse_args, resolve_sizes, resolve_workloads
-from benchmark.tracks import results_json, run_tracks
+from benchmark.tracks import results_json, run_tracks, scorecard
 from benchmark.workloads import WORKLOADS
 
 
@@ -248,9 +249,19 @@ def test_validated_release_tracks(tmp_path: Path) -> None:
             assert engines[name].status == "success"
             assert engines[name].correct is True
             execution_seconds = engines[name].execution_seconds
+            cold_execution_seconds = engines[name].cold_execution_seconds
+            warm_execution_seconds = engines[name].warm_execution_seconds
             peak_rss_bytes = engines[name].peak_rss_bytes
             assert execution_seconds is not None
             assert execution_seconds >= 0
+            assert cold_execution_seconds is not None
+            assert cold_execution_seconds >= 0
+            assert warm_execution_seconds is not None
+            assert warm_execution_seconds >= 0
+            assert (
+                engines[name].cold_cache_policy
+                == "fresh_spawn_process+posix_fadvise_dontneed"
+            )
             assert peak_rss_bytes is not None
             assert peak_rss_bytes > 0
         assert engines["duckpd"].planning_seconds is not None
@@ -261,3 +272,24 @@ def test_validated_release_tracks(tmp_path: Path) -> None:
     encoded = results_json(results)
     assert '"track": "tpch_q1"' in encoded
     assert '"correct": true' in encoded
+    card = scorecard(results)
+    dimensions = cast("dict[str, object]", card["dimensions"])
+    assert set(dimensions) == {
+        "correctness",
+        "safety",
+        "scale",
+        "observability",
+        "performance",
+        "portability",
+        "interoperability",
+        "openness",
+    }
+    entries = {
+        entry["engine"]: entry
+        for entry in cast("list[dict[str, object]]", card["engines"])
+    }
+    assert entries["duckpd"]["correct_tracks"] == 3
+    assert entries["duckpd"]["successful_tracks"] == 3
+    assert entries["duckpd"]["median_cold_seconds"] is not None
+    assert entries["duckpd"]["median_warm_seconds"] is not None
+    assert entries["duckpd"]["transfer_byte_measurements"] == 0

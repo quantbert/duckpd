@@ -25,22 +25,36 @@ separate result-validated tracks:
   regional aggregation;
 - `synthetic_ohlc`: the existing market-data GroupBy workload.
 
-Each DuckPD run records planning time, execution time, process peak RSS, spill
-directory bytes, and result equality against direct DuckDB SQL. Direct DuckDB
-SQL and pandas are timed baselines. Polars and FireDucks are recorded as
-`unavailable` when not installed and `unsupported` when installed without a
-validated adapter; unavailable, unsupported, failed, and OOM outcomes remain in
-the JSON instead of being removed.
+Each engine runs each validated track in its own spawned process. Before the
+first timed execution, the worker flushes the generated source files and applies
+Linux `POSIX_FADV_DONTNEED`; the second execution reuses the same process and
+engine. Both timings use the same end-to-end boundary: construct the operation,
+plan it, execute it, and materialize a pandas result. Both results are validated.
+The recorded peak RSS is therefore the isolated worker's high-water mark,
+sampled after the two timed runs; DuckPD profiling happens afterward and is not
+included in that memory measurement.
+
+DuckPD additionally records optimizer/planning time, spill-directory bytes,
+source bytes read, remotely attributable transfer bytes when available, and
+result equality against direct DuckDB SQL. Transfer bytes remain `null` when
+DuckDB cannot distinguish network transfer from total source I/O; the harness
+never relabels total bytes read as network bytes. Polars and FireDucks are
+recorded as `unavailable` when not installed and `unsupported` when installed
+without a validated adapter; unavailable, unsupported, failed, and OOM outcomes
+remain in the JSON instead of being removed.
 
 ```bash
 make benchmark-tracks
 make optimizer-gate
 ```
 
-The first command writes `benchmark/TRACKS.json`. The second warms and
-alternates optimized/unoptimized plans, checks Arrow result equality, measures
-each optimizer pass by ablation, and fails if optimized median execution exceeds
-the configured regression ratio.
+The first command writes detailed runs to `benchmark/TRACKS.json` and an
+evidence-only competitive scorecard to `benchmark/SCORECARD.json`. The scorecard
+tracks correctness, safety, scale, observability, cold/warm performance,
+portability, interoperability, and openness without inventing scores for missing
+evidence. The optimizer gate alternates optimized/unoptimized plans,
+checks Arrow result equality, measures each pass by ablation, and enforces the
+configured median regression ratio.
 
 
 ### Why this workload favors DuckPD

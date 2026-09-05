@@ -107,11 +107,36 @@ class SourceCapabilities:
     sort: bool = False
 
 
+class SourceOperation(Enum):
+    """Backend-neutral operation that may execute at a source boundary."""
+
+    PROJECTION = "projection"
+    FILTER = "filter"
+    AGGREGATION = "aggregation"
+    JOIN = "join"
+    WINDOW = "window"
+    LIMIT = "limit"
+    SORT = "sort"
+
+
+@dataclass(frozen=True)
+class SourceFragment:
+    """Backend-neutral planning and observability model for one source branch."""
+
+    kind: SourceKind
+    source: str
+    capabilities: SourceCapabilities
+    requested: tuple[SourceOperation, ...]
+    pushdown_candidates: tuple[SourceOperation, ...]
+    local_required: tuple[SourceOperation, ...]
+    estimated_transfer_bytes: int | None = None
+
+
 @dataclass(frozen=True)
 class RemoteTableSource:
     """A table in a read-only database attached through a DuckDB extension."""
 
-    engine: Literal["postgres", "mysql"]
+    engine: Literal["postgres", "mysql", "sqlite"]
     attachment: str
     table: str
     schema: str | None
@@ -374,6 +399,7 @@ class SourceKind(Enum):
     TABLE = "table"
     POSTGRES = "postgres"
     MYSQL = "mysql"
+    SQLITE = "sqlite"
     SQL = "sql"
 
 

@@ -112,6 +112,8 @@ def test_explain_json_exports_rewrites_and_optimized_plan() -> None:
         "fallback": [],
         "materialization": [],
         "remote": [],
+        "source_fragments": [],
+        "movement": [],
     }
     assert [snapshot["name"] for snapshot in data["snapshots"]] == [
         "predicate_pushdown",
@@ -157,3 +159,8 @@ def test_profile_separates_planning_and_execution_timings() -> None:
     assert profile.optimization is not None
     assert duckpd_metrics["planning_seconds"] == profile.planning_seconds
     assert duckpd_metrics["execution_seconds"] == profile.execution_seconds
+    assert duckpd_metrics["remote_boundaries"] == []
+    assert duckpd_metrics["source_fragments"] == []
+    assert duckpd_metrics["movement"] == []
+    assert duckpd_metrics["measured_transfer_bytes"] is None
+    assert duckpd_metrics["measured_source_bytes_read"] == profile.bytes_read

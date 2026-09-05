@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import duckdb
@@ -74,15 +75,42 @@ class ArrowUDFSpec:
 
 
 @dataclass(frozen=True)
+class _ObjectStoreSecretState:
+    name: str
+    provider: Literal["s3", "gcs"]
+
+
+@dataclass(frozen=True)
 class _RemoteAttachmentState:
     alias: str
-    engine: Literal["postgres", "mysql"]
+    engine: Literal["postgres", "mysql", "sqlite"]
     location: str
-    secret_name: str
+    secret_name: str | None
     owns_secret: bool
     default_schema: str | None
     capabilities: SourceCapabilities
     unbounded_scan: Literal["error", "warn", "allow"]
+
+
+@dataclass(frozen=True)
+class ObjectStoreSecret:
+    """A session-owned temporary credential for S3-compatible storage."""
+
+    _session: Session
+    name: str
+    provider: Literal["s3", "gcs"]
+
+    @property
+    def closed(self) -> bool:
+        """Whether the temporary secret has been removed."""
+        return self.name not in self._session._object_store_secrets
+
+    def drop(self) -> None:
+        """Remove the temporary secret from the owning session."""
+        self._session._drop_object_store_secret(self.name)
+
+    def __repr__(self) -> str:
+        return f"ObjectStoreSecret(name={self.name!r}, provider={self.provider!r})"
 
 
 @dataclass(frozen=True)
@@ -91,7 +119,7 @@ class AttachedDatabase:
 
     _session: Session
     alias: str
-    engine: Literal["postgres", "mysql"]
+    engine: Literal["postgres", "mysql", "sqlite"]
 
     @property
     def closed(self) -> bool:
@@ -118,7 +146,7 @@ class AttachedDatabase:
         )
 
     def refresh_schema(self) -> None:
-        """Clear DuckDB's schema cache for this attachment type."""
+        """Refresh schema metadata for this attachment."""
         self._session._refresh_remote_schema(self.alias)
 
     def detach(self) -> None:
@@ -133,7 +161,8 @@ class AttachedDatabase:
 
 
 _POSTGRES_CAPABILITIES = SourceCapabilities(projection=True, filter=True)
-_MYSQL_CAPABILITIES = SourceCapabilities(projection=True)
+_MYSQL_CAPABILITIES = SourceCapabilities(projection=True, filter=True)
+_SQLITE_CAPABILITIES = SourceCapabilities(projection=True, filter=True)
 
 
 class Session:
@@ -171,6 +200,7 @@ class Session:
         self._fallback: Literal["error"] = fallback
         self._arrow_udfs: dict[str, ArrowUDFSpec] = {}
         self._attachments: dict[str, _RemoteAttachmentState] = {}
+        self._object_store_secrets: dict[str, _ObjectStoreSecretState] = {}
         self._last_materialization_report: MaterializationReport | None = None
         self._closed = False
         self._execution_count = 0
@@ -329,6 +359,135 @@ class Session:
         )
         return DataFrame(self, plan)
 
+    def create_s3_secret(
+        self,
+        name: str,
+        *,
+        key_id: str | None = None,
+        secret: str | None = None,
+        region: str | None = None,
+        endpoint: str | None = None,
+        scope: str | None = None,
+        credential_chain: bool = False,
+    ) -> ObjectStoreSecret:
+        """Create a temporary scoped S3 secret without storing credentials in plans."""
+        if credential_chain:
+            if key_id is not None or secret is not None:
+                raise ValueError(
+                    "credential_chain cannot be combined with key_id or secret"
+                )
+            return self._create_object_store_secret(
+                "s3",
+                name,
+                provider="credential_chain",
+                region=region,
+                endpoint=endpoint,
+                scope=scope,
+            )
+        if not key_id or not secret:
+            raise ValueError("S3 key_id and secret must both be non-empty")
+        return self._create_object_store_secret(
+            "s3",
+            name,
+            key_id=key_id,
+            secret=secret,
+            region=region,
+            endpoint=endpoint,
+            scope=scope,
+        )
+
+    def create_gcs_secret(
+        self,
+        name: str,
+        *,
+        key_id: str,
+        secret: str,
+        scope: str | None = None,
+    ) -> ObjectStoreSecret:
+        """Create a temporary scoped GCS HMAC secret."""
+        if not key_id or not secret:
+            raise ValueError("GCS key_id and secret must both be non-empty")
+        return self._create_object_store_secret(
+            "gcs", name, key_id=key_id, secret=secret, scope=scope
+        )
+
+    def _create_object_store_secret(
+        self,
+        secret_type: Literal["s3", "gcs"],
+        name: str,
+        *,
+        key_id: str | None = None,
+        secret: str | None = None,
+        provider: Literal["credential_chain"] | None = None,
+        region: str | None = None,
+        endpoint: str | None = None,
+        scope: str | None = None,
+    ) -> ObjectStoreSecret:
+        self._ensure_open()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError(
+                "secret name must start with a letter or underscore and contain "
+                "only letters, digits, and underscores"
+            )
+        if name in self._object_store_secrets:
+            raise ValueError(f"object-store secret {name!r} is already in use")
+        if scope is not None:
+            parsed_scope = urlsplit(scope)
+            expected_schemes = {"s3"} if secret_type == "s3" else {"gcs", "gs"}
+            if (
+                parsed_scope.scheme not in expected_schemes
+                or not parsed_scope.netloc
+                or parsed_scope.username is not None
+                or parsed_scope.query
+                or parsed_scope.fragment
+            ):
+                schemes = " or ".join(f"{item}://" for item in sorted(expected_schemes))
+                raise ValueError(f"scope must be a credential-free {schemes} URI")
+
+        extension = "aws" if provider == "credential_chain" else "httpfs"
+        quoted_name = quote_identifier(name)
+        fields = [f"TYPE {secret_type}"]
+        parameters: list[object] = []
+        for field, value in (
+            ("PROVIDER", provider),
+            ("KEY_ID", key_id),
+            ("SECRET", secret),
+            ("REGION", region),
+            ("ENDPOINT", endpoint),
+            ("SCOPE", scope),
+        ):
+            if value is not None:
+                fields.append(f"{field} ?")
+                parameters.append(value)
+        try:
+            self._connection.install_extension(extension)
+            self._connection.load_extension(extension)
+            self._connection.execute(
+                f"CREATE TEMPORARY SECRET {quoted_name} ({', '.join(fields)})",
+                parameters,
+            )
+        except duckdb.Error as error:
+            raise RemoteAttachmentError(
+                f"Failed to create {secret_type} secret {name!r} "
+                f"({type(error).__name__})"
+            ) from None
+        self._object_store_secrets[name] = _ObjectStoreSecretState(name, secret_type)
+        return ObjectStoreSecret(self, name, secret_type)
+
+    def _drop_object_store_secret(self, name: str) -> None:
+        self._ensure_open()
+        if name not in self._object_store_secrets:
+            raise RemoteAttachmentError(
+                f"Object-store secret {name!r} is not available"
+            )
+        try:
+            self._connection.execute(f"DROP SECRET {quote_identifier(name)}")
+        except duckdb.Error as error:
+            raise RemoteAttachmentError(
+                f"Failed to drop object-store secret {name!r} ({type(error).__name__})"
+            ) from None
+        del self._object_store_secrets[name]
+
     def read_parquet(
         self,
         path: str | Path | Sequence[str | Path],
@@ -338,7 +497,7 @@ class Session:
         index: str | Sequence[str] | None = None,
         order_by: str | Sequence[str] | None = None,
     ) -> DataFrame:
-        """Create a lazy scan over one or more Parquet files."""
+        """Create a lazy scan over local, HTTP, S3, or GCS Parquet files."""
         from duckpd.frame import DataFrame
 
         self._ensure_open()
@@ -353,9 +512,44 @@ class Session:
         if not paths:
             msg = "At least one Parquet path is required"
             raise ValueError(msg)
+        remote = False
+        for item in paths:
+            if "://" not in item:
+                continue
+            parsed = urlsplit(item)
+            if parsed.scheme not in {"http", "https", "s3", "gcs", "gs"}:
+                raise ValueError(
+                    "Remote Parquet paths must use http, https, s3, gcs, or gs"
+                )
+            if (
+                parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Remote Parquet paths must not contain credentials, query "
+                    "parameters, or fragments; configure a scoped secret instead"
+                )
+            remote = True
+        if remote:
+            try:
+                self._connection.install_extension("httpfs")
+                self._connection.load_extension("httpfs")
+            except duckdb.Error as error:
+                raise RemoteAttachmentError(
+                    f"Failed to enable remote Parquet access ({type(error).__name__})"
+                ) from None
 
         source = ParquetSource(paths, hive_partitioning, union_by_name)
-        plan = self._source_plan(source, index=index, order_by=order_by)
+        try:
+            plan = self._source_plan(source, index=index, order_by=order_by)
+        except duckdb.Error as error:
+            if not remote:
+                raise
+            raise RemoteAttachmentError(
+                f"Failed to inspect remote Parquet source ({type(error).__name__})"
+            ) from None
         return DataFrame(self, plan)
 
     def read_csv(
@@ -445,6 +639,68 @@ class Session:
             unbounded_scan=unbounded_scan,
         )
 
+    def attach_sqlite(
+        self,
+        alias: str,
+        path: str | Path,
+        *,
+        unbounded_scan: Literal["error", "warn", "allow"] = "allow",
+    ) -> AttachedDatabase:
+        """Attach an existing SQLite database through DuckDB in read-only mode."""
+        self._ensure_open()
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            raise ValueError("SQLite attachment path must be an existing file")
+        return self._attach_sqlite(alias, resolved, unbounded_scan=unbounded_scan)
+
+    def _attach_sqlite(
+        self,
+        alias: str,
+        path: Path,
+        *,
+        unbounded_scan: Literal["error", "warn", "allow"],
+    ) -> AttachedDatabase:
+        self._validate_attachment(alias, unbounded_scan)
+        quoted_alias = quote_identifier(alias)
+        try:
+            self._connection.install_extension("sqlite")
+            self._connection.load_extension("sqlite")
+            self._connection.execute(
+                f"ATTACH {quote_literal(str(path))} AS {quoted_alias} "
+                "(TYPE sqlite, READ_ONLY)"
+            )
+        except duckdb.Error as error:
+            raise RemoteAttachmentError(
+                f"Failed to attach SQLite database as {alias!r} "
+                f"({type(error).__name__})"
+            ) from None
+        self._attachments[alias] = _RemoteAttachmentState(
+            alias=alias,
+            engine="sqlite",
+            location=str(path),
+            secret_name=None,
+            owns_secret=False,
+            default_schema=None,
+            capabilities=_SQLITE_CAPABILITIES,
+            unbounded_scan=unbounded_scan,
+        )
+        return AttachedDatabase(self, alias, "sqlite")
+
+    def _validate_attachment(
+        self,
+        alias: str,
+        unbounded_scan: Literal["error", "warn", "allow"],
+    ) -> None:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+            raise ValueError(
+                "attachment alias must start with a letter or underscore and "
+                "contain only letters, digits, and underscores"
+            )
+        if alias in self._attachments:
+            raise ValueError(f"attachment alias {alias!r} is already in use")
+        if unbounded_scan not in {"error", "warn", "allow"}:
+            raise ValueError("unbounded_scan must be 'error', 'warn', or 'allow'")
+
     def _attach_remote(
         self,
         engine: Literal["postgres", "mysql"],
@@ -461,15 +717,7 @@ class Session:
         unbounded_scan: Literal["error", "warn", "allow"],
     ) -> AttachedDatabase:
         self._ensure_open()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
-            raise ValueError(
-                "attachment alias must start with a letter or underscore and "
-                "contain only letters, digits, and underscores"
-            )
-        if alias in self._attachments:
-            raise ValueError(f"attachment alias {alias!r} is already in use")
-        if unbounded_scan not in {"error", "warn", "allow"}:
-            raise ValueError("unbounded_scan must be 'error', 'warn', or 'allow'")
+        self._validate_attachment(alias, unbounded_scan)
         if schema is not None and not schema:
             raise ValueError("schema must be non-empty when provided")
 
@@ -625,6 +873,16 @@ class Session:
             raise RemoteAttachmentError(
                 f"Remote attachment {alias!r} is not available"
             ) from None
+        if attachment.engine == "sqlite":
+            location = Path(attachment.location)
+            self._connection.execute(f"DETACH {quote_identifier(alias)}")
+            del self._attachments[alias]
+            self._attach_sqlite(
+                alias,
+                location,
+                unbounded_scan=attachment.unbounded_scan,
+            )
+            return
         function = (
             "pg_clear_cache" if attachment.engine == "postgres" else "mysql_clear_cache"
         )
@@ -646,7 +904,7 @@ class Session:
             ) from None
         try:
             self._connection.execute(f"DETACH {quote_identifier(alias)}")
-            if attachment.owns_secret:
+            if attachment.owns_secret and attachment.secret_name is not None:
                 self._connection.execute(
                     f"DROP SECRET {quote_identifier(attachment.secret_name)}"
                 )
@@ -725,11 +983,15 @@ class Session:
         for attachment in self._attachments.values():
             with suppress(duckdb.Error):
                 self._connection.execute(f"DETACH {quote_identifier(attachment.alias)}")
-            if attachment.owns_secret:
+            if attachment.owns_secret and attachment.secret_name is not None:
                 with suppress(duckdb.Error):
                     self._connection.execute(
                         f"DROP SECRET {quote_identifier(attachment.secret_name)}"
                     )
+        for name in self._object_store_secrets:
+            with suppress(duckdb.Error):
+                self._connection.execute(f"DROP SECRET {quote_identifier(name)}")
+        self._object_store_secrets.clear()
         self._attachments.clear()
         self._registered_sources.clear()
         self._connection.close()
@@ -889,9 +1151,12 @@ class Session:
                 fingerprint=fingerprint,
             )
         if isinstance(source, RemoteTableSource):
-            kind = (
-                SourceKind.POSTGRES if source.engine == "postgres" else SourceKind.MYSQL
-            )
+            if source.engine == "postgres":
+                kind = SourceKind.POSTGRES
+            elif source.engine == "mysql":
+                kind = SourceKind.MYSQL
+            else:
+                kind = SourceKind.SQLITE
             location = (
                 f"{sanitize_source_location(source.location)}/{source.qualified_name}"
             )

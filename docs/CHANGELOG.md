@@ -14,6 +14,16 @@ the [release policy](RELEASES.md).
   `SeriesGroupBy.rolling()` compile group keys into DuckDB window partitions,
   preserve grouped result indexes and ordering, and support lazy assignment
   back to the originating frame without materialization.
+- Credential-safe HTTP/S3/GCS Parquet scans, scoped temporary S3/GCS secrets,
+  and read-only SQLite attachments with session-owned cleanup.
+- Backend-neutral source-fragment planning, conservative pushdown-candidate and
+  required-local-work reporting, cross-source movement plans, and source-I/O
+  profile metrics.
+- Executing `explain("analyze")` output for projection, predicate, and Parquet
+  row-group pruning evidence, guarded by the remote scan policy.
+- Release checks now validate project/changelog metadata before publishing an
+  already-versioned immutable release; validated benchmark tracks report source
+  bytes and preserve unknown remote-transfer metrics as `null`.
 
 ## 0.1.0a1 - 2026-09-04
 

@@ -38,11 +38,11 @@ Grouped moving averages remain aligned to their originating ticker rows without
 materialization. `head()` materializes only a bounded pandas preview, while
 `write_parquet()` executes the full pipeline directly in DuckDB.
 
-## Query PostgreSQL and MySQL without loading them into pandas
+## Query remote Parquet, PostgreSQL, MySQL, and SQLite without pandas
 
-DuckPD attaches remote databases through DuckDB's PostgreSQL and MySQL
-extensions. The attachment is read-only, table access is lazy, and credentials
-do not appear in logical plans, `explain()` output, exceptions, or reprs.
+DuckPD reads HTTP/S3/GCS Parquet through DuckDB and attaches PostgreSQL, MySQL,
+and SQLite databases read-only. Access stays lazy, and credentials do not appear
+in logical plans, `explain()` output, exceptions, or reprs.
 
 ```python
 import os
@@ -93,8 +93,11 @@ with pd.connect() as session:
     products = catalog.table("products")
 ```
 
-See [Read-only remote databases](docs/GETTING_STARTED.md#read-only-remote-databases)
-for secrets, schema refresh, cleanup, and scan-policy details.
+Private S3/GCS data uses session-owned, scoped temporary secrets; SQLite files
+use `attach_sqlite()`. See [Remote Parquet and read-only attached
+databases](docs/GETTING_STARTED.md#remote-parquet-on-http-s3-and-gcs) for
+credential-chain/HMAC setup, schema refresh, cleanup, explain modes, source
+fragments, cross-source movement, and scan-policy details.
 
 ## Project directives
 
@@ -121,8 +124,8 @@ The long-term ambition is broad pandas API coverage **where those APIs can be im
 
 ## Current capabilities
 
-- Lazy Parquet, CSV, pandas, Arrow, DuckDB table, read-only SQL, and read-only
-  PostgreSQL/MySQL attachment sources.
+- Lazy local/HTTP/S3/GCS Parquet, CSV, pandas, Arrow, DuckDB table, read-only
+  SQL, and read-only PostgreSQL/MySQL/SQLite attachment sources.
 - Column selection, boolean filtering, arithmetic expressions, `assign`,
 `sort_values`, `limit`, and distinct/drop_duplicates deduplication.
 - Relational DataFrame joins (`merge`, `join`) supporting `inner`, `left`, `right`,
@@ -150,8 +153,9 @@ ordered concatenation, and metadata-preserving `persist()`.
 module-level helpers to participate in the same lazy plan.
 - Explicit execution boundaries: pandas collection (`collect`, `to_pandas`),
 bounded `head`, Arrow tables and streaming record batches (`to_arrow_batches`),
-plan inspection (`explain`, `explain_write`), and direct DuckDB Parquet
-(`write_parquet`) and CSV (`write_csv`, `to_csv`) writes.
+plan inspection (`explain`, `explain_write`), executing analysis
+(`explain("analyze")`), and direct DuckDB Parquet (`write_parquet`) and CSV
+(`write_csv`, `to_csv`) writes.
 
 ## Supported pandas API Coverage
 
@@ -160,7 +164,7 @@ DuckPD maps pandas semantics directly to DuckDB's vectorized analytical engine:
 
 | API Category                          | Supported Methods &amp; Operations                                                                                                                                   | Execution Model                                               |
 | :------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------- |
-| **I/O &amp; Data Loading**            | `read_parquet()`, `read_csv()`, `from_pandas()`, `from_arrow()`, `Session.sql()`, `Session.attach_postgres()`, `Session.attach_mysql()`, `connect()` | **Lazy** (scans metadata / registers source)                  |
+| **I/O &amp; Data Loading**            | `read_parquet()` (local/HTTP/S3/GCS), `read_csv()`, `from_pandas()`, `from_arrow()`, `Session.sql()`, `Session.create_s3_secret()`, `Session.create_gcs_secret()`, `Session.attach_postgres()`, `Session.attach_mysql()`, `Session.attach_sqlite()`, `connect()` | **Lazy** (scans metadata / registers source)                  |
 | **Transformations &amp; Projections** | `df[cols]`, `df[bool_filter]`, `assign()`, `sort_values()`, `limit()`, `drop_duplicates()`, `clip()`, `replace()`, `set_index()`, `reset_index()`, `df.loc[]`, `df.iloc[]` | **Lazy** (appends to logical query graph)                     |
 | **Joins &amp; Merges**                | `merge()`, `join()` (`inner`, `left`, `right`, `outer`, `cross`, custom suffixes, `validate=`)                                                                       | **Lazy** (relational hash join, pre-flight cardinality check) |
 | **Concatenation**                     | `duckpd.concat()` (multi-frame row union, schema alignment, null padding, defined numeric coercion, stable order synthesis)                                          | **Lazy** (union with projection padding)                      |

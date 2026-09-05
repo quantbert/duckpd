@@ -26,12 +26,14 @@ import pyarrow.parquet as pq
 
 from duckpd._logical import (
     AggregatePlan,
+    BinaryExpression,
     ColumnId,
     ColumnRef,
     FilterPlan,
     JoinPlan,
     JoinType,
     LimitPlan,
+    LiteralValue,
     LocIndexPlan,
     PandasSource,
     ParquetSource,
@@ -41,9 +43,14 @@ from duckpd._logical import (
     ScanPlan,
     SortKey,
     SortPlan,
+    SourceCapabilities,
+    SourceFragment,
     SourceKind,
+    SourceOperation,
     TopKPlan,
+    UnaryExpression,
     UnionPlan,
+    expression_metadata,
     sanitize_source_location,
 )
 from duckpd._optimizer import plan_to_dict
@@ -139,6 +146,10 @@ class ProfileResult:
     raw: dict[str, Any]
     planning_seconds: float = 0.0
     execution_seconds: float = 0.0
+    remote_boundaries: tuple[dict[str, object], ...] = ()
+    source_fragments: tuple[dict[str, object], ...] = ()
+    movement_plans: tuple[dict[str, object], ...] = ()
+    measured_transfer_bytes: int | None = None
     optimization: dict[str, Any] | None = None
     fallback_boundaries: tuple[dict[str, object], ...] = ()
     materialization_boundaries: tuple[dict[str, object], ...] = ()
@@ -150,6 +161,11 @@ class ProfileResult:
             "duckpd": {
                 "planning_seconds": self.planning_seconds,
                 "execution_seconds": self.execution_seconds,
+                "remote_boundaries": list(self.remote_boundaries),
+                "source_fragments": list(self.source_fragments),
+                "movement": list(self.movement_plans),
+                "measured_transfer_bytes": self.measured_transfer_bytes,
+                "measured_source_bytes_read": self.bytes_read,
                 "optimization": self.optimization,
                 "fallback_policy": "error",
                 "fallback_boundaries": list(self.fallback_boundaries),
@@ -398,6 +414,187 @@ def _fallback_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
 
     visit(plan_to_dict(plan))
     return tuple(found.values())
+
+
+_SOURCE_OPERATION_ORDER = tuple(SourceOperation)
+_REMOTE_PARQUET_CAPABILITIES = SourceCapabilities(projection=True, filter=True)
+
+
+def _source_filter_expression(expression: object) -> bool:
+    """Accept only scalar operators known safe for source predicate pushdown."""
+    if isinstance(expression, (ColumnRef, LiteralValue)):
+        return True
+    if isinstance(expression, BinaryExpression):
+        return _source_filter_expression(expression.left) and _source_filter_expression(
+            expression.right
+        )
+    if isinstance(expression, UnaryExpression):
+        return _source_filter_expression(expression.operand)
+    return False
+
+
+def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
+    """Split remote branches into pushdown candidates and required local work."""
+    fragments: list[SourceFragment] = []
+
+    def visit(
+        node: LogicalPlan,
+        requested: frozenset[SourceOperation],
+        blocked: frozenset[SourceOperation],
+    ) -> None:
+        if isinstance(node, ScanPlan):
+            source = node.source
+            if isinstance(source, RemoteTableSource):
+                kind = node.metadata.provenance.kind
+                source_name = source.qualified_name
+                capabilities = source.capabilities
+            elif isinstance(source, ParquetSource) and any(
+                "://" in path for path in source.paths
+            ):
+                kind = SourceKind.PARQUET
+                source_name = ",".join(
+                    sanitize_source_location(path) for path in source.paths
+                )
+                capabilities = _REMOTE_PARQUET_CAPABILITIES
+            else:
+                return
+            ordered = tuple(
+                operation
+                for operation in _SOURCE_OPERATION_ORDER
+                if operation in requested
+            )
+            pushdown_candidates = tuple(
+                operation
+                for operation in ordered
+                if operation not in blocked and getattr(capabilities, operation.value)
+            )
+            local_required = tuple(
+                operation
+                for operation in ordered
+                if operation in blocked or not getattr(capabilities, operation.value)
+            )
+            fragments.append(
+                SourceFragment(
+                    kind=kind,
+                    source=source_name,
+                    capabilities=capabilities,
+                    requested=ordered,
+                    pushdown_candidates=pushdown_candidates,
+                    local_required=local_required,
+                )
+            )
+            return
+        if isinstance(node, JoinPlan):
+            branch_operations = requested | {SourceOperation.JOIN}
+            visit(node.left, branch_operations, blocked)
+            visit(node.right, branch_operations, blocked)
+            return
+        if isinstance(node, UnionPlan):
+            for item in node.inputs:
+                visit(item, requested, blocked)
+            return
+
+        operations: set[SourceOperation] = set()
+        blocked_operations: set[SourceOperation] = set()
+        if isinstance(node, ProjectPlan):
+            operations.add(SourceOperation.PROJECTION)
+            if not all(
+                isinstance(item.expression, ColumnRef) for item in node.projections
+            ):
+                blocked_operations.add(SourceOperation.PROJECTION)
+            if any(
+                expression_metadata(item.expression).has_window
+                for item in node.projections
+            ):
+                operations.add(SourceOperation.WINDOW)
+        elif isinstance(node, FilterPlan):
+            operations.add(SourceOperation.FILTER)
+            if not _source_filter_expression(node.predicate):
+                blocked_operations.add(SourceOperation.FILTER)
+        elif isinstance(node, AggregatePlan):
+            operations.add(SourceOperation.AGGREGATION)
+        elif isinstance(node, LimitPlan):
+            operations.add(SourceOperation.LIMIT)
+        elif isinstance(node, TopKPlan):
+            operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
+        elif isinstance(node, SortPlan):
+            operations.add(SourceOperation.SORT)
+        visit(
+            node.input,
+            requested | operations,
+            blocked | blocked_operations,
+        )
+
+    visit(plan, frozenset(), frozenset())
+    return tuple(fragments)
+
+
+def _fragment_to_dict(fragment: SourceFragment) -> dict[str, object]:
+    return {
+        "kind": fragment.kind.value,
+        "source": fragment.source,
+        "requested": [operation.value for operation in fragment.requested],
+        "pushdown_candidates": [
+            operation.value for operation in fragment.pushdown_candidates
+        ],
+        "local_required": [operation.value for operation in fragment.local_required],
+        "estimated_transfer_bytes": fragment.estimated_transfer_bytes,
+    }
+
+
+def _movement_plans(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
+    """Describe joins whose inputs must meet inside the owning DuckDB session."""
+    movements: list[dict[str, object]] = []
+
+    def sources(node: LogicalPlan) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        if isinstance(node, ScanPlan):
+            provenance = node.metadata.provenance
+            return (
+                (
+                    provenance.kind.value,
+                    tuple(
+                        sanitize_source_location(location)
+                        for location in provenance.locations
+                    ),
+                ),
+            )
+        if isinstance(node, JoinPlan):
+            return (*sources(node.left), *sources(node.right))
+        if isinstance(node, UnionPlan):
+            return tuple(item for child in node.inputs for item in sources(child))
+        return sources(node.input)
+
+    def visit(node: LogicalPlan) -> None:
+        if isinstance(node, JoinPlan):
+            left = sources(node.left)
+            right = sources(node.right)
+            if set(left) != set(right):
+                movements.append(
+                    {
+                        "kind": "cross_source_join",
+                        "strategy": "stream_inputs_to_duckdb",
+                        "left": [
+                            {"kind": kind, "locations": list(locations)}
+                            for kind, locations in left
+                        ],
+                        "right": [
+                            {"kind": kind, "locations": list(locations)}
+                            for kind, locations in right
+                        ],
+                        "estimated_transfer_bytes": None,
+                        "materializes_in_python": False,
+                    }
+                )
+            visit(node.left)
+            visit(node.right)
+        elif isinstance(node, UnionPlan):
+            for item in node.inputs:
+                visit(item)
+        elif not isinstance(node, ScanPlan):
+            visit(node.input)
+
+    visit(plan)
+    return tuple(movements)
 
 
 def _remote_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
@@ -1061,7 +1258,9 @@ class Executor:
         self,
         plan: LogicalPlan,
         *,
-        mode: Literal["all", "logical", "optimized", "json", "sql", "physical"] = "all",
+        mode: Literal[
+            "all", "logical", "optimized", "json", "sql", "physical", "analyze"
+        ] = "all",
     ) -> str:
         optimization = self._compiler.optimize(plan)
         logical = json.dumps(plan_to_dict(plan), indent=2)
@@ -1078,10 +1277,17 @@ class Executor:
             if remote_boundaries
             else "none"
         )
+        source_fragments = tuple(
+            _fragment_to_dict(fragment)
+            for fragment in _source_fragments(optimization.plan)
+        )
+        movement_plans = _movement_plans(optimization.plan)
         boundaries = (
             f"Fallback boundaries: {fallback_text} (policy=error)\n"
             "Materialization boundaries: none in the logical plan\n"
-            f"Remote source boundaries: {remote_text}"
+            f"Remote source boundaries: {remote_text}\n"
+            f"Source fragments: {json.dumps(source_fragments, sort_keys=True)}\n"
+            f"Cross-source movement: {json.dumps(movement_plans, sort_keys=True)}"
         )
         if mode == "logical":
             return f"{boundaries}\nDuckPD logical plan:\n{logical}"
@@ -1094,8 +1300,12 @@ class Executor:
                 "fallback": list(fallback_boundaries),
                 "materialization": [],
                 "remote": list(remote_boundaries),
+                "source_fragments": list(source_fragments),
+                "movement": list(movement_plans),
             }
             return json.dumps(payload, indent=2)
+        if mode == "analyze":
+            self._validate_execution(optimization.plan)
 
         compiled = self._compiler.compile(optimization.plan, optimize=False)
         relation = compiled.relation
@@ -1106,6 +1316,14 @@ class Executor:
         if mode == "physical":
             physical = _redact_plan_text(relation.explain(), plan)
             return f"{boundaries}\nDuckDB physical plan:\n{physical}"
+        if mode == "analyze":
+            row = self._session._connection.execute(
+                f"EXPLAIN ANALYZE {relation.sql_query()}"
+            ).fetchone()
+            if row is None:
+                raise MaterializationError("EXPLAIN ANALYZE returned no plan")
+            analyzed = _redact_plan_text(str(row[1]), plan)
+            return f"{boundaries}\nDuckDB analyzed physical plan:\n{analyzed}"
         if mode == "all":
             changed = [
                 snapshot.name for snapshot in optimization.snapshots if snapshot.changed
@@ -1122,7 +1340,7 @@ class Executor:
             )
         msg = (
             f"Unknown explain mode: {mode!r}; expected 'all', 'logical', "
-            "'optimized', 'json', 'sql', or 'physical'"
+            "'optimized', 'json', 'sql', 'physical', or 'analyze'"
         )
         raise ValueError(msg)
 
@@ -1229,6 +1447,13 @@ class Executor:
             execution_seconds=execution_seconds,
             optimization=optimization.to_dict(),
             fallback_boundaries=_fallback_boundaries(plan),
+            remote_boundaries=_remote_boundaries(plan),
+            source_fragments=tuple(
+                _fragment_to_dict(fragment)
+                for fragment in _source_fragments(optimization.plan)
+            ),
+            movement_plans=_movement_plans(optimization.plan),
+            measured_transfer_bytes=None,
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:

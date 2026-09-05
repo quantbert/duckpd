@@ -131,6 +131,29 @@ def test_read_parquet_is_lazy_until_collect(tmp_path: Path) -> None:
     assert_frame_equal(frame.collect(), source)
 
 
+def test_parquet_explain_analyze_reports_filter_and_projection_pruning(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pruned.parquet"
+    pd.DataFrame(
+        {
+            "category": ["skip"] * 1000 + ["keep"] * 10,
+            "value": range(1010),
+            "unused": ["payload"] * 1010,
+        }
+    ).to_parquet(path, index=False, row_group_size=100)
+    session = duckpd.connect()
+    frame = session.read_parquet(path)
+
+    analyzed = frame[frame["category"] == "keep"][["value"]].explain("analyze")
+
+    assert "TABLE_SCAN" in analyzed
+    assert "PARQUET_SCAN" in analyzed
+    assert "Projections: value" in analyzed
+    assert "category='keep'" in analyzed
+    assert session.execution_count == 1
+
+
 def test_module_helper_owns_an_implicit_session() -> None:
     source = pd.DataFrame({"value": [1]})
 

@@ -9,8 +9,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 ## User guides
 
 - [Getting started](GETTING_STARTED.md) — installation, execution boundaries,
-  ordering, resource-bounded sessions, and read-only PostgreSQL/MySQL
-  attachments.
+  ordering, resource-bounded sessions, HTTP/S3/GCS Parquet, and read-only
+  PostgreSQL/MySQL/SQLite attachments.
 - [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
   supported arguments, intentional deviations, and unsupported behavior.
 

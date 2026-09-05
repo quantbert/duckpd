@@ -602,16 +602,17 @@ Goal: broaden sources after local semantics are stable.
 - [x] Expose source identity and known pushdown capabilities in `explain()` and
       warn or fail before unexpectedly large network scans where transfer cannot
       be bounded.
-- [ ] Support HTTP/S3/GCS Parquet through DuckDB configuration and secrets.
-- [ ] Test projection, predicate, and row-group pruning with `EXPLAIN ANALYZE`.
-- [ ] Add safe `Session.attach_sqlite()` support after the PostgreSQL and MySQL
-      attachment contract is established.
+- [x] Support HTTP/S3/GCS Parquet through DuckDB configuration and scoped,
+      session-owned temporary secrets.
+- [x] Test projection, predicate, and row-group pruning with `EXPLAIN ANALYZE`.
+- [x] Add safe, read-only `Session.attach_sqlite()` support with refresh and
+      detach lifecycle coverage.
 - [x] Introduce `SourceCapabilities` for projection, filter, aggregation, join,
       window, limit, and sort pushdown.
-- [ ] Add a backend-neutral source fragment to the IR before implementing a
-      split planner.
-- [ ] Compile supported fragments to source-native SQL, stream reduced results
-      through Arrow, and finish unsupported work in DuckDB.
+- [x] Add a backend-neutral source planning/observability model and derive
+      conservative pushdown candidates and required local work per remote branch.
+- [x] Validate PostgreSQL/MySQL physical projection/filter placement assertions
+      against PostgreSQL 17 and MySQL 8.4 disposable live test servers.
 - [x] Add safety guards against unexpectedly large network scans.
 - [ ] Add source-specific cost estimates once transferred-row or byte estimates
       are available from DuckDB extension plans.
@@ -622,9 +623,13 @@ Goal: broaden sources after local semantics are stable.
 
 Exit gate:
 
-- [ ] Integration tests prove which operators execute remotely and measure
-      transferred bytes for representative pipelines.
-- [ ] Cross-source joins have explicit movement plans visible in `explain()`.
+- [x] HTTP Parquet integration proves projection/filter pruning with
+      `EXPLAIN ANALYZE` and measures bytes served by a range-capable endpoint.
+- [x] Run the PostgreSQL/MySQL source-extension physical-plan assertions against
+      PostgreSQL 17 and MySQL 8.4.
+- [ ] Measure attributable PostgreSQL/MySQL network bytes once DuckDB exposes a
+      source-specific transfer metric; total source bytes are not a substitute.
+- [x] Cross-source joins have explicit movement plans visible in `explain()`.
 
 ### Phase 12: release quality
 
@@ -633,17 +638,19 @@ Goal: publish a narrow, honest, measurable API.
 - [x] Maintain a machine-readable Narwhals compatibility matrix by method,
       arguments, dtype coverage, ordering requirement, and release version.
 - [x] Generate user-facing Narwhals compatibility documentation from that matrix.
-- [ ] Add API docs, tutorials, architecture docs, and unsupported-operation
+- [x] Add API docs, tutorials, architecture docs, and unsupported-operation
       guidance.
-- [ ] Add benchmarks for compile time, execution time, peak RSS, spill bytes,
-      and bytes transferred from remote sources.
-- [ ] Add reproducible db-benchmark GroupBy/join, TPC-H, and synthetic OHLC
-      tracks with result validation, pinned environments, and cold/warm runs.
-- [ ] Compare supported workflows against pandas, direct DuckDB SQL, Polars,
-      and FireDucks where available; record unsupported/OOM outcomes instead of
-      omitting them.
-- [ ] Track the competitive scorecard for correctness, safety, scale,
-      observability, performance, portability, interoperability, and openness.
+- [x] Add benchmark result fields for compile time, execution time, peak RSS,
+      spill bytes, source bytes read, and attributable remote-transfer bytes;
+      preserve unavailable transfer measurements as `null`.
+- [x] Add validated cold/warm runs to the reproducible db-benchmark
+      GroupBy/join, TPC-H, and synthetic OHLC tracks.
+- [x] Compare supported workflows against pandas and direct DuckDB SQL; record
+      Polars and FireDucks as unavailable or unsupported instead of omitting
+      them until validated adapters exist.
+- [x] Track a machine-readable competitive evidence scorecard for correctness,
+      safety, scale, observability, performance, portability, interoperability,
+      and openness without scoring unavailable evidence.
 - [x] Add small, medium, and larger-than-memory benchmark datasets generated
       deterministically rather than checked into Git.
 - [x] Run package build/install smoke checks on Linux for Python 3.11, 3.12,
@@ -654,7 +661,7 @@ Goal: publish a narrow, honest, measurable API.
       secrets.
 - [x] Install the built wheel in a clean environment and run an import, version,
       and minimal in-memory DuckPD pipeline smoke test.
-- [ ] Require release tags, package metadata, and changelog versions to match
+- [x] Require release tags, package metadata, and changelog versions to match
       before PyPI Trusted Publishing runs.
 - [x] After index/order semantics and the public API stabilize, prototype an
       optional Narwhals compliance plugin so `nw.from_native()` can wrap DuckPD
@@ -714,8 +721,8 @@ product contract must remain explicitly unsupported and fail before execution.
 - [ ] Publish a pre-release and collect real unsupported-operation traces only
       with explicit user consent and no query data.
 - [x] Define the pre-`1.0` versioning, deprecation, and immutable-release policy.
-- [x] Add a manual `make publish` workflow that tests, bumps the patch version,
-      rebuilds clean artifacts, and publishes through `uv`.
+- [x] Add a manual `make publish` workflow that runs the full release gate and
+      publishes an already-versioned tree without silently changing its version.
 
 Exit gate:
 
@@ -801,6 +808,10 @@ decomposed into independently testable milestones below.
       `Session.attach_mysql()` APIs with refresh-on-execution semantics,
       credential redaction, explicit pushdown reporting, and network-transfer
       safety guards.
+22. [x] Add credential-safe HTTP/S3/GCS Parquet, read-only SQLite attachments,
+        backend-neutral source fragments, and explicit cross-source movement.
+23. [x] Harden documentation, benchmark I/O metrics, and immutable release
+        metadata checks.
 
 ### Active Linux-beta workstreams and goals
 
@@ -943,11 +954,12 @@ preserve schema, index, ordering, row identity, provenance, and null semantics;
 retained passes improve representative validated Linux workloads without
 material regressions.
 
-Pandas-compatible grouped rolling and aligned window feature assignment are the
-next active product priority. Safe PostgreSQL and MySQL attachment follows in
-Phase 11; general remote-source split planning remains deferred until the
-read-only attachment, credential-safety, observability, and transfer-guard
-contract is established.
+The next active remote-source priority is PostgreSQL/MySQL transfer attribution:
+integration tests must prove candidate placement and measured network bytes
+before source-specific cost estimates can be claimed. Remote replacement
+manifests and row-level storage remain deferred. Public Narwhals plugin scans
+remain blocked upstream; direct DuckPD readers followed by `nw.from_native()`
+remain lazy.
 
 ## Definition of done for each public operation
 

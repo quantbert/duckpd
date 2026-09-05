@@ -97,10 +97,62 @@ Direct sinks and Arrow batch readers avoid constructing an intermediate pandas
 DataFrame. Individual DuckDB operators may still require blocking state; use
 `explain_write()` and `profile()` to inspect the plan and observed resource use.
 
-## Read-only remote databases
+## Remote Parquet on HTTP, S3, and GCS
 
-DuckPD uses DuckDB's `postgres` and `mysql` extensions rather than loading
-remote tables through pandas. Each attachment call ensures that the
+`Session.read_parquet()` accepts credential-free `http://`, `https://`, `s3://`,
+and `gcs://` paths. DuckPD installs and loads DuckDB's `httpfs` extension on the
+first remote scan. URL user information, query parameters, and fragments are
+rejected because they would become part of the logical source path.
+
+Use a temporary scoped secret for private object storage:
+
+```python
+import os
+
+import duckpd as pd
+
+with pd.connect() as session:
+    credential = session.create_s3_secret(
+        "analytics",
+        key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        secret=os.environ["AWS_SECRET_ACCESS_KEY"],
+        region=os.environ.get("AWS_REGION", "us-east-1"),
+        scope="s3://company-analytics/orders/",
+    )
+    orders = session.read_parquet(
+        "s3://company-analytics/orders/*.parquet",
+        hive_partitioning=True,
+    )
+    result = orders[orders["year"] == 2026][["order_id", "total"]].collect()
+```
+
+For the AWS SDK credential chain, set `credential_chain=True` and omit
+`key_id`/`secret`. GCS uses HMAC interoperability keys:
+
+```python
+session.create_gcs_secret(
+    "lake",
+    key_id=os.environ["GCS_HMAC_ACCESS_ID"],
+    secret=os.environ["GCS_HMAC_SECRET"],
+    scope="gcs://company-lake/",
+)
+```
+
+Temporary object-store secrets are session-owned. Call `credential.drop()` to
+remove one early; `Session.close()` removes the rest. Secret values are bound
+parameters and never enter DuckPD plans, reprs, or diagnostics.
+
+`explain("analyze")` executes `EXPLAIN ANALYZE` and therefore obeys remote scan
+guards. Use it only when execution is intended. The analyzed DuckDB plan shows
+Parquet projection, filter, and row-group pruning. `explain("json")` remains
+non-executing and reports each backend-neutral source fragment's conservative
+pushdown candidates, required DuckDB-local work, and cross-source movement.
+
+
+## Read-only attached databases
+
+DuckPD uses DuckDB's `postgres`, `mysql`, and `sqlite` extensions rather than
+loading attached tables through pandas. Each attachment call ensures that the
 corresponding extension is installed and loaded, then creates the attachment
 with `READ_ONLY`.
 
@@ -156,6 +208,19 @@ with pd.connect() as session:
     )
     products = mysql.table("products")
 ```
+
+### SQLite
+
+`attach_sqlite()` accepts an existing local SQLite file and always attaches it
+read-only. Repeated frame execution reads current committed data. Schema refresh
+detaches and reattaches the same file, so construct new frames after calling it.
+
+```python
+with pd.connect() as session:
+    catalog = session.attach_sqlite("catalog", "catalog.sqlite")
+    products = catalog.table("products")
+```
+
 
 ### Existing DuckDB secrets
 
@@ -217,9 +282,13 @@ for one table:
 customers = warehouse.table("customers", unbounded_scan="error")
 ```
 
-`explain("json")` reports the sanitized remote source, backend, scan policy,
-unknown transfer estimate, and statically known projection/filter pushdown
-capabilities. It never reports credentials.
+`explain("json")` reports sanitized source identities, source fragments,
+conservative pushdown candidates, required DuckDB-local work, cross-source
+movement, scan policy, and available backend capabilities. Candidates are not
+claims about runtime placement; use `explain("analyze")` to inspect the engine
+plan. Transfer estimates remain `null` when DuckDB cannot prove them.
+`profile()` reports measured source bytes read, while network-transfer bytes
+currently remain `null` because DuckDB does not reliably attribute them.
 
 ### Cleanup
 

@@ -38,11 +38,16 @@ minor release before removal.
 
 Each release should:
 
-1. Pass the repository quality gate and package build.
-2. Set the intended version in `pyproject.toml`.
-3. Move relevant entries from `Unreleased` into a dated changelog section.
-4. Be tagged as `v<version>`, for example `v0.1.0a1`.
-5. Be published from that tag through PyPI Trusted Publishing.
+1. Set the intended version in `pyproject.toml`.
+2. Move relevant entries from `Unreleased` into a dated changelog section.
+3. Run `make release-check`; it validates source, metadata, distributions, and
+   clean wheel installs on every supported Python version.
+4. Tag the verified commit as `v<version>`, for example `v0.1.0a1`.
+5. Publish from that tag through PyPI Trusted Publishing.
+
+`make publish` does not change the version. It publishes only an already
+versioned tree that passes `release-check`; release versioning and changelog
+updates must be reviewable before publication.
 
 Published distributions and Git tags are immutable. A mistake in a published
 release is corrected with a new version rather than replacing an artifact or

@@ -19,27 +19,38 @@ def changelog_versions() -> set[str]:
     return set(re.findall(pattern, text, re.MULTILINE))
 
 
-def verify(tag: str) -> None:
+def verify_version() -> str:
+    """Verify that project metadata has a corresponding immutable changelog entry."""
     version = project_version()
+    if version not in changelog_versions():
+        raise SystemExit(
+            f"docs/CHANGELOG.md has no dated release section for {version!r}"
+        )
+    return version
+
+
+def verify(tag: str) -> None:
+    version = verify_version()
     expected_tag = f"v{version}"
     if tag != expected_tag:
         raise SystemExit(
             f"release tag {tag!r} does not match project version {version!r}; "
             f"expected {expected_tag!r}"
         )
-    if version not in changelog_versions():
-        raise SystemExit(
-            f"docs/CHANGELOG.md has no dated release section for {version!r}"
-        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Verify that a release tag matches package and changelog versions."
+        description="Verify project/changelog versions and an optional release tag."
     )
-    parser.add_argument("tag", help="Git release tag, including the v prefix")
+    parser.add_argument(
+        "tag", nargs="?", help="Git release tag, including the v prefix"
+    )
     args = parser.parse_args()
-    verify(args.tag)
+    if args.tag is None:
+        verify_version()
+    else:
+        verify(args.tag)
 
 
 if __name__ == "__main__":

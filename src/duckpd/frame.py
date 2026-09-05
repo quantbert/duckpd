@@ -282,9 +282,11 @@ class DataFrame:
 
     def explain(
         self,
-        mode: Literal["all", "logical", "optimized", "json", "sql", "physical"] = "all",
+        mode: Literal[
+            "all", "logical", "optimized", "json", "sql", "physical", "analyze"
+        ] = "all",
     ) -> str:
-        """Return logical, optimized, SQL, physical, or JSON plan views."""
+        """Return a logical, optimized, SQL, physical, analyzed, or JSON plan."""
         return self._session._executor.explain(self._plan, mode=mode)
 
     def explain_write(
