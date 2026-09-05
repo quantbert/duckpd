@@ -18,8 +18,8 @@ DuckPD is a lazy, out-of-core DataFrame library with a familiar pandas-shaped AP
 ## ⚡ Why DuckPD? The Core Advantages
 
 * **🚫 Never OOM on Large Datasets:** Stream, filter, join, and aggregate multi-gigabyte or multi-terabyte datasets within a bounded memory footprint (e.g. 2 GB RAM budget) using DuckDB's vectorized execution and disk spillover.
-* **� Minimal Resource Footprint:** Run end-to-end data processing pipelines on lightweight compute (small laptops, low-tier cloud instances, or constrained containers) over datasets far larger than available RAM.
-* **�📈 Zero-Materialization Grouped Rolling Windows:** Compute grouped, multi-entity rolling/expanding statistics (e.g., 20-day vs 50-day moving average crossovers across thousands of stock tickers) and assign them directly back to your dataframe without materializing intermediate tables.
+* **⚙️ Minimal Resource Footprint:** Run end-to-end data processing pipelines on lightweight compute (small laptops, low-tier cloud instances, or constrained containers) over datasets far larger than available RAM.
+* **📈 Zero-Materialization Grouped Rolling Windows:** Compute grouped, multi-entity rolling/expanding statistics (e.g., 20-day vs 50-day moving average crossovers across thousands of stock tickers) and assign them directly back to your dataframe without materializing intermediate tables.
 * **🌐 Federated Remote Queries:** Query HTTP/S3/GCS Parquet and attach PostgreSQL, MySQL, and SQLite databases directly into lazy pandas pipelines—with full credential redaction and scan guardrails.
 * **🛡️ Zero Silent Fallbacks:** If an operation is unsupported or ordering is ambiguous, DuckPD fails explicitly before query execution. Your dataset will never be silently materialized into in-memory pandas.
 * **🔌 Native Narwhals Lazy Backend:** Drop DuckPD directly into modern visualization and machine learning libraries (Plotly, Altair, etc.) via `nw.from_native(df)` for zero-copy, lazy DuckDB execution.
