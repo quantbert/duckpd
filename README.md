@@ -296,6 +296,7 @@ Check out the runnable tutorials and interactive notebooks in [demo/](demo/READM
 * 📘 [`demo/DuckPD_Quickstart.ipynb`](demo/DuckPD_Quickstart.ipynb) — 5-minute interactive introduction.
 * 📈 [`demo/DuckPD_Features_Walkthrough.ipynb`](demo/DuckPD_Features_Walkthrough.ipynb) — Deep-dive across 3.9M rows of AlphaDojo stock news data.
 * 🔬 [`demo/DuckPD_Order_Index_Window_Workflows.ipynb`](demo/DuckPD_Order_Index_Window_Workflows.ipynb) — Differential walkthrough of rolling windows, `.loc`/`.iloc` mechanics, and persistence.
+* ⏱️ [`demo/DuckPD_Temporal_and_Categorical_Semantics.ipynb`](demo/DuckPD_Temporal_and_Categorical_Semantics.ipynb) — Fixed-duration rolling windows, `.dt` rounding & timezone conversions, and categorical semantics with `groupby(observed=False)`.
 
 Runnable pipelines:
 ```bash

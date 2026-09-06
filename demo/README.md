@@ -43,6 +43,11 @@ uv run python demo/market_data_demo.py smoke
   and row windows, automatic file order and explicit relational ordering,
   masked assignment, persistence, and direct DuckDB CSV/Parquet output with
   pandas differential assertions.
+- `DuckPD_Temporal_and_Categorical_Semantics.ipynb` is an interactive tutorial
+  demonstrating fixed-duration rolling windows on timestamps, `.dt` floor,
+  ceil, round, and timezone conversions, timestamp/duration arithmetic, lazy
+  `.cat` metadata accessors, ordered comparisons, and `groupby(observed=False)`
+  unused-category expansion.
 
 Run market data benchmarks:
 
