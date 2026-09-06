@@ -21,6 +21,8 @@ from duckpd._compiler import DuckDBCompiler
 from duckpd._executor import Executor, MaterializationReport
 from duckpd._logical import (
     ArrowSource,
+    CategoricalSpec,
+    Column,
     ColumnRef,
     CsvSource,
     NullPlacement,
@@ -43,6 +45,7 @@ from duckpd._logical import (
 )
 from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
 from duckpd._quoting import quote_identifier, quote_literal
+from duckpd._typing import ScalarValue
 from duckpd.errors import (
     RemoteAttachmentError,
     SessionClosedError,
@@ -1050,6 +1053,33 @@ class Session:
         stable_order_label: str | None = None,
     ) -> ScanPlan | SortPlan:
         columns = self._compiler.inspect_source(source)
+        if isinstance(source, PandasSource):
+            pandas_source = self._registered_sources[source.key]
+            if not isinstance(pandas_source, pd.DataFrame):
+                raise TypeError("Registered pandas source must be a DataFrame")
+            annotated: list[Column] = []
+            for column in columns:
+                if column.label not in pandas_source.columns:
+                    annotated.append(column)
+                    continue
+                pandas_dtype = pandas_source[column.label].dtype
+                categorical = None
+                timezone = None
+                if isinstance(pandas_dtype, pd.CategoricalDtype):
+                    categorical = CategoricalSpec(
+                        cast("tuple[ScalarValue, ...]", tuple(pandas_dtype.categories.tolist())),
+                        bool(pandas_dtype.ordered),
+                    )
+                elif isinstance(pandas_dtype, pd.DatetimeTZDtype):
+                    timezone = str(pandas_dtype.tz)
+                annotated.append(
+                    replace(
+                        column,
+                        categorical=categorical,
+                        timezone=timezone,
+                    )
+                )
+            columns = tuple(annotated)
         if (
             isinstance(source, ParquetSource)
             and source.native_order

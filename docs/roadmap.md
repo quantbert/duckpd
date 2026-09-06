@@ -393,7 +393,9 @@ Goal: support the most valuable analytical workflow with pandas semantics.
 - [x] Support dict and function-name string aggregation forms in `GroupBy.agg`.
 - [x] Support `DataFrameGroupBy` convenience methods (`sum`, `mean`, `min`, `max`, `count`, `size`) and column selection `g['col']` / `g[['col1', 'col2']]`.
 - [x] Implement `Series.groupby()` returning `SeriesGroupBy` with `agg`, `sum`, `mean`, `min`, `max`, `count`, `size`, `std`, `var`, `median`.
-- [ ] Handle categorical grouping only after `observed` behavior is tested.
+- [x] Support categorical grouping with tested `observed=True/False` behavior;
+      unused-category expansion currently covers one key with `sort=True` and
+      `dropna=True`.
 - [ ] Before expanding the compiler manually, run the bounded Ibis substrate
       spike defined in the competitive landscape guide and record an ADR with
       generated SQL, semantic gaps, compile cost, and dependency tradeoffs.
@@ -472,14 +474,22 @@ execution.
       `contains()`, `replace()`.
 - [x] Add `Series.dt` fields (`year`, `month`, `day`, `hour`, `minute`, `second`, `date`),
       `strftime()`, and `to_period()` representation.
-- [ ] Add timezone operations and floor/ceil/round after timedelta semantics are specified.
-- [ ] Add a limited categorical representation and `.cat` only after category
-      order and unused-category metadata can be preserved.
+- [x] Add fixed-duration timestamp/timedelta arithmetic, exact
+      `floor`/`ceil`/half-even `round`, IANA timezone conversion, UTC
+      localization, and timezone removal. Non-UTC localization and
+      local-wall-time rounding remain explicit exclusions.
+- [x] Add a limited categorical representation and `.cat`, preserving category
+      order, unused categories, and ordered state through supported
+      transformations and pandas collection.
 - [x] Add differential tests for Unicode, empty strings, nulls, and format patterns.
 
 Exit gate:
 
 - [x] The v0.1 acceptance workflow's monthly period expression matches pandas.
+- [x] Temporal and categorical differential tests cover negative/tied
+      timestamps, DST-boundary instants, invalid planning combinations,
+      categorical accessors, ordered comparisons, metadata propagation, and
+      observed/unobserved grouping.
 
 ### Phase 8: execution, persistence, and observability hardening
 

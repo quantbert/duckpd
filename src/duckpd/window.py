@@ -6,8 +6,6 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
-import pandas as pd
-
 from duckpd._logical import (
     BinaryExpression,
     BinaryOperator,
@@ -42,6 +40,7 @@ from duckpd._metadata import (
     validate_metadata,
 )
 from duckpd._reductions import expression_type, is_numeric_type
+from duckpd._temporal import fixed_duration_ns
 from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
 
 if TYPE_CHECKING:
@@ -286,13 +285,7 @@ class Rolling(WindowBase):
             raise ValueError("window must be an integer or fixed duration")
         if closed not in {None, "right", "left", "both", "neither"}:
             raise ValueError("closed must be 'right', 'left', 'both' or 'neither'")
-        try:
-            duration = pd.Timedelta(window)
-        except (TypeError, ValueError, OverflowError) as error:
-            raise ValueError("window must be a positive fixed duration") from error
-        if duration <= pd.Timedelta(0):
-            raise ValueError("window must be a positive fixed duration")
-        duration_ns = int(duration.value)
+        duration_ns = fixed_duration_ns(window, parameter="window")
         min_p = 1 if min_periods is None else min_periods
         if min_p < 0:
             raise ValueError("min_periods must be non-negative")

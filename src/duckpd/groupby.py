@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
+
+import pandas as pd
 
 from duckpd._logical import (
     AggregateExpression,
@@ -60,8 +62,18 @@ class DataFrameGroupBy:
         self._as_index = as_index
         self._sort = sort
         self._dropna = dropna
+        self._observed = observed
         if not observed:
-            raise UnsupportedOperationError("DuckPD does not support unobserved categorical groups")
+            categorical_keys = [
+                column for column in self._key_columns if column.categorical is not None
+            ]
+            if categorical_keys and (
+                len(categorical_keys) != 1 or len(self._key_columns) != 1 or not sort or not dropna
+            ):
+                raise UnsupportedOperationError(
+                    "observed=False currently supports one categorical key with "
+                    "sort=True and dropna=True"
+                )
 
     @overload
     def __getitem__(self, key: str) -> SeriesGroupBy: ...
@@ -78,6 +90,7 @@ class DataFrameGroupBy:
                 as_index=self._as_index,
                 sort=self._sort,
                 dropna=self._dropna,
+                observed=self._observed,
                 _alignment_source=self._alignment_source,
             )
         labels = tuple(key)
@@ -90,6 +103,7 @@ class DataFrameGroupBy:
             as_index=self._as_index,
             sort=self._sort,
             dropna=self._dropna,
+            observed=self._observed,
             _alignment_source=self._alignment_source,
         )
 
@@ -195,97 +209,7 @@ class DataFrameGroupBy:
 
     def size(self) -> DataFrame:
         """Compute group sizes."""
-        from duckpd.frame import DataFrame
-
-        aggregates: list[AggregateExpression] = []
-        output_columns: list[Column] = []
-
-        key_ids = tuple(col.id for col in self._key_columns)
-        for col in self._key_columns:
-            out_col = Column(
-                ColumnId.create(),
-                col.label,
-                col.duckdb_type,
-                hidden=self._as_index,
-            )
-            output_columns.append(out_col)
-            aggregates.append(
-                AggregateExpression(
-                    out_col,
-                    operator=None,
-                    expression=ColumnRef(col.id),
-                    input_duckdb_type=col.duckdb_type,
-                )
-            )
-
-        size_col = Column(ColumnId.create(), "size", "BIGINT", hidden=False)
-        output_columns.append(size_col)
-        aggregates.append(
-            AggregateExpression(
-                size_col,
-                operator=AggregateOperator.SIZE,
-                expression=None,
-                input_duckdb_type=None,
-            )
-        )
-
-        index_ids = tuple(col.id for col in output_columns[: len(self._key_columns)] if col.hidden)
-        ordering_keys = (
-            tuple(
-                OrderColumn(col.id, SortDirection.ASCENDING, NullPlacement.LAST)
-                for col in output_columns[: len(self._key_columns)]
-            )
-            if self._sort
-            else ()
-        )
-        if not self._sort:
-            identity_id = next(
-                iter(self._frame._plan.metadata.row_identity.columns),
-                None,
-            )
-            row_identity = next(
-                (
-                    column
-                    for column in self._frame._plan.metadata.columns
-                    if column.id == identity_id
-                ),
-                None,
-            )
-            if row_identity is not None:
-                first_seen = Column(
-                    ColumnId.create(),
-                    "__duckpd_group_first_seen__",
-                    row_identity.duckdb_type,
-                    hidden=True,
-                )
-                output_columns.append(first_seen)
-                aggregates.append(
-                    AggregateExpression(
-                        first_seen,
-                        operator=AggregateOperator.MIN,
-                        expression=ColumnRef(row_identity.id),
-                        input_duckdb_type=row_identity.duckdb_type,
-                    )
-                )
-                ordering_keys = (
-                    OrderColumn(first_seen.id, SortDirection.ASCENDING, NullPlacement.LAST),
-                )
-
-        metadata = after_aggregate(
-            tuple(output_columns),
-            index_ids=index_ids,
-            ordering_keys=ordering_keys,
-        )
-
-        plan = AggregatePlan(
-            self._frame._plan,
-            tuple(aggregates),
-            metadata,
-            keys=key_ids,
-            dropna=self._dropna,
-            sort=self._sort,
-        )
-        return DataFrame(self._session, plan)
+        return self._named_agg(size=(self._by[0], "size"))
 
     def _convenience_agg(self, func_name: str, *, numeric_only: bool) -> DataFrame:
         visible = self._frame._plan.metadata.visible_columns
@@ -324,6 +248,8 @@ class DataFrameGroupBy:
                 col.label,
                 col.duckdb_type,
                 hidden=self._as_index,
+                categorical=col.categorical,
+                timezone=col.timezone,
             )
             output_columns.append(out_col)
             aggregates.append(
@@ -483,7 +409,57 @@ class DataFrameGroupBy:
             dropna=self._dropna,
             sort=self._sort,
         )
-        return DataFrame(self._session, plan)
+        result = DataFrame(self._session, plan)
+        if not self._observed:
+            result = self._expand_unobserved_categories(result, aggregates)
+        return result
+
+    def _expand_unobserved_categories(
+        self,
+        result: DataFrame,
+        aggregates: list[AggregateExpression],
+    ) -> DataFrame:
+        """Left-join one declared category universe onto observed aggregates."""
+        key = self._key_columns[0]
+        spec = key.categorical
+        if spec is None:
+            return result
+        order_label = f"__duckpd_category_order_{ColumnId.create().value.hex}__"
+        category_dtype = pd.CategoricalDtype(
+            categories=cast("Any", list(spec.categories)),
+            ordered=spec.ordered,
+        )
+        universe_source = pd.DataFrame(
+            {
+                key.label: pd.Series(
+                    pd.Categorical(cast("Any", spec.categories), dtype=category_dtype),
+                ),
+                order_label: range(len(spec.categories)),
+            }
+        )
+        universe = self._session.from_pandas(universe_source, order_by=order_label)
+        observed = result.reset_index() if self._as_index else result
+        expanded = universe.merge(
+            observed,
+            how="left",
+            on=key.label,
+            sort=False,
+            validate="1:1",
+        )
+        zero_outputs = {
+            aggregate.column.label: 0
+            for aggregate in aggregates
+            if aggregate.operator
+            in {
+                AggregateOperator.SUM,
+                AggregateOperator.COUNT,
+                AggregateOperator.SIZE,
+            }
+        }
+        if zero_outputs:
+            expanded = expanded.fillna(zero_outputs)
+        expanded = expanded.sort_values(order_label).drop(columns=order_label)
+        return expanded.set_index(key.label) if self._as_index else expanded
 
 
 class SeriesGroupBy:
@@ -508,9 +484,8 @@ class SeriesGroupBy:
         self._as_index = as_index
         self._sort = sort
         self._dropna = dropna
+        self._observed = observed
         self._alignment_source = _alignment_source or series._plan
-        if not observed:
-            raise UnsupportedOperationError("DuckPD does not support unobserved categorical groups")
 
         # If by is string or sequence of strings, series must have that column
         # in its underlying plan
@@ -524,6 +499,7 @@ class SeriesGroupBy:
                 sort=sort,
                 dropna=dropna,
                 _alignment_source=self._alignment_source,
+                observed=observed,
             )
         elif isinstance(by, Series):
             if by._session is not series._session or by._plan is not series._plan:
@@ -541,6 +517,7 @@ class SeriesGroupBy:
                 sort=sort,
                 dropna=dropna,
                 _alignment_source=self._alignment_source,
+                observed=observed,
             )
         elif isinstance(by, Sequence):
             by_seq = tuple(cast("Sequence[object]", by))
@@ -556,6 +533,7 @@ class SeriesGroupBy:
                     sort=sort,
                     dropna=dropna,
                     _alignment_source=self._alignment_source,
+                    observed=observed,
                 )
             elif all(isinstance(item, Series) for item in by_seq):
                 ser_seq = cast("tuple[Series, ...]", by_seq)
@@ -579,6 +557,7 @@ class SeriesGroupBy:
                     sort=sort,
                     dropna=dropna,
                     _alignment_source=self._alignment_source,
+                    observed=observed,
                 )
             else:
                 raise TypeError("Group keys must be all strings or all Series")

@@ -277,6 +277,10 @@ def concat(
         for column in frame._plan.metadata.visible_columns:
             types_by_label.setdefault(column.label, []).append(column.duckdb_type)
 
+    columns_by_label: dict[str, list[Column]] = {}
+    for frame in frames:
+        for column in frame._plan.metadata.visible_columns:
+            columns_by_label.setdefault(column.label, []).append(column)
     try:
         reconciled_types = {
             label: common_union_type(types) for label, types in types_by_label.items()
@@ -307,10 +311,33 @@ def concat(
                 hidden_index_cols.append(idx_col)
                 index_ids.append(idx_col.id)
 
-    output_columns = [
-        Column(ColumnId.create(), label, dtype, hidden=False)
-        for label, dtype in reconciled_types.items()
-    ]
+    output_columns: list[Column] = []
+    for label, dtype in reconciled_types.items():
+        source_columns = columns_by_label[label]
+        first_category = source_columns[0].categorical
+        categorical = (
+            first_category
+            if first_category is not None
+            and all(column.categorical == first_category for column in source_columns)
+            else None
+        )
+        first_timezone = source_columns[0].timezone
+        timezone = (
+            first_timezone
+            if first_timezone is not None
+            and all(column.timezone == first_timezone for column in source_columns)
+            else None
+        )
+        output_columns.append(
+            Column(
+                ColumnId.create(),
+                label,
+                dtype,
+                hidden=False,
+                categorical=categorical,
+                timezone=timezone,
+            )
+        )
     output_columns.extend(hidden_index_cols)
 
     input_plans = tuple(f._plan for f in frames)

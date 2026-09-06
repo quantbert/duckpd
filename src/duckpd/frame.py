@@ -58,6 +58,8 @@ from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._metadata import set_index as set_index_metadata
 from duckpd._reductions import (
     aggregate_plan,
+    expression_categorical,
+    expression_timezone,
     expression_type,
     is_numeric_type,
     materialized_int,
@@ -1279,6 +1281,8 @@ class DataFrame:
                 label,
                 expression_type(frame._plan, expression),
                 nullable=expression_nullability(expression, frame._plan.metadata),
+                categorical=expression_categorical(frame._plan, expression),
+                timezone=expression_timezone(frame._plan, expression),
                 alias_of=(expression.column_id if isinstance(expression, ColumnRef) else None),
             )
             if existing is not None:
@@ -1326,6 +1330,17 @@ class DataFrame:
         directions = (ascending,) * len(labels) if isinstance(ascending, bool) else tuple(ascending)
         if len(directions) != len(labels):
             raise ValueError("Length of ascending must match length of by")
+        categorical_columns = [self._column(label) for label in labels]
+        unsupported_categories = [
+            column.label
+            for column in categorical_columns
+            if column.categorical is not None and not column.duckdb_type.startswith("ENUM(")
+        ]
+        if unsupported_categories:
+            raise UnsupportedOperationError(
+                "Categorical sorting currently requires string categories; "
+                f"unsupported columns: {unsupported_categories!r}"
+            )
 
         null_placement = NullPlacement.FIRST if na_position == "first" else NullPlacement.LAST
         keys = tuple(

@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
-from duckpd._logical import LiteralValue
+import pandas as pd
+
+from duckpd._logical import (
+    BinaryExpression,
+    BinaryOperator,
+    CaseWhen,
+    CastExpression,
+    LiteralValue,
+)
+from duckpd._reductions import (
+    expression_categorical,
+    expression_timezone,
+    expression_type,
+    is_timestamp_type,
+    is_timezone_aware_type,
+)
+from duckpd._temporal import fixed_duration_ns, timezone_name
 from duckpd.errors import UnsupportedOperationError
 
 if TYPE_CHECKING:
@@ -82,11 +99,187 @@ class StringMethods:
         return self._series._call_function("replace", LiteralValue(pat), LiteralValue(repl))
 
 
+class CategoricalMethods:
+    """Metadata-backed operations for a categorically typed Series."""
+
+    def __init__(self, series: Series) -> None:
+        self._series = series
+        spec = expression_categorical(series._plan, series._expression)
+        if spec is None:
+            raise AttributeError("Can only use .cat accessor with a categorical Series")
+        self._spec = spec
+
+    @property
+    def categories(self) -> pd.Index:
+        """Return the complete category universe without executing rows."""
+        return pd.Index(self._spec.categories)
+
+    @property
+    def ordered(self) -> bool:
+        """Whether comparisons use the declared category order."""
+        return self._spec.ordered
+
+    @property
+    def codes(self) -> Series:
+        """Return zero-based category codes and -1 for missing values."""
+        from duckpd.series import Series
+
+        expression = LiteralValue(-1)
+        for code, category in reversed(tuple(enumerate(self._spec.categories))):
+            expression = CaseWhen(
+                BinaryExpression(
+                    self._series._expression,
+                    BinaryOperator.EQUAL,
+                    LiteralValue(category),
+                ),
+                LiteralValue(code),
+                expression,
+            )
+        category_count = len(self._spec.categories)
+        codes_type = (
+            "TINYINT"
+            if category_count <= 127
+            else "SMALLINT"
+            if category_count <= 32_767
+            else "INTEGER"
+        )
+        return Series(
+            self._series._session,
+            self._series._plan,
+            CastExpression(expression, codes_type),
+            None,
+        )
+
+    def as_ordered(self) -> Series:
+        """Return the same values with ordered categorical metadata."""
+        return self._series._call_function(
+            "__duckpd_category_ordered",
+            LiteralValue(True),
+            return_type=expression_type(self._series._plan, self._series._expression),
+        )
+
+    def as_unordered(self) -> Series:
+        """Return the same values with unordered categorical metadata."""
+        return self._series._call_function(
+            "__duckpd_category_ordered",
+            LiteralValue(False),
+            return_type=expression_type(self._series._plan, self._series._expression),
+        )
+
+
 class DatetimeProperties:
     """Accessor object for datetimelike properties of the Series values."""
 
     def __init__(self, series: Series) -> None:
         self._series = series
+        self._type = expression_type(series._plan, series._expression)
+        if not is_timestamp_type(self._type):
+            raise AttributeError("Can only use .dt accessor with datetimelike values")
+        self._timezone = expression_timezone(series._plan, series._expression)
+        if is_timezone_aware_type(self._type):
+            self._timezone = self._timezone or "UTC"
+
+    def floor(
+        self,
+        freq: str | timedelta,
+        *,
+        ambiguous: str = "raise",
+        nonexistent: str = "raise",
+    ) -> Series:
+        """Floor timestamps to a positive fixed-duration boundary."""
+        return self._round_fixed(freq, "floor", ambiguous, nonexistent)
+
+    def ceil(
+        self,
+        freq: str | timedelta,
+        *,
+        ambiguous: str = "raise",
+        nonexistent: str = "raise",
+    ) -> Series:
+        """Ceil timestamps to a positive fixed-duration boundary."""
+        return self._round_fixed(freq, "ceil", ambiguous, nonexistent)
+
+    def round(
+        self,
+        freq: str | timedelta,
+        *,
+        ambiguous: str = "raise",
+        nonexistent: str = "raise",
+    ) -> Series:
+        """Round timestamps to the nearest fixed boundary using half-even ties."""
+        return self._round_fixed(freq, "round", ambiguous, nonexistent)
+
+    def _round_fixed(
+        self,
+        freq: str | timedelta,
+        mode: Literal["floor", "ceil", "round"],
+        ambiguous: str,
+        nonexistent: str,
+    ) -> Series:
+        if ambiguous != "raise" or nonexistent != "raise":
+            raise UnsupportedOperationError(
+                "DuckPD temporal rounding currently supports only "
+                "ambiguous='raise' and nonexistent='raise'"
+            )
+        if self._timezone not in {None, "UTC", "Etc/UTC"}:
+            raise UnsupportedOperationError(
+                "Round non-UTC timestamps after .dt.tz_convert('UTC'); "
+                "local-wall-time DST rounding is not yet supported"
+            )
+        duration_ns = fixed_duration_ns(freq, parameter="freq")
+        return self._series._call_function(
+            "__duckpd_temporal_round",
+            LiteralValue(duration_ns),
+            LiteralValue(mode),
+            return_type=self._type,
+        )
+
+    def tz_convert(self, tz: str) -> Series:
+        """Convert aware timestamps to another validated IANA timezone."""
+        if not is_timezone_aware_type(self._type):
+            raise TypeError("Cannot convert tz-naive timestamps; use tz_localize first")
+        target = timezone_name(tz)
+        return self._series._call_function(
+            "__duckpd_tz_convert",
+            LiteralValue(target),
+            return_type="TIMESTAMP WITH TIME ZONE",
+        )
+
+    def tz_localize(
+        self,
+        tz: str | None,
+        *,
+        ambiguous: str = "raise",
+        nonexistent: str = "raise",
+    ) -> Series:
+        """Localize naive timestamps to UTC or remove an existing timezone."""
+        if ambiguous != "raise" or nonexistent != "raise":
+            raise UnsupportedOperationError(
+                "DuckPD tz_localize currently supports only "
+                "ambiguous='raise' and nonexistent='raise'"
+            )
+        aware = is_timezone_aware_type(self._type)
+        if tz is None:
+            if not aware:
+                raise TypeError("Cannot localize tz-naive timestamps with tz=None")
+            return self._series._call_function(
+                "__duckpd_tz_delocalize",
+                LiteralValue(self._timezone or "UTC"),
+                return_type="TIMESTAMP",
+            )
+        target = timezone_name(tz)
+        if aware:
+            raise TypeError("Already tz-aware; use tz_convert to convert timezones")
+        if target not in {"UTC", "Etc/UTC"}:
+            raise UnsupportedOperationError(
+                "DuckPD tz_localize currently supports UTC only; local timezone "
+                "DST ambiguity is not represented by DuckDB"
+            )
+        return self._series._call_function(
+            "__duckpd_tz_localize_utc",
+            LiteralValue("UTC"),
+            return_type="TIMESTAMP WITH TIME ZONE",
+        )
 
     @property
     def year(self) -> Series:

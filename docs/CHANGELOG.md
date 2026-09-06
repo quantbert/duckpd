@@ -16,6 +16,12 @@ the [release policy](RELEASES.md).
   `closed='right'|'left'|'both'|'neither'` boundaries.
 - Typed row and range window frames in the logical plan. Duration windows
   compile to nanosecond `RANGE` frames and preserve timezone-aware timestamps.
+- Timestamp/duration arithmetic, fixed-duration `Series.dt.floor()`, `ceil()`,
+  and `round()`, plus timezone conversion, UTC localization, and timezone
+  removal with pandas-compatible collected dtypes.
+- Pandas categorical metadata propagation, lazy `Series.cat` metadata/codes
+  accessors, ordered comparisons, and unused-category expansion for supported
+  `groupby(observed=False)` aggregations.
 
 ### Changed
 

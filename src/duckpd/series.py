@@ -19,6 +19,7 @@ from duckpd._logical import (
     BinaryOperator,
     CaseWhen,
     CastExpression,
+    CategoricalSpec,
     ColumnId,
     ColumnRef,
     FilterPlan,
@@ -43,9 +44,12 @@ from duckpd._metadata import after_aggregate, after_filter, after_sort
 from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._reductions import (
     aggregate_plan,
+    expression_categorical,
+    expression_timezone,
     expression_type,
     is_numeric_type,
     materialized_int,
+    temporal_binary_type,
     validate_axis,
     validate_ddof,
     validate_min_count,
@@ -60,7 +64,7 @@ from duckpd.errors import (
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
-    from duckpd.accessors import DatetimeProperties, StringMethods
+    from duckpd.accessors import CategoricalMethods, DatetimeProperties, StringMethods
     from duckpd.frame import DataFrame
     from duckpd.groupby import SeriesGroupBy
     from duckpd.session import Session
@@ -183,6 +187,8 @@ class Series:
             out_label,
             expression_type(self._plan, self._expression),
             nullable=expression_nullability(self._expression, self._plan.metadata),
+            categorical=expression_categorical(self._plan, self._expression),
+            timezone=expression_timezone(self._plan, self._expression),
             alias_of=(
                 self._expression.column_id if isinstance(self._expression, ColumnRef) else None
             ),
@@ -723,6 +729,8 @@ class Series:
             ColumnId.create(),
             self.name or "__duckpd_unique__",
             expression_type(self._plan, self._expression),
+            categorical=expression_categorical(self._plan, self._expression),
+            timezone=expression_timezone(self._plan, self._expression),
         )
         agg = AggregateExpression(
             out_col,
@@ -757,6 +765,8 @@ class Series:
             ColumnId.create(),
             self.name or "__duckpd_value__",
             input_type,
+            categorical=expression_categorical(self._plan, self._expression),
+            timezone=expression_timezone(self._plan, self._expression),
         )
         count_col = Column(ColumnId.create(), "count", "BIGINT")
         aggregates = (
@@ -885,6 +895,60 @@ class Series:
             observed=observed,
         )
 
+    def _categorical_binary_operands(
+        self,
+        left: Expression,
+        right: Expression,
+        operator: BinaryOperator,
+    ) -> tuple[Expression, Expression]:
+        left_category = expression_categorical(self._plan, left)
+        right_category = expression_categorical(self._plan, right)
+        if left_category is None and right_category is None:
+            return left, right
+        equality = {BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL}
+        ordering = {
+            BinaryOperator.LESS_THAN,
+            BinaryOperator.LESS_EQUAL,
+            BinaryOperator.GREATER_THAN,
+            BinaryOperator.GREATER_EQUAL,
+        }
+        if operator not in equality | ordering:
+            raise TypeError("Categorical values do not support arithmetic")
+        if (
+            left_category is not None
+            and right_category is not None
+            and left_category != right_category
+        ):
+            raise TypeError("Categoricals can only be compared with identical categories")
+        if operator in equality:
+            return left, right
+        spec = left_category or right_category
+        if spec is None or not spec.ordered:
+            raise TypeError("Unordered Categoricals can only compare equality or not")
+        scalar = right if left_category is not None else left
+        if isinstance(scalar, LiteralValue) and scalar.value not in spec.categories:
+            raise TypeError("Invalid comparison with a value outside the categories")
+
+        def rank(expression: Expression, categorical: CategoricalSpec | None) -> Expression:
+            if categorical is None:
+                if not isinstance(expression, LiteralValue):
+                    raise TypeError("Categoricals can only be compared with identical categories")
+                return LiteralValue(spec.categories.index(expression.value))
+            ranked: Expression = LiteralValue(None)
+            for code, category in reversed(tuple(enumerate(spec.categories))):
+                ranked = CaseWhen(
+                    BinaryExpression(
+                        expression,
+                        BinaryOperator.EQUAL,
+                        LiteralValue(category),
+                    ),
+                    LiteralValue(code),
+                    ranked,
+                )
+            return ranked
+
+        return rank(left, left_category), rank(right, right_category)
+
     def _binary(self, other: object, operator: BinaryOperator) -> Series:
         if (
             isinstance(other, Series)
@@ -900,22 +964,96 @@ class Series:
         ):
             return self._aligned_binary(other, operator)
         right = self._coerce_other(other)
+        has_categorical = (
+            expression_categorical(self._plan, self._expression) is not None
+            or expression_categorical(self._plan, right) is not None
+        )
+        left_expression, right_expression = self._categorical_binary_operands(
+            self._expression,
+            right,
+            operator,
+        )
+        temporal_type = temporal_binary_type(
+            expression_type(self._plan, self._expression),
+            expression_type(self._plan, right),
+            operator,
+        )
+        if temporal_type == "UNKNOWN":
+            raise UnsupportedOperationError(f"Unsupported temporal operation: {operator.value}")
+        expression: Expression = BinaryExpression(
+            left_expression,
+            operator,
+            right_expression,
+        )
+        if operator in {
+            BinaryOperator.EQUAL,
+            BinaryOperator.NOT_EQUAL,
+            BinaryOperator.LESS_THAN,
+            BinaryOperator.LESS_EQUAL,
+            BinaryOperator.GREATER_THAN,
+            BinaryOperator.GREATER_EQUAL,
+        } and (temporal_type == "BOOLEAN" or has_categorical):
+            expression = FunctionCall(
+                "coalesce",
+                (expression, LiteralValue(operator is BinaryOperator.NOT_EQUAL)),
+                return_type="BOOLEAN",
+            )
+        result_name = (
+            self.name if not isinstance(other, Series) or self.name == other.name else None
+        )
         return Series(
             self._session,
             self._plan,
-            BinaryExpression(self._expression, operator, right),
-            self.name,
+            expression,
+            result_name,
         )
 
     def _rbinary(self, other: object, operator: BinaryOperator) -> Series:
         if isinstance(other, Series) and other._plan is not self._plan:
             return other._aligned_binary(self, operator)
         left = self._coerce_other(other)
+        has_categorical = (
+            expression_categorical(self._plan, left) is not None
+            or expression_categorical(self._plan, self._expression) is not None
+        )
+        left_expression, right_expression = self._categorical_binary_operands(
+            left,
+            self._expression,
+            operator,
+        )
+        temporal_type = temporal_binary_type(
+            expression_type(self._plan, left),
+            expression_type(self._plan, self._expression),
+            operator,
+        )
+        if temporal_type == "UNKNOWN":
+            raise UnsupportedOperationError(f"Unsupported temporal operation: {operator.value}")
+        expression: Expression = BinaryExpression(
+            left_expression,
+            operator,
+            right_expression,
+        )
+        if operator in {
+            BinaryOperator.EQUAL,
+            BinaryOperator.NOT_EQUAL,
+            BinaryOperator.LESS_THAN,
+            BinaryOperator.LESS_EQUAL,
+            BinaryOperator.GREATER_THAN,
+            BinaryOperator.GREATER_EQUAL,
+        } and (temporal_type == "BOOLEAN" or has_categorical):
+            expression = FunctionCall(
+                "coalesce",
+                (expression, LiteralValue(operator is BinaryOperator.NOT_EQUAL)),
+                return_type="BOOLEAN",
+            )
+        result_name = (
+            self.name if not isinstance(other, Series) or self.name == other.name else None
+        )
         return Series(
             self._session,
             self._plan,
-            BinaryExpression(left, operator, self._expression),
-            self.name,
+            expression,
+            result_name,
         )
 
     def _aligned_binary(
@@ -930,11 +1068,15 @@ class Series:
         validate_explicit_index_alignment(left, right)
         left_column = left._plan.metadata.visible_columns[0]
         right_column = right._plan.metadata.visible_columns[0]
-        if not is_numeric_type(left_column.duckdb_type) or not is_numeric_type(
-            right_column.duckdb_type
+        left_type = left_column.duckdb_type
+        right_type = right_column.duckdb_type
+        temporal_type = temporal_binary_type(left_type, right_type, operator)
+        if temporal_type == "UNKNOWN" or (
+            temporal_type is None
+            and (not is_numeric_type(left_type) or not is_numeric_type(right_type))
         ):
             raise UnsupportedOperationError(
-                "Cross-frame Series arithmetic currently supports only numeric data"
+                "Cross-frame Series arithmetic requires compatible numeric or temporal data"
             )
         plan = plan_merge(
             left,
@@ -966,14 +1108,17 @@ class Series:
             self.name,
         )
 
-    def _call_function(self, name: str, *args: Expression) -> Series:
+    def _call_function(
+        self,
+        name: str,
+        *args: Expression,
+        return_type: str | None = None,
+    ) -> Series:
         """Construct a new Series by calling a function on this expression."""
-        from duckpd._logical import FunctionCall
-
         return Series(
             self._session,
             self._plan,
-            FunctionCall(name, (self._expression, *args)),
+            FunctionCall(name, (self._expression, *args), return_type=return_type),
             self.name,
         )
 
@@ -990,6 +1135,13 @@ class Series:
         from duckpd.accessors import DatetimeProperties
 
         return DatetimeProperties(self)
+
+    @property
+    def cat(self) -> CategoricalMethods:
+        """Access categorical metadata and transformations."""
+        from duckpd.accessors import CategoricalMethods
+
+        return CategoricalMethods(self)
 
     def _require_order(self) -> tuple[SortKey, ...]:
         """Validate that the plan has guaranteed ordering and return SortKeys."""

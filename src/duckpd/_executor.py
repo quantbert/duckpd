@@ -737,6 +737,19 @@ class Executor:
                         else cast("pd.Timestamp", value).date()
                     )
                 )
+        for column in plan.metadata.columns:
+            label = compiled.bindings[column.id]
+            if column.categorical is not None:
+                result[label] = pd.Categorical(
+                    result[label],
+                    categories=cast("Any", list(column.categorical.categories)),
+                    ordered=column.categorical.ordered,
+                )
+            if column.timezone is not None and isinstance(
+                result[label].dtype,
+                pd.DatetimeTZDtype,
+            ):
+                result[label] = result[label].dt.tz_convert(column.timezone)
         source_dtypes = self._pandas_dtypes(plan)
         source_labels: dict[str, str] = {
             compiled.bindings[column_id]: dtype

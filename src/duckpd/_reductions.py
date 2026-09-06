@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
 from numbers import Integral
 
 from duckpd._logical import (
     AggregateExpression,
     AggregateOperator,
     AggregatePlan,
+    BinaryExpression,
     BinaryOperator,
     CaseWhen,
     CastExpression,
+    CategoricalSpec,
     Column,
     ColumnId,
     ColumnRef,
@@ -50,6 +53,150 @@ def is_numeric_type(duckdb_type: str) -> bool:
     return duckdb_type in _NUMERIC_TYPES or duckdb_type.startswith("DECIMAL(")
 
 
+def is_timestamp_type(duckdb_type: str) -> bool:
+    """Return whether a DuckDB logical type represents a timestamp."""
+    return duckdb_type.startswith("TIMESTAMP") or duckdb_type == "TIMESTAMPTZ"
+
+
+def is_timezone_aware_type(duckdb_type: str) -> bool:
+    """Return whether a DuckDB timestamp type carries absolute instants."""
+    return "TIME ZONE" in duckdb_type or duckdb_type == "TIMESTAMPTZ"
+
+
+def temporal_binary_type(
+    left: str,
+    right: str,
+    operator: BinaryOperator,
+) -> str | None:
+    """Infer temporal arithmetic, returning None when neither side is temporal."""
+    if not (
+        is_timestamp_type(left)
+        or is_timestamp_type(right)
+        or left == "INTERVAL"
+        or right == "INTERVAL"
+    ):
+        return None
+    left_timestamp = is_timestamp_type(left)
+    right_timestamp = is_timestamp_type(right)
+    if operator in {
+        BinaryOperator.EQUAL,
+        BinaryOperator.NOT_EQUAL,
+        BinaryOperator.LESS_THAN,
+        BinaryOperator.LESS_EQUAL,
+        BinaryOperator.GREATER_THAN,
+        BinaryOperator.GREATER_EQUAL,
+    }:
+        if (
+            left == right
+            or (left_timestamp and (right_timestamp or right == "UNKNOWN"))
+            or (right_timestamp and left == "UNKNOWN")
+        ):
+            return "BOOLEAN"
+        return "UNKNOWN"
+    if operator is BinaryOperator.ADD:
+        if left_timestamp and right == "INTERVAL":
+            return "TIMESTAMP WITH TIME ZONE" if is_timezone_aware_type(left) else "TIMESTAMP"
+        if left == "INTERVAL" and right_timestamp:
+            return "TIMESTAMP WITH TIME ZONE" if is_timezone_aware_type(right) else "TIMESTAMP"
+        if left == right == "INTERVAL":
+            return "INTERVAL"
+        return "UNKNOWN"
+    if operator is BinaryOperator.SUBTRACT:
+        if left_timestamp and right == "INTERVAL":
+            return "TIMESTAMP WITH TIME ZONE" if is_timezone_aware_type(left) else "TIMESTAMP"
+        if left_timestamp and right_timestamp:
+            return (
+                "INTERVAL"
+                if is_timezone_aware_type(left) == is_timezone_aware_type(right)
+                else "UNKNOWN"
+            )
+        if left == right == "INTERVAL":
+            return "INTERVAL"
+        return "UNKNOWN"
+    if operator is BinaryOperator.MULTIPLY:
+        if left == "INTERVAL" and is_numeric_type(right):
+            return "INTERVAL"
+        if right == "INTERVAL" and is_numeric_type(left):
+            return "INTERVAL"
+        return "UNKNOWN"
+    if operator is BinaryOperator.TRUE_DIVIDE:
+        if left == "INTERVAL" and is_numeric_type(right):
+            return "INTERVAL"
+        if left == right == "INTERVAL":
+            return "DOUBLE"
+        return "UNKNOWN"
+    if operator is BinaryOperator.MODULO and left == right == "INTERVAL":
+        return "INTERVAL"
+    return "UNKNOWN"
+
+
+def expression_categorical(
+    plan: LogicalPlan,
+    expression: Expression,
+) -> CategoricalSpec | None:
+    """Propagate categorical metadata through identity-preserving expressions."""
+    if isinstance(expression, ColumnRef):
+        return next(
+            (column.categorical for column in plan.columns if column.id == expression.column_id),
+            None,
+        )
+    if isinstance(expression, FunctionCall) and expression.name == "__duckpd_category_ordered":
+        base = expression_categorical(plan, expression.arguments[0])
+        ordered = expression.arguments[1]
+        if (
+            base is None
+            or not isinstance(ordered, LiteralValue)
+            or not isinstance(ordered.value, bool)
+        ):
+            return None
+        return CategoricalSpec(base.categories, ordered.value)
+    if isinstance(expression, CaseWhen):
+        value = expression_categorical(plan, expression.value)
+        otherwise = expression_categorical(plan, expression.otherwise)
+        return value if value == otherwise else None
+    return None
+
+
+def expression_timezone(plan: LogicalPlan, expression: Expression) -> str | None:
+    """Propagate timezone metadata through supported temporal expressions."""
+    if isinstance(expression, ColumnRef):
+        return next(
+            (column.timezone for column in plan.columns if column.id == expression.column_id),
+            None,
+        )
+    if isinstance(expression, FunctionCall):
+        if expression.name == "__duckpd_tz_convert":
+            target = expression.arguments[1]
+            return (
+                target.value
+                if isinstance(target, LiteralValue) and isinstance(target.value, str)
+                else None
+            )
+        if expression.name == "__duckpd_tz_localize_utc":
+            return "UTC"
+        if expression.name == "__duckpd_tz_delocalize":
+            return None
+        if expression.name == "__duckpd_temporal_round":
+            return expression_timezone(plan, expression.arguments[0])
+    if isinstance(expression, BinaryExpression):
+        output_type = temporal_binary_type(
+            expression_type(plan, expression.left),
+            expression_type(plan, expression.right),
+            expression.operator,
+        )
+        if output_type is not None and is_timezone_aware_type(output_type):
+            return (
+                expression_timezone(plan, expression.left)
+                or expression_timezone(plan, expression.right)
+                or "UTC"
+            )
+    if isinstance(expression, CaseWhen):
+        value = expression_timezone(plan, expression.value)
+        otherwise = expression_timezone(plan, expression.otherwise)
+        return value if value == otherwise else None
+    return None
+
+
 def expression_type(plan: LogicalPlan, expression: Expression) -> str:
     """Infer enough expression type information to validate basic reductions."""
     if isinstance(expression, ColumnRef):
@@ -67,6 +214,18 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
             return "BIGINT"
         if isinstance(value, float):
             return "DOUBLE"
+        if isinstance(value, datetime):
+            return (
+                "TIMESTAMP WITH TIME ZONE"
+                if value.tzinfo is not None and value.utcoffset() is not None
+                else "TIMESTAMP"
+            )
+        if isinstance(value, date):
+            return "DATE"
+        if isinstance(value, time):
+            return "TIME"
+        if isinstance(value, timedelta):
+            return "INTERVAL"
         if isinstance(value, str):
             return "VARCHAR"
         return "VARCHAR"
@@ -108,6 +267,11 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         if expression.arguments:
             return expression_type(plan, expression.arguments[0])
         return "UNKNOWN"
+    left = expression_type(plan, expression.left)
+    right = expression_type(plan, expression.right)
+    temporal_type = temporal_binary_type(left, right, expression.operator)
+    if temporal_type is not None:
+        return temporal_type
     if expression.operator in {
         BinaryOperator.EQUAL,
         BinaryOperator.NOT_EQUAL,
@@ -119,8 +283,6 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         BinaryOperator.OR,
     }:
         return "BOOLEAN"
-    left = expression_type(plan, expression.left)
-    right = expression_type(plan, expression.right)
     return binary_numeric_type(left, right, expression.operator.value)
 
 

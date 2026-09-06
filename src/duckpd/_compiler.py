@@ -54,7 +54,7 @@ from duckpd._logical import (
     WindowFrameKind,
 )
 from duckpd._optimizer import LogicalOptimizer, OptimizationResult
-from duckpd._quoting import quote_identifier
+from duckpd._quoting import quote_identifier, quote_literal
 from duckpd.errors import UnsupportedOperationError
 
 if TYPE_CHECKING:
@@ -97,7 +97,7 @@ class DuckDBCompiler:
         columns: list[Column] = []
         for label, duckdb_type in zip(labels, relation.types, strict=True):
             dtype = str(duckdb_type)
-            if dtype.endswith("[]") or dtype.startswith(("STRUCT(", "MAP(", "UNION(", "ENUM(")):
+            if dtype.endswith("[]") or dtype.startswith(("STRUCT(", "MAP(", "UNION(")):
                 raise UnsupportedOperationError(
                     f"DuckPD does not yet define pandas collection semantics for "
                     f"nested DuckDB type {dtype} in column {label!r}"
@@ -312,6 +312,70 @@ class DuckDBCompiler:
             raise AssertionError("Row-count sampling requires n")
         return f"reservoir({plan.n} ROWS)"
 
+    def _internal_function_sql(
+        self,
+        expression: FunctionCall,
+        bindings: dict[ColumnId, str],
+    ) -> str | None:
+        """Compile DuckPD-owned scalar functions with validated typed arguments."""
+        name = expression.name
+        if name in {"__duckpd_category_ordered", "__duckpd_tz_convert"}:
+            return self._expression_to_sql(expression.arguments[0], bindings)
+        if name == "__duckpd_tz_localize_utc":
+            value = self._expression_to_sql(expression.arguments[0], bindings)
+            return f"timezone('UTC', {value})"
+        if name == "__duckpd_tz_delocalize":
+            value = self._expression_to_sql(expression.arguments[0], bindings)
+            timezone = expression.arguments[1]
+            if not isinstance(timezone, LiteralValue) or not isinstance(timezone.value, str):
+                raise AssertionError("Timezone delocalization requires a timezone literal")
+            return f"timezone({quote_literal(timezone.value)}, {value})"
+        if name != "__duckpd_temporal_round":
+            return None
+
+        if len(expression.arguments) != 3:
+            raise AssertionError("Temporal rounding requires value, duration, and mode")
+        duration_arg, mode_arg = expression.arguments[1:]
+        if (
+            not isinstance(duration_arg, LiteralValue)
+            or not isinstance(duration_arg.value, int)
+            or duration_arg.value <= 0
+            or not isinstance(mode_arg, LiteralValue)
+            or mode_arg.value not in {"floor", "ceil", "round"}
+        ):
+            raise AssertionError("Invalid typed temporal rounding arguments")
+        value = self._expression_to_sql(expression.arguments[0], bindings)
+        duration = duration_arg.value
+        epoch = f"epoch_ns({value})"
+        remainder = f"((({epoch} % {duration}) + {duration}) % {duration})"
+        floor_value = f"({epoch} - {remainder})"
+        if mode_arg.value == "floor":
+            rounded = floor_value
+        elif mode_arg.value == "ceil":
+            rounded = (
+                f"(CASE WHEN {remainder} = 0 THEN {epoch} "
+                f"ELSE {epoch} + ({duration} - {remainder}) END)"
+            )
+        else:
+            half = duration // 2
+            if duration % 2:
+                rounded = (
+                    f"(CASE WHEN {remainder} <= {half} THEN {floor_value} "
+                    f"ELSE {floor_value} + {duration} END)"
+                )
+            else:
+                quotient = f"({floor_value} // {duration})"
+                rounded = (
+                    f"(CASE WHEN {remainder} < {half} THEN {floor_value} "
+                    f"WHEN {remainder} > {half} THEN {floor_value} + {duration} "
+                    f"WHEN ({quotient} % 2) = 0 THEN {floor_value} "
+                    f"ELSE {floor_value} + {duration} END)"
+                )
+        timestamp = f"make_timestamp_ns({rounded})"
+        if expression.return_type in {"TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ"}:
+            return f"timezone('UTC', {timestamp})"
+        return timestamp
+
     def compile_expression(
         self, expression: Expression, bindings: dict[ColumnId, str]
     ) -> duckdb.Expression:
@@ -346,6 +410,9 @@ class DuckDBCompiler:
             other = self.compile_expression(expression.otherwise, bindings)
             return duckdb.CaseExpression(cond, val).otherwise(other)
         if isinstance(expression, FunctionCall):
+            internal_sql = self._internal_function_sql(expression, bindings)
+            if internal_sql is not None:
+                return duckdb.SQLExpression(internal_sql)
             compiled_args = [self.compile_expression(arg, bindings) for arg in expression.arguments]
             name = expression.name.lower()
             if name == "coalesce" and len(compiled_args) == 2:
@@ -426,6 +493,9 @@ class DuckDBCompiler:
             other_sql = self._expression_to_sql(expression.otherwise, bindings)
             return f"(CASE WHEN {cond_sql} THEN {val_sql} ELSE {other_sql} END)"
         if isinstance(expression, FunctionCall):
+            internal_sql = self._internal_function_sql(expression, bindings)
+            if internal_sql is not None:
+                return internal_sql
             name = expression.name
             if name.lower() == "coalesce" and len(expression.arguments) == 2:
                 arg0 = self._expression_to_sql(expression.arguments[0], bindings)

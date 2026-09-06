@@ -31,6 +31,14 @@ class Nullability(Enum):
 
 
 @dataclass(frozen=True)
+class CategoricalSpec:
+    """Pandas categorical metadata independent of its physical DuckDB type."""
+
+    categories: tuple[ScalarValue, ...]
+    ordered: bool = False
+
+
+@dataclass(frozen=True)
 class Column:
     """Column metadata available without executing row-producing queries."""
 
@@ -40,6 +48,8 @@ class Column:
     hidden: bool = False
     nullable: Nullability = Nullability.UNKNOWN
     alias_of: ColumnId | None = None
+    categorical: CategoricalSpec | None = None
+    timezone: str | None = None
 
 
 def sanitize_source_location(location: str) -> str:

@@ -95,12 +95,67 @@ def test_groupby_dropna_behavior(sample_sales: pd.DataFrame) -> None:
     assert_frame_equal(result_keepna.collect(), expected_keepna)
 
 
-def test_groupby_rejects_unobserved_categorical_groups() -> None:
-    source = pd.DataFrame({"group": ["a"], "value": [1]})
+@pytest.mark.parametrize("as_index", [True, False])
+@pytest.mark.parametrize("observed", [True, False])
+def test_categorical_groupby_observed_matches_pandas(
+    as_index: bool,
+    observed: bool,
+) -> None:
+    source = pd.DataFrame(
+        {
+            "group": pd.Categorical(
+                ["beta", "alpha", "beta"],
+                categories=["unused", "alpha", "beta"],
+                ordered=False,
+            ),
+            "value": [1, 2, 4],
+        }
+    )
     frame = duckpd.from_pandas(source)
 
-    with pytest.raises(UnsupportedOperationError, match="unobserved categorical"):
-        frame.groupby("group", observed=False)
+    result = frame.groupby(
+        "group",
+        as_index=as_index,
+        observed=observed,
+    ).agg(total=("value", "sum"), count=("value", "count"))
+    expected = source.groupby(
+        "group",
+        as_index=as_index,
+        observed=observed,
+    ).agg(total=("value", "sum"), count=("value", "count"))
+
+    assert_frame_equal(result.collect(), expected)
+
+
+def test_categorical_groupby_unobserved_empty_input_and_size() -> None:
+    source = pd.DataFrame(
+        {
+            "group": pd.Categorical([], categories=["first", "second"]),
+            "value": pd.Series([], dtype="float64"),
+        }
+    )
+    frame = duckpd.from_pandas(source)
+
+    result = frame.groupby("group", observed=False).size().collect()
+    expected = source.groupby("group", observed=False).size().to_frame("size")
+
+    assert_frame_equal(result, expected)
+
+
+def test_categorical_groupby_rejects_unsupported_unobserved_shapes() -> None:
+    source = pd.DataFrame(
+        {
+            "left": pd.Categorical(["a"], categories=["a", "b"]),
+            "right": pd.Categorical(["x"], categories=["x", "y"]),
+            "value": [1],
+        }
+    )
+    frame = duckpd.from_pandas(source)
+
+    with pytest.raises(UnsupportedOperationError, match="one categorical key"):
+        frame.groupby(["left", "right"], observed=False)
+    with pytest.raises(UnsupportedOperationError, match="sort=True"):
+        frame.groupby("left", observed=False, sort=False)
 
 
 def test_groupby_sort_false_preserves_order() -> None:

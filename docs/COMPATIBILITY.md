@@ -101,7 +101,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `duckpd.read_csv(path, ...)` | **`[Pandas-API Subset]`** | `path`, `session`, `header`, `delimiter`, `auto_detect`, `index`, `order_by` | `DataFrame` | Lazy CSV scan via DuckDB reader with automatic hidden file-order identity. Supports explicit `order_by` and `index` declarations. |
 | `duckpd.from_pandas(df, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a snapshot into a session, tracking hidden source row identity. |
 | `duckpd.from_arrow(table, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with an appended hidden stable row identity column. |
-| `duckpd.concat(objs, ...)` | **`[Intentional Deviation]`** | `objs`, `axis=0\|1`, `join='outer'\|'inner'`, `ignore_index=False`, `sort=False` | `DataFrame` | Supports `axis=0` (row-wise union) and `axis=1` (column-wise concatenation). Axis 1 optimizes same-plan Series into a single projection and aligns multi-frame inputs via explicit index joins. Rejects duplicate column labels when `ignore_index=False`. |
+| `duckpd.concat(objs, ...)` | **`[Intentional Deviation]`** | `objs`, `axis=0\|1`, `join='outer'\|'inner'`, `ignore_index=False`, `sort=False` | Supports `axis=0` (row-wise union) and `axis=1` (column-wise concatenation). Axis 0 preserves matching categorical universes/order and timezone metadata. Axis 1 optimizes same-plan Series into a single projection and aligns multi-frame inputs via explicit index joins. Rejects duplicate column labels when `ignore_index=False`. |
 
 ---
 
@@ -142,7 +142,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `df.rank(...)` | **`[Intentional Deviation]`** | `method`, `na_option`, `ascending`, `pct` | Numerical ranking (average, min, max, first, dense) (requires `OrderSpec`). |
 | `df.rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False`, `on`, `closed` | Row-count windows accept positive integers. Fixed-duration windows accept strings or `datetime.timedelta`, default `min_periods` to 1, require `on=` for DataFrames, and use the explicit datetime index for Series. Supports `closed='right'\|'left'\|'both'\|'neither'` and all rolling reductions listed above. |
 | `df.expanding(...)` | **`[Intentional Deviation]`** | `min_periods` | Expanding window object (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`) (requires `OrderSpec`). |
-| `df.groupby(by, ...)` | **`[Pandas-API Subset]`** | `by`, `as_index`, `sort`, `dropna` | Creates `DataFrameGroupBy` builder. |
+| `df.groupby(by, ...)` | **`[Pandas-API Subset]`** | `by`, `as_index`, `sort`, `dropna`, `observed` | Creates `DataFrameGroupBy` builder. `observed=False` expands unused values for one categorical key when `sort=True` and `dropna=True`; unsupported multi-key, `sort=False`, and `dropna=False` variants reject before execution. |
 | `df.groupby(...).rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False`, `on`, `closed` | Row-count and fixed-duration `DataFrameGroupBy` and `SeriesGroupBy` windows (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`). Group keys compile to window partitions; source `OrderSpec` defines order within each group. DataFrame duration windows use `on=`; Series duration windows use the explicit datetime index. Results preserve pandas grouped index layout, and direct assignment to the originating frame uses row-preserving lazy alignment. |
 | `df.merge(right, ...)` | **`[Intentional Deviation]`** | `how`, `on`, `left_on`, `right_on`, `left_index`, `right_index`, `suffixes`, `sort`, `validate` | Relational join with pandas null-key semantics (`IS NOT DISTINCT FROM`) and lazy cardinality validation. Clears total ordering guarantees. |
 | `df.join(other, ...)` | **`[Intentional Deviation]`** | `how`, `lsuffix`, `rsuffix`, `sort`, `validate` | Index-based join convenience method supporting cardinality validation. Clears total ordering guarantees. |
@@ -188,6 +188,7 @@ that ambiguous case prevents silently different results.
 | `s.nlargest(n)` | **`[Pandas-API Subset]`** | `n=5`, `keep='first'` | Returns top `n` values lazily. |
 | `s.nsmallest(n)` | **`[Pandas-API Subset]`** | `n=5`, `keep='first'` | Returns bottom `n` values lazily. |
 | `s.collect()` / `to_pandas()` | **`[DuckPD Extension]`** | None | Executes plan and returns pandas Series. |
+| Temporal arithmetic and comparison | **`[Pandas-API Subset]`** | Timestamp/duration Series and datetime/timedelta scalars | Supports timestamp ± duration, timestamp subtraction, duration arithmetic, and temporal comparisons. |
 
 All transformation, cumulative, window, and reduction methods listed for DataFrames (`astype`, `fillna`, `dropna`, `where`, `mask`, `clip`, `replace`, `sample`, `isna`, `notna`, `cumsum`, `shift`, `diff`, `pct_change`, `rank`, `rolling`, `expanding`, `groupby`) are also supported on `Series`.
 
@@ -212,9 +213,9 @@ Available on both `DataFrame` and `Series`:
 
 ---
 
-## 8. Vectorized Accessors (`Series.str` & `Series.dt`)
+## 8. Vectorized Accessors (`Series.str`, `Series.dt`, and `Series.cat`)
 
-Methods operate lazily on plan-backed Series, compiling directly into DuckDB string and temporal functions.
+Methods operate lazily on plan-backed Series, compiling directly into DuckDB expressions.
 
 ### `Series.str` (`[Pandas-API Subset]`)
 * `upper()`, `lower()`, `strip()`, `len()`
@@ -225,6 +226,23 @@ Methods operate lazily on plan-backed Series, compiling directly into DuckDB str
 * `year`, `month`, `day`, `hour`, `minute`, `second`, `date`
 * `strftime(date_format)`
 * `to_period(freq='Y'\|'M'\|'D')`
+* `floor(freq)`, `ceil(freq)`, and `round(freq)` for positive fixed durations.
+  Naive and UTC-aware timestamps are supported; convert other aware timestamps
+  to UTC before rounding.
+* `tz_convert(tz)` for aware timestamps, `tz_localize('UTC')` for naive
+  timestamps, and `tz_localize(None)` for removing an existing timezone.
+  Non-UTC localization is rejected because DuckDB cannot represent pandas'
+  local-wall-time DST ambiguity contract.
+
+### `Series.cat` (`[Pandas-API Subset]`)
+* `categories`, `ordered`, and lazy `codes`
+* `as_ordered()` and `as_unordered()`
+* Equality comparisons for categoricals and ordering comparisons for ordered
+  categoricals. Categories, declared order, unused values, and ordered state
+  are retained through supported projection, filtering, assignment, rename,
+  row-wise concatenation, grouping, and pandas collection.
+* Sorting non-string categoricals is rejected until DuckDB can apply arbitrary
+  declared category order without rematerialization.
 
 ## 9. Narwhals Interoperability
 
@@ -300,10 +318,11 @@ The following are unsupported contracts, not implicit future behavior:
 
 - arbitrary row-wise Python `apply` and invisible pandas or DuckDB `map()`
   fallback;
-- `GroupBy.apply`, categorical grouping, categorical metadata, and `.cat`;
-- calendar-offset rolling windows such as months or years, timezone
-  transformations, and temporal floor/ceil/round;
-- nested list, array, struct, map, union, and enum collection;
+- `GroupBy.apply` and unobserved categorical grouping with multiple keys,
+  `sort=False`, or `dropna=False`;
+- calendar-offset rolling or datetime rounding windows such as months or years,
+  non-UTC timezone localization, and non-UTC local-wall-time rounding;
+- nested list, array, struct, map, and union collection;
 - duplicate displayed column labels and implicit positional cross-frame
   alignment;
 - unbounded eager collection except through an explicit collection API;
