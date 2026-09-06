@@ -21,6 +21,7 @@ DuckPD is a lazy, out-of-core DataFrame library with a familiar pandas-shaped AP
 * **⚙️ Minimal Resource Footprint:** Run end-to-end data processing pipelines on lightweight compute (small laptops, low-tier cloud instances, or constrained containers) over datasets far larger than available RAM.
 * **📈 Zero-Materialization Grouped Rolling Windows:** Compute grouped, multi-entity rolling/expanding statistics (e.g., 20-day vs 50-day moving average crossovers across thousands of stock tickers) and assign them directly back to your dataframe without materializing intermediate tables.
 * **🌐 Federated Remote Queries:** Query HTTP/S3/GCS Parquet and attach PostgreSQL, MySQL, and SQLite databases directly into lazy pandas pipelines—with full credential redaction and scan guardrails.
+* **⏱️ Native Point-in-Time Feature Store:** Build leakage-safe training and inference frames from local, Hugging Face, or HTTP(S) Parquet stores. DuckPD applies catalog-declared availability delays, performs exact or native ASOF alignment lazily, and mirrors only the required partitions and columns into a coordinated local cache.
 * **🛡️ Zero Silent Fallbacks:** If an operation is unsupported or ordering is ambiguous, DuckPD fails explicitly before query execution. Your dataset will never be silently materialized into in-memory pandas.
 * **🔌 Native Narwhals Lazy Backend:** Drop DuckPD directly into modern visualization and machine learning libraries (Plotly, Altair, etc.) via `nw.from_native(df)` for zero-copy, lazy DuckDB execution.
 * **🔍 Deep Observability:** Inspect physical plans, optimizer pushdown, operator timings, peak RSS, and DuckDB spill metrics with `df.explain()`, `df.explain_write()`, and `df.profile()`.
@@ -134,6 +135,118 @@ transformed = lazy_df.with_columns(
 
 # Collect cleanly as Arrow or pandas when ready
 arrow_table = nw.to_native(transformed).to_arrow()
+```
+
+---
+
+## ⏱️ Native Feature Store
+
+Turn partitioned Parquet datasets into reproducible, leakage-safe feature
+frames without deploying a separate feature-serving service. A versioned
+`catalog.json` defines datasets, entity keys, event-time columns, feature
+names, and availability delays; DuckPD keeps the resulting work inside its
+typed lazy plan.
+
+* **Point-in-time correctness:** Native backward ASOF joins apply each
+  feature's declared `availability_delay`, preventing observations from
+  becoming visible before they would have been known.
+* **Transparent remote caching:** Local, Hugging Face (`hf://`), and HTTP(S)
+  stores use the same API. Remote yearly or monthly partitions are fetched
+  just in time and mirrored into a local cache.
+* **Projection-aware storage:** The cache retains the cumulative union of
+  requested columns instead of repeatedly downloading full feature families.
+* **Safe concurrent workers:** Per-partition coordination, unique staging
+  files, and atomic replacement protect shared caches from partial writes.
+* **Lazy end to end:** `features()`, `table()`, and `feature_batches()` return
+  ordinary DuckPD lazy DataFrames. Use `sync()` when a batch job should
+  pre-warm its required partitions.
+
+```python
+import duckpd as pd
+
+store = pd.FeatureStore(
+    source="hf://datasets/acme/market-features",
+    cache="~/.cache/duckpd/market-features",
+)
+
+training_frame = store.features(
+    features={
+        "close": "ohlcv:close",
+        "momentum_20d": "momentum:value_20d",
+    },
+    start="2023-01-01T00:00:00Z",
+    end="2025-01-01T00:00:00Z",
+    alignment="point_in_time",
+    spine="ohlcv",
+)
+
+# Still lazy: DuckDB performs partition pruning, projection, and ASOF alignment.
+training_frame.write_parquet("training/features.parquet")
+```
+
+See the
+[interactive walkthrough](demo/featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb),
+[compatibility contract](docs/COMPATIBILITY.md), and
+[implementation roadmap](docs/design/featurestore-implementation-roadmap.md).
+Benchmark cold remote fetching against warm local-cache execution with
+`uv run python -m benchmark.featurestore --help`.
+
+---
+
+## 🌐 One Lazy DataFrame, Many Sources
+
+Every supported input becomes the same typed `duckpd.DataFrame`. Sources stay
+lazy through filtering, joins, grouping, windows, and feature alignment;
+execution begins only at an explicit collection or sink boundary.
+
+```mermaid
+flowchart LR
+    subgraph Local["Local sources"]
+        CSV["CSV files and globs"]
+        PARQUET["Parquet files and globs"]
+        SQLITE["SQLite database"]
+        CATALOG["DuckDB SQL and catalog tables"]
+        LOCAL_FS["Local FeatureStore"]
+    end
+
+    subgraph Remote["Remote sources"]
+        HTTP["HTTP(S) Parquet"]
+        OBJECT["S3 / GCS Parquet"]
+        DATABASES["PostgreSQL / MySQL"]
+        REMOTE_FS["Hugging Face / HTTP(S)<br/>FeatureStore"]
+    end
+
+    subgraph Memory["In-memory sources"]
+        PANDAS["pandas DataFrame"]
+        ARROW["Arrow Table / RecordBatch"]
+    end
+
+    CSV -->|"read_csv()"| LAZY
+    PARQUET -->|"read_parquet()"| LAZY
+    HTTP -->|"read_parquet()"| LAZY
+    OBJECT -->|"read_parquet() + scoped secret"| LAZY
+    SQLITE -->|"attach_sqlite().table()"| LAZY
+    DATABASES -->|"attach_postgres() / attach_mysql()"| LAZY
+    CATALOG -->|"session.sql() / session.table()"| LAZY
+    LOCAL_FS -->|"features() / table()"| LAZY
+    REMOTE_FS -->|"JIT partition cache"| LAZY
+    PANDAS -->|"from_pandas()"| LAZY
+    ARROW -->|"from_arrow()"| LAZY
+
+    LAZY["DuckPD lazy DataFrame<br/>typed logical plan"]
+    LAZY --> OPS["Lazy relational pipeline<br/>filter · project · join · groupby · window · ASOF"]
+    OPS --> ENGINE["DuckDB vectorized execution<br/>bounded memory + spill"]
+    ENGINE --> COLLECT["collect() · head() · to_arrow()"]
+    ENGINE --> SINKS["write_parquet() · write_csv() · save_as_table()"]
+
+    classDef local fill:#e8f5e9,stroke:#2e7d32,color:#111;
+    classDef remote fill:#e3f2fd,stroke:#1565c0,color:#111;
+    classDef memory fill:#fff3e0,stroke:#ef6c00,color:#111;
+    classDef core fill:#fffde7,stroke:#827717,color:#111,stroke-width:2px;
+    class CSV,PARQUET,SQLITE,CATALOG,LOCAL_FS local;
+    class HTTP,OBJECT,DATABASES,REMOTE_FS remote;
+    class PANDAS,ARROW memory;
+    class LAZY,OPS,ENGINE,COLLECT,SINKS core;
 ```
 
 ---
