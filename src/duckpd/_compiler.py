@@ -49,7 +49,9 @@ from duckpd._logical import (
     UnaryExpression,
     UnaryOperator,
     UnionPlan,
+    WindowClosed,
     WindowExpression,
+    WindowFrameKind,
 )
 from duckpd._optimizer import LogicalOptimizer, OptimizationResult
 from duckpd._quoting import quote_identifier
@@ -466,17 +468,52 @@ class DuckDBCompiler:
             parts = ", ".join(self._expression_to_sql(p, bindings) for p in expression.partition_by)
             window_parts.append(f"PARTITION BY {parts}")
         if expression.order_by:
+            if (
+                expression.frame is not None
+                and expression.frame.kind is WindowFrameKind.RANGE
+                and len(expression.order_by) != 1
+            ):
+                raise AssertionError("Range windows require exactly one order expression")
             order_strs: list[str] = []
-            for k in expression.order_by:
-                expr_sql = self._expression_to_sql(k.expression, bindings)
-                dir_sql = "ASC" if k.direction is SortDirection.ASCENDING else "DESC"
+            for key in expression.order_by:
+                expr_sql = self._expression_to_sql(key.expression, bindings)
+                if expression.frame is not None and expression.frame.kind is WindowFrameKind.RANGE:
+                    expr_sql = f"epoch_ns({expr_sql})"
+                dir_sql = "ASC" if key.direction is SortDirection.ASCENDING else "DESC"
                 null_sql = (
-                    "NULLS FIRST" if k.null_placement is NullPlacement.FIRST else "NULLS LAST"
+                    "NULLS FIRST" if key.null_placement is NullPlacement.FIRST else "NULLS LAST"
                 )
                 order_strs.append(f"{expr_sql} {dir_sql} {null_sql}")
             window_parts.append(f"ORDER BY {', '.join(order_strs)}")
-        if expression.frame_spec:
-            window_parts.append(expression.frame_spec)
+        if expression.frame is not None:
+            frame = expression.frame
+            if frame.kind is WindowFrameKind.ROWS:
+                start = (
+                    "UNBOUNDED PRECEDING"
+                    if frame.preceding is None
+                    else f"{frame.preceding} PRECEDING"
+                )
+                window_parts.append(f"ROWS BETWEEN {start} AND CURRENT ROW")
+            else:
+                if frame.preceding is None or frame.preceding <= 0:
+                    raise AssertionError("Range windows require a positive duration")
+                duration = frame.preceding
+                if frame.closed is WindowClosed.BOTH:
+                    start = f"{duration} PRECEDING"
+                    end = "CURRENT ROW"
+                elif frame.closed is WindowClosed.RIGHT:
+                    start = f"{duration - 1} PRECEDING"
+                    end = "CURRENT ROW"
+                elif frame.closed is WindowClosed.LEFT:
+                    start = f"{duration} PRECEDING"
+                    end = "1 PRECEDING"
+                elif duration == 1:
+                    start = "CURRENT ROW"
+                    end = "CURRENT ROW EXCLUDE CURRENT ROW"
+                else:
+                    start = f"{duration - 1} PRECEDING"
+                    end = "1 PRECEDING"
+                window_parts.append(f"RANGE BETWEEN {start} AND {end}")
         over_clause = " ".join(window_parts)
         return f"{expression.function}({args_str}) OVER ({over_clause})"
 

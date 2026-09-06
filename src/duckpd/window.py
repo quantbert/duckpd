@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from datetime import timedelta
+from typing import TYPE_CHECKING, Literal, TypeAlias
+
+import pandas as pd
 
 from duckpd._logical import (
     BinaryExpression,
@@ -27,7 +30,10 @@ from duckpd._logical import (
     SortDirection,
     SortKey,
     SortPlan,
+    WindowClosed,
     WindowExpression,
+    WindowFrame,
+    WindowFrameKind,
 )
 from duckpd._metadata import (
     after_filter,
@@ -44,6 +50,15 @@ if TYPE_CHECKING:
     from duckpd.series import Series
 
 
+Closed: TypeAlias = Literal["right", "left", "both", "neither"]
+RollingWindow: TypeAlias = int | str | timedelta
+
+
+def _is_timestamp_type(duckdb_type: str) -> bool:
+    normalized = duckdb_type.upper()
+    return normalized == "UNKNOWN" or normalized.startswith("TIMESTAMP")
+
+
 class WindowBase:
     """Base class for rolling and expanding window calculations."""
 
@@ -51,16 +66,22 @@ class WindowBase:
         self,
         parent: DataFrame | Series,
         min_periods: int,
-        frame_spec: str,
+        frame: WindowFrame,
         *,
         partition_by: tuple[Expression, ...] = (),
+        order_by: tuple[SortKey, ...] | None = None,
+        on_column: Column | None = None,
     ) -> None:
         self._parent = parent
         self._min_periods = min_periods
-        self._frame_spec = frame_spec
+        self._frame = frame
         self._partition_by = partition_by
+        self._range_order_by = order_by
+        self._on_column = on_column
 
     def _require_order(self) -> tuple[SortKey, ...]:
+        if self._range_order_by is not None:
+            return self._range_order_by
         ordering = self._parent._plan.metadata.ordering
         if not ordering.keys:
             raise UnorderedOperationError(
@@ -70,11 +91,11 @@ class WindowBase:
             )
         return tuple(
             SortKey(
-                ColumnRef(k.column_id),
-                k.direction,
-                k.null_placement,
+                ColumnRef(key.column_id),
+                key.direction,
+                key.null_placement,
             )
-            for k in ordering.keys
+            for key in ordering.keys
         )
 
     def _apply_series_agg(
@@ -94,18 +115,20 @@ class WindowBase:
                 arguments=(s._expression,),
                 partition_by=self._partition_by,
                 order_by=order_keys,
-                frame_spec=self._frame_spec,
+                frame=self._frame,
             )
-            row_num = WindowExpression(
-                function="row_number",
+            observation_count = WindowExpression(
+                function="count",
+                arguments=(LiteralValue(1),),
                 partition_by=self._partition_by,
                 order_by=order_keys,
+                frame=self._frame,
             )
             cnt_expr: Expression
             if self._min_periods > 1:
                 cnt_expr = CaseWhen(
                     BinaryExpression(
-                        row_num,
+                        observation_count,
                         BinaryOperator.LESS_THAN,
                         LiteralValue(self._min_periods),
                     ),
@@ -145,7 +168,7 @@ class WindowBase:
             arguments=(op,),
             partition_by=self._partition_by,
             order_by=order_keys,
-            frame_spec=self._frame_spec,
+            frame=self._frame,
         )
         if func == "sum" and self._min_periods == 0:
             window_val = FunctionCall("coalesce", (window_val, LiteralValue(0)))
@@ -154,7 +177,7 @@ class WindowBase:
             arguments=(s._expression,),
             partition_by=self._partition_by,
             order_by=order_keys,
-            frame_spec=self._frame_spec,
+            frame=self._frame,
         )
 
         min_req = self._min_periods
@@ -187,6 +210,9 @@ class WindowBase:
         new_projections: list[NamedExpression] = []
 
         for col in visible:
+            if self._on_column is not None and col.id == self._on_column.id:
+                new_projections.append(NamedExpression(col, ColumnRef(col.id)))
+                continue
             is_num = is_numeric_type(col.duckdb_type)
             if numeric_only and not is_num:
                 continue
@@ -216,33 +242,132 @@ class Rolling(WindowBase):
     def __init__(
         self,
         parent: DataFrame | Series,
-        window: int,
+        window: RollingWindow,
         min_periods: int | None = None,
         *,
         center: bool = False,
+        on: str | None = None,
+        closed: Closed | None = None,
         _partition_by: tuple[Expression, ...] = (),
+        _key_columns: tuple[Column, ...] = (),
     ) -> None:
-        if type(window) is not int:
-            raise ValueError("window must be an integer")
-        if window <= 0:
-            raise ValueError("window must be a positive integer")
         if center:
             raise UnsupportedOperationError("DuckPD does not support center=True in rolling")
-        if min_periods is not None and (type(min_periods) is not int):
+        if min_periods is not None and type(min_periods) is not int:
             raise ValueError("min_periods must be an integer")
-        min_p = window if min_periods is None else min_periods
+
+        if type(window) is int:
+            if on is not None:
+                raise UnsupportedOperationError(
+                    "DuckPD supports on= only for fixed-duration rolling windows"
+                )
+            if closed is not None:
+                raise UnsupportedOperationError(
+                    "DuckPD supports closed= only for fixed-duration rolling windows"
+                )
+            if window <= 0:
+                raise ValueError("window must be a positive integer")
+            min_p = window if min_periods is None else min_periods
+            if min_p < 0:
+                raise ValueError("min_periods must be non-negative")
+            if min_p > window:
+                raise ValueError("min_periods must not exceed window")
+            frame = WindowFrame(WindowFrameKind.ROWS, window - 1)
+            super().__init__(
+                parent,
+                min_p,
+                frame,
+                partition_by=_partition_by,
+            )
+            self._window = window
+            return
+
+        if not isinstance(window, (str, timedelta)):
+            raise ValueError("window must be an integer or fixed duration")
+        if closed not in {None, "right", "left", "both", "neither"}:
+            raise ValueError("closed must be 'right', 'left', 'both' or 'neither'")
+        try:
+            duration = pd.Timedelta(window)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("window must be a positive fixed duration") from error
+        if duration <= pd.Timedelta(0):
+            raise ValueError("window must be a positive fixed duration")
+        duration_ns = int(duration.value)
+        min_p = 1 if min_periods is None else min_periods
         if min_p < 0:
             raise ValueError("min_periods must be non-negative")
-        if min_p > window:
-            raise ValueError("min_periods must not exceed window")
-        frame_spec = f"ROWS BETWEEN {window - 1} PRECEDING AND CURRENT ROW"
+
+        on_column = self._resolve_time_column(parent, on)
+        range_order = self._range_order(parent, on_column, _key_columns)
+        frame = WindowFrame(
+            WindowFrameKind.RANGE,
+            duration_ns,
+            WindowClosed(closed or "right"),
+        )
         super().__init__(
             parent,
             min_p,
-            frame_spec,
+            frame,
             partition_by=_partition_by,
+            order_by=range_order,
+            on_column=on_column,
         )
         self._window = window
+
+    @staticmethod
+    def _resolve_time_column(parent: DataFrame | Series, on: str | None) -> Column:
+        from duckpd.frame import DataFrame
+
+        metadata = parent._plan.metadata
+        if isinstance(parent, DataFrame):
+            if not isinstance(on, str) or not on:
+                raise ValueError("DataFrame time-based rolling requires on= timestamp column")
+            column = next(
+                (candidate for candidate in metadata.visible_columns if candidate.label == on),
+                None,
+            )
+            if column is None:
+                raise KeyError(on)
+        else:
+            if on is not None:
+                raise TypeError("Series.rolling() does not accept on=")
+            if len(metadata.index.columns) != 1:
+                raise ValueError("Series time-based rolling requires one explicit datetime index")
+            index_id = metadata.index.columns[0]
+            column = next(candidate for candidate in metadata.columns if candidate.id == index_id)
+        if not _is_timestamp_type(column.duckdb_type):
+            raise ValueError(
+                f"Time-based rolling requires a timestamp column; "
+                f"{column.label!r} is {column.duckdb_type}"
+            )
+        return column
+
+    @staticmethod
+    def _range_order(
+        parent: DataFrame | Series,
+        on_column: Column,
+        key_columns: tuple[Column, ...],
+    ) -> tuple[SortKey, ...]:
+        key_ids = {column.id for column in key_columns}
+        relevant = tuple(
+            key for key in parent._plan.metadata.ordering.keys if key.column_id not in key_ids
+        )
+        if (
+            not relevant
+            or relevant[0].column_id != on_column.id
+            or relevant[0].direction is not SortDirection.ASCENDING
+        ):
+            raise UnorderedOperationError(
+                "Time-based rolling requires an ascending order_by beginning with "
+                f"{on_column.label!r} after group keys"
+            )
+        return (
+            SortKey(
+                ColumnRef(on_column.id),
+                SortDirection.ASCENDING,
+                relevant[0].null_placement,
+            ),
+        )
 
     def count(self, numeric_only: bool = False) -> DataFrame | Series:
         from duckpd.series import Series
@@ -295,16 +420,18 @@ class Rolling(WindowBase):
 
 
 class GroupedRolling(Rolling):
-    """Row-based rolling windows partitioned by lazy GroupBy keys."""
+    """Rolling windows partitioned by lazy GroupBy keys."""
 
     def __init__(
         self,
         parent: DataFrame | Series,
         key_columns: tuple[Column, ...],
-        window: int,
+        window: RollingWindow,
         min_periods: int | None = None,
         *,
         center: bool = False,
+        on: str | None = None,
+        closed: Closed | None = None,
         as_index: bool = True,
         sort: bool = True,
         dropna: bool = True,
@@ -320,7 +447,10 @@ class GroupedRolling(Rolling):
             window,
             min_periods,
             center=center,
+            on=on,
+            closed=closed,
             _partition_by=tuple(ColumnRef(column.id) for column in key_columns),
+            _key_columns=key_columns,
         )
 
     def count(self, numeric_only: bool = False) -> DataFrame | Series:
@@ -371,6 +501,15 @@ class GroupedRolling(Rolling):
         else:
             for column in source_plan.metadata.visible_columns:
                 if column.id in key_ids:
+                    continue
+                if self._on_column is not None and column.id == self._on_column.id:
+                    calculations.append(
+                        (
+                            column.label,
+                            ColumnRef(column.id),
+                            column.duckdb_type,
+                        )
+                    )
                     continue
                 if numeric_only and not is_numeric_type(column.duckdb_type):
                     continue
@@ -614,8 +753,8 @@ class Expanding(WindowBase):
         if min_periods < 0:
             raise ValueError("min_periods must be non-negative")
         min_p = min_periods
-        frame_spec = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
-        super().__init__(parent, min_p, frame_spec)
+        frame = WindowFrame(WindowFrameKind.ROWS, None)
+        super().__init__(parent, min_p, frame)
 
     def count(self, numeric_only: bool = False) -> DataFrame | Series:
         from duckpd.series import Series

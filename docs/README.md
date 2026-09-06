@@ -35,9 +35,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
   covering hidden row identity, honest ordering guarantees, lazy `.loc`, and session isolation.
 - [Project directives and relational architecture](decisions/0003-directives-and-architecture.md) — foundational
   engineering principles, execution invariants, and compiler layer boundaries.
-- [Early design exploration](design/early-ideation.md) — preserved feasibility
-  analysis and initial architectural exploration; it is historical context, not
-  the current implementation contract.
+- [Feature Store architecture](design/featurestore-architecture.md) — implemented
+  catalog, point-in-time alignment, and partition-cache design.
+
 
 ## Research and references
 

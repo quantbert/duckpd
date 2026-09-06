@@ -28,10 +28,14 @@ from duckpd._logical import (
     AggregatePlan,
     AsOfJoinPlan,
     BinaryExpression,
+    CaseWhen,
+    CastExpression,
     ColumnId,
     ColumnRef,
+    Expression,
     FeatureParquetSource,
     FilterPlan,
+    FunctionCall,
     JoinPlan,
     JoinType,
     LimitPlan,
@@ -52,6 +56,8 @@ from duckpd._logical import (
     TopKPlan,
     UnaryExpression,
     UnionPlan,
+    WindowExpression,
+    WindowFrameKind,
     expression_metadata,
     sanitize_source_location,
 )
@@ -301,6 +307,46 @@ def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
         ),
     ):
         yield from _plan_nodes(plan.input)
+
+
+def _range_window_signatures(
+    expression: Expression,
+) -> set[tuple[ColumnId, tuple[ColumnId, ...]]]:
+    """Return timestamp and partition columns used by fixed-duration windows."""
+    signatures: set[tuple[ColumnId, tuple[ColumnId, ...]]] = set()
+    if isinstance(expression, WindowExpression):
+        if expression.frame is not None and expression.frame.kind is WindowFrameKind.RANGE:
+            if (
+                len(expression.order_by) != 1
+                or not isinstance(expression.order_by[0].expression, ColumnRef)
+                or any(not isinstance(item, ColumnRef) for item in expression.partition_by)
+            ):
+                raise AssertionError("Range window keys must be direct column references")
+            time_column = expression.order_by[0].expression.column_id
+            partition_columns = tuple(
+                cast("ColumnRef", item).column_id for item in expression.partition_by
+            )
+            signatures.add((time_column, partition_columns))
+        children = [
+            *expression.arguments,
+            *expression.partition_by,
+            *(key.expression for key in expression.order_by),
+        ]
+    elif isinstance(expression, BinaryExpression):
+        children = [expression.left, expression.right]
+    elif isinstance(expression, UnaryExpression):
+        children = [expression.operand]
+    elif isinstance(expression, FunctionCall):
+        children = list(expression.arguments)
+    elif isinstance(expression, CaseWhen):
+        children = [expression.condition, expression.value, expression.otherwise]
+    elif isinstance(expression, CastExpression):
+        children = [expression.operand]
+    else:
+        children = []
+    for child in children:
+        signatures.update(_range_window_signatures(child))
+    return signatures
 
 
 def _redact_plan_text(text: str, plan: LogicalPlan) -> str:
@@ -1422,6 +1468,35 @@ class Executor:
             reduced = reduced.map(lambda value: np.nan if value is None else value)
         return reduced.infer_objects()
 
+    def _validate_range_window(
+        self,
+        input_plan: LogicalPlan,
+        time_column: ColumnId,
+        partition_columns: tuple[ColumnId, ...],
+    ) -> None:
+        """Reject null or duplicate time keys that SQL RANGE cannot align like pandas."""
+        compiled = self._compiler.compile(input_plan)
+        time_label = quote_identifier(compiled.bindings[time_column])
+        group_labels = [
+            *(quote_identifier(compiled.bindings[column]) for column in partition_columns),
+            time_label,
+        ]
+        count_label = quote_identifier("__duckpd_range_count__")
+        grouped = compiled.relation.aggregate(
+            f"{', '.join(group_labels)}, count(*) AS {count_label}",
+            ", ".join(group_labels),
+        )
+        invalid = grouped.filter(f"{time_label} IS NULL OR {count_label} > 1").limit(1).fetchone()
+        if invalid is None:
+            return
+        time_value = invalid[len(partition_columns)]
+        if time_value is None:
+            raise ValueError("Time-based rolling does not support null on= values")
+        raise UnsupportedOperationError(
+            "Time-based rolling requires unique on= values within each group; "
+            "duplicate timestamp peers are not supported"
+        )
+
     def _validate_execution(self, plan: LogicalPlan) -> None:
         if isinstance(plan, ScanPlan) and isinstance(plan.source, RemoteTableSource):
             source = plan.source
@@ -1463,6 +1538,18 @@ class Executor:
                     raise ValueError(
                         "Cannot take a larger sample than population when 'replace=False'"
                     )
+            return
+        if isinstance(plan, ProjectPlan):
+            self._validate_execution(plan.input)
+            signatures: set[tuple[ColumnId, tuple[ColumnId, ...]]] = set()
+            for projection in plan.projections:
+                signatures.update(_range_window_signatures(projection.expression))
+            for time_column, partition_columns in signatures:
+                self._validate_range_window(
+                    plan.input,
+                    time_column,
+                    partition_columns,
+                )
             return
         if isinstance(
             plan,

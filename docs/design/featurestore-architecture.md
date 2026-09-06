@@ -1,10 +1,9 @@
 
 
-# Feature Store Implementation Roadmap: Native DuckPD Feature Stores
+# Feature Store Architecture
 
-**Status: proposed design & architecture blueprint.**
-Reviewed against the local `pymfs` 0.1.5 prototype and DuckPD 0.1.3 sources on 2026-09-05.
-All APIs, classes, and workflows documented herein represent implementation targets in the true DuckPD spirit.
+**Status: implemented in DuckPD 0.1.4.**
+This document describes the shipped architecture and its supported workflows.
 
 ---
 
@@ -14,14 +13,7 @@ A feature store in DuckPD is not an orchestrator, an ingestion service, or a mic
 It is a **high-performance, point-in-time analytical retrieval engine** built for data scientists
 and quantitative researchers working with massive, structured Parquet datasets.
 
-### 1.1 The Problem with the Original `pymfs` Prototype
-The experimental `pymfs` prototype tried to solve two distinct problems at once:
-1. **Analytical Value (The 90%):** Semantic cataloging, multi-frequency time-series synchronization, and leakage-free point-in-time (`ASOF`) alignment with `availability_delay`.
-2. **Operational Complexity (The 10%):** Slicing remote datasets by arbitrary microsecond time intervals, storing ad-hoc fragments (`part-20240101T080000-....parquet`), calculating complex interval subtractions, and reconciling overlapping files with unsafe SQL hacks (`MAX(feature)`).
-
-This fragmentation created severe concurrency hazards (multi-worker training jobs corrupting cache manifests), degraded query performance, and led to an unnatural two-phase developer ceremony (`prepare()` + separate offline store).
-
-### 1.2 The First-Principles DuckPD Solution
+### 1.1 Architecture
 DuckPD unifies feature stores into its native relational plan architecture using three simple ideas:
 
 1. **Partition-Mirrored Cache Layout (Zero Fragments, Zero Overlaps):**
@@ -29,10 +21,14 @@ DuckPD unifies feature stores into its native relational plan architecture using
    - **Partition Pruning:** If a user requests 2024 data, 2018–2023 partitions are never fetched.
    - **Column Projection:** Only the specific requested columns (e.g., `close`) are extracted from the multi-gigabyte remote partition. A 20 GB partition downloads as a clean ~300 MB partition file locally.
    - **Standard Parquet:** The resulting cache is simply a valid, standard Parquet dataset that any tool (DuckDB CLI, Polars, pandas) can query directly. No custom manifests or fragment reconciliation needed.
-2. **Pure, Instantaneous Constructors (Zero I/O at Setup):**
-   Creating a `FeatureStore` or building a feature selection never downloads data, blocks on network calls, or writes files. It only validates schemas and builds an immutable logical plan.
+2. **Metadata-Only Setup:**
+   Creating a `FeatureStore` validates `catalog.json`; remote construction may fetch that
+   metadata. Building a feature selection creates an immutable logical plan without downloading
+   feature partitions. Reference-table planning may read Parquet schema metadata.
 3. **Transparent JIT Execution at Bounded Operations:**
-   Data scientists do not need to call a separate preparation script. When they call `.collect()`, `.to_arrow()`, or stream training batches with `.to_arrow_batches()`, DuckPD ensures the required partition files are cached, compiles the native `ASOF` join, and streams rows directly at local NVMe speed.
+   When users call `.collect()`, `.to_arrow()`, or stream training batches with
+   `.to_arrow_batches()`, DuckPD ensures the required partition files are cached, compiles the
+   native `ASOF` join, and streams rows directly from the local cache.
 4. **First-Class Lazy `duckpd.DataFrame` Output:**
    `store.features(...)` and `store.table(...)` return ordinary lazy `duckpd.DataFrame` objects. Researchers can immediately use `.assign()`, filtering, `.groupby()`, and window operations.
 
@@ -40,16 +36,13 @@ The accepted [core contract](../decisions/0001-core-contract.md),
 [order/index/session contract](../decisions/0002-order-index-session-contract.md),
 and [architecture directives](../decisions/0003-directives-and-architecture.md)
 remain authoritative:
-- Preserve existing public signatures, behavior, ordering/index rules, execution
-  boundaries, remote safeguards, and error behavior outside the new feature.
+- Preserve public signatures, behavior, ordering/index rules, execution
+  boundaries, remote safeguards, and error behavior.
 - Keep immutable logical plans as semantic state. DuckDB relations and generated
-  SQL belong in the compiler; do not wrap an eager upstream store in a DataFrame.
+  SQL belong in the compiler.
 - No automatic pandas fallback or Python row-by-row alignment. Do not promise
   zero copies or bounded memory for every join merely because output is streamed.
 - Keep Python >=3.11, DuckDB >=1.5,<1.6, pandas >=3.0,<3.1, and PyArrow >=18.
-  Do not inherit upstream's higher minimums or its unrelated dependencies.
-- Upstream source directories are research inputs only: no runtime dependency on
-  `.temp/`, vendored monolith, or new dependency on `pymfs` itself.
 
 **Non-goals:** online serving, feature computation/DAG execution, ingestion,
 upload/catalog-authoring services, scheduling, distributed execution, an ML
@@ -63,9 +56,12 @@ Large quantitative and event-driven feature datasets often span multiple terabyt
 
 ### 2.1 The Two Extremes That Do Not Work
 1. **Downloading the Whole Dataset Upfront:**
-   `aws s3 sync` or `hf_hub_download` for the entire dataset fails immediately: researcher laptops and training VMs do not have 10 TB of local SSD capacity.
-2. **Arbitrary Date Slicing (`pymfs` Fragment Approach):**
-   Downloading arbitrary microsecond date windows (`part-20240101-20240201-<uuid>.parquet`) requires complex interval subtraction, a stateful `manifest.json`, and broken `MAX(feature)` SQL reconciliation across overlapping files. It fails in multi-process PyTorch training when parallel workers fight over the manifest.
+   `aws s3 sync` or `hf_hub_download` for the entire dataset fails when the source exceeds local
+   storage.
+2. **Arbitrary Date Fragments:**
+   Microsecond-range fragments require interval subtraction, mutable manifests, overlap
+   reconciliation, and cross-process coordination. They also prevent the cache from remaining a
+   directly queryable partitioned Parquet dataset.
 
 ### 2.2 The Partition-Mirrored Solution
 Structured feature datasets already adhere to a clean, canonical directory partitioning (e.g., yearly partitions):
@@ -126,7 +122,7 @@ A researcher training a neural network needs to stream feature batches over a mu
 from datetime import timedelta
 import duckpd as pd
 
-# 1. Connect to the feature store (zero network downloads happen here!)
+# 1. Connect to the store; construction may fetch catalog metadata, not feature partitions.
 store = pd.FeatureStore(
     source="hf://datasets/hifinab/fdb",
     cache="~/.cache/fdb",  # Local partition mirror directory
@@ -291,12 +287,10 @@ flowchart TD
 ## 5. Temporal Alignment & Point-in-Time Correctness
 
 ### 5.1 The Explicit Spine Contract
-In `pymfs`, the first selected dataset implicitly determined the time spine. This caused surprising behavior: swapping feature order changed the output row count.
-
-In DuckPD:
-- **Point-in-time alignment requires an explicit `spine` parameter** (e.g., `spine="ohlcv"`).
-- The spine dataset provides the definitive clock and entity universe for `[start, end)`.
-- Every spine row is preserved (`ASOF LEFT JOIN`).
+Point-in-time alignment requires an explicit `spine` parameter (for example,
+`spine="ohlcv"`). The spine dataset provides the definitive clock and entity
+universe for `[start, end)`, and every spine row is preserved by an
+`ASOF LEFT JOIN`.
 
 ### 5.2 Availability Delay & Lookahead Protection
 To prevent data leakage during backtesting and training:
@@ -311,57 +305,22 @@ If a technical indicator or economic signal updates infrequently (e.g., once a d
 
 ---
 
-## 6. Implementation Phases & Milestones
+## 6. Implemented Components
 
-### Phase 1: Local Catalog & Exact Alignment (The Local Foundation)
-- **Milestone:** Support cataloged local Parquet directories (`source="/data/features"`).
-- **Deliverables:**
-  - `src/duckpd/featurestore.py` module and `pd.FeatureStore` facade.
-  - Catalog v1 parser & validator (`catalog.json`, `metadata.json`).
-  - Canonical feature reference resolution (`dataset:feature`, aliases, `dataset:*` wildcards).
-  - Exact alignment planner using existing DuckPD `merge()` / `JoinPlan`.
-  - Reference table access (`store.table(...)`).
-- **Exit Gate:** 100% offline unit tests on synthetic multi-family datasets. Exact alignment matches expected pandas DataFrames.
+DuckPD 0.1.4 ships the complete feature-store path described above:
 
-### Phase 2: Native Point-in-Time Alignment (`AsOfJoinPlan`)
-- **Milestone:** True leakage-free temporal joins inside DuckPD.
-- **Deliverables:**
-  - Add typed `AsOfJoinPlan` to `duckpd._logical`.
-  - Implement DuckDB compiler support for `ASOF LEFT JOIN` with `availability_delay` interval predicates.
-  - Update optimizer traversals (`_rewrite_tree`, column liveness) and executor validation.
-  - Implement `store.feature_batches(df, window=...)` yielding lazy time-windowed frames.
-- **Exit Gate:** Verification that zero-delay and positive-delay features match theoretical event times. Independent validation of irregular/sparse series predecessor matching.
+- local cataloged Parquet stores and validated Catalog v1 metadata;
+- exact alignment through ordinary lazy join plans;
+- point-in-time alignment through typed `AsOfJoinPlan` nodes and DuckDB native
+  `ASOF LEFT JOIN`;
+- local, Hugging Face, and HTTP(S) sources;
+- yearly and monthly partition pruning;
+- cumulative column-projected remote caches with per-partition coordination,
+  unique staging files, and atomic replacement;
+- lazy `store.table()`, `store.features()`, and `store.feature_batches()` APIs;
+- explicit cache pre-warming through `store.sync()`;
+- an end-to-end notebook and a cold-versus-warm FeatureStore benchmark.
 
-### Phase 3: Partition-Mirrored Remote Caching (Hugging Face / HTTP)
-- **Milestone:** Seamless, transparent JIT partition fetching.
-- **Deliverables:**
-  - Partition resolver for yearly and monthly path templates
-    (`year={year}/data.parquet` and `year={year}/month={month:02d}/data.parquet`).
-  - JIT partition fetcher with cumulative column projection, per-partition coordination, unique temporary files, and atomic replacement.
-  - Optional `duckpd[featurestore]` dependency extra (`huggingface-hub`).
-  - Optional `store.sync(...)` headless pre-fetch helper.
-- **Exit Gate:** Multi-process test verifying that parallel workers expanding the same cached partition retain every requested column without file corruption.
-
-### Phase 4: Ergonomics, Benchmarks & Documentation
-- **Milestone:** Production readiness and documentation.
-- **Deliverables:**
-  - End-to-end interactive demo walkthrough
-    (`demo/featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb`).
-  - Performance benchmark comparing cold remote transfer and projection with
-    warm local-cache execution (`python -m benchmark.featurestore`).
-  - Update `docs/COMPATIBILITY.md` and `docs/CHANGELOG.md`.
-
----
-
-## 7. Comparison: `pymfs` vs. Native DuckPD FeatureStore
-
-| Capability | Prototype (`pymfs`) | Native DuckPD FeatureStore |
-| :--- | :--- | :--- |
-| **Data Representation** | Raw `duckdb.DuckDBPyRelation` | Native lazy `duckpd.DataFrame` |
-| **Cache Architecture** | Microsecond date fragments (`part-...<uuid>.parquet`) | Partition-mirrored (`year=YYYY/data.parquet`) |
-| **Overlapping Queries** | Broken `MAX(feature)` SQL reconciliation | Zero overlap; 1:1 partition mapping |
-| **Cache Execution** | Eager download in constructor | Transparent JIT at execution boundaries |
-| **Multi-Process Training** | High risk of manifest race conditions | Coordinated expansion with unique staging files and atomic replacement |
-| **Time Spine** | Implicit (first selected feature) | Explicit parameter (`spine="ohlcv"`) |
-| **Downstream Queries** | Hardcoded SQL strings | Idiomatic pandas syntax (`df.assign()`, `.rolling()`) |
-| **Dependency Footprint** | Heavy mandatory dependencies | Core DuckPD (zero new deps); optional HF extra |
+The public behavior and intentional exclusions are maintained in
+[`COMPATIBILITY.md`](../COMPATIBILITY.md). Release history is maintained in
+[`CHANGELOG.md`](../CHANGELOG.md).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace as dataclass_replace
+from datetime import timedelta
 from decimal import Decimal
 from math import isfinite
 from pathlib import Path
@@ -1921,15 +1922,24 @@ class DataFrame:
 
     def rolling(
         self,
-        window: int,
+        window: int | str | timedelta,
         min_periods: int | None = None,
         *,
         center: bool = False,
+        on: str | None = None,
+        closed: Literal["right", "left", "both", "neither"] | None = None,
     ) -> Rolling:
-        """Provide rolling window calculations."""
+        """Provide row-count or fixed-duration rolling window calculations."""
         from duckpd.window import Rolling
 
-        return Rolling(self, window, min_periods=min_periods, center=center)
+        return Rolling(
+            self,
+            window,
+            min_periods=min_periods,
+            center=center,
+            on=on,
+            closed=closed,
+        )
 
     def expanding(
         self,

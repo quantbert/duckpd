@@ -43,6 +43,9 @@ prices = pd.read_parquet(
     order_by=["date", "ticker"],
 )
 
+# Fixed-duration windows use the ordered timestamp column directly
+weekly_price_means = prices.rolling("7D", on="date").mean(numeric_only=True)
+
 # 1. Grouped rolling indicators computed per ticker (aligned to source rows)
 features = prices.assign(
     return_pct=lambda df: df.groupby("ticker")["close"].pct_change(),
@@ -187,7 +190,7 @@ training_frame.write_parquet("training/features.parquet")
 See the
 [interactive walkthrough](demo/featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb),
 [compatibility contract](docs/COMPATIBILITY.md), and
-[implementation roadmap](docs/design/featurestore-implementation-roadmap.md).
+[feature-store architecture](docs/design/featurestore-architecture.md).
 Benchmark cold remote fetching against warm local-cache execution with
 `uv run python -m benchmark.featurestore --help`.
 

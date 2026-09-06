@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace as dataclass_replace
+from datetime import timedelta
 from decimal import Decimal
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
@@ -34,6 +35,8 @@ from duckpd._logical import (
     UnaryExpression,
     UnaryOperator,
     WindowExpression,
+    WindowFrame,
+    WindowFrameKind,
     expression_nullability,
 )
 from duckpd._metadata import after_aggregate, after_filter, after_sort
@@ -1018,7 +1021,7 @@ class Series:
             function="sum",
             arguments=(op,),
             order_by=order_keys,
-            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            frame=WindowFrame(WindowFrameKind.ROWS, None),
         )
         if in_type in {
             "TINYINT",
@@ -1040,7 +1043,7 @@ class Series:
                 function="bool_or",
                 arguments=(FunctionCall("isnull", (self._expression,)),),
                 order_by=order_keys,
-                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+                frame=WindowFrame(WindowFrameKind.ROWS, None),
             )
             expr = CaseWhen(
                 has_null,
@@ -1057,7 +1060,7 @@ class Series:
             function="min",
             arguments=(self._expression,),
             order_by=order_keys,
-            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            frame=WindowFrame(WindowFrameKind.ROWS, None),
         )
         if skipna:
             expr = CaseWhen(
@@ -1070,7 +1073,7 @@ class Series:
                 function="bool_or",
                 arguments=(FunctionCall("isnull", (self._expression,)),),
                 order_by=order_keys,
-                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+                frame=WindowFrame(WindowFrameKind.ROWS, None),
             )
             expr = CaseWhen(
                 has_null,
@@ -1087,7 +1090,7 @@ class Series:
             function="max",
             arguments=(self._expression,),
             order_by=order_keys,
-            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            frame=WindowFrame(WindowFrameKind.ROWS, None),
         )
         if skipna:
             expr = CaseWhen(
@@ -1100,7 +1103,7 @@ class Series:
                 function="bool_or",
                 arguments=(FunctionCall("isnull", (self._expression,)),),
                 order_by=order_keys,
-                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+                frame=WindowFrame(WindowFrameKind.ROWS, None),
             )
             expr = CaseWhen(
                 has_null,
@@ -1121,7 +1124,7 @@ class Series:
             function="product",
             arguments=(op,),
             order_by=order_keys,
-            frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+            frame=WindowFrame(WindowFrameKind.ROWS, None),
         )
         if in_type in {
             "TINYINT",
@@ -1143,7 +1146,7 @@ class Series:
                 function="bool_or",
                 arguments=(FunctionCall("isnull", (self._expression,)),),
                 order_by=order_keys,
-                frame_spec="ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+                frame=WindowFrame(WindowFrameKind.ROWS, None),
             )
             expr = CaseWhen(
                 has_null,
@@ -1334,15 +1337,22 @@ class Series:
 
     def rolling(
         self,
-        window: int,
+        window: int | str | timedelta,
         min_periods: int | None = None,
         *,
         center: bool = False,
+        closed: Literal["right", "left", "both", "neither"] | None = None,
     ) -> Rolling:
-        """Provide rolling window calculations."""
+        """Provide row-count or fixed-duration rolling window calculations."""
         from duckpd.window import Rolling
 
-        return Rolling(self, window, min_periods=min_periods, center=center)
+        return Rolling(
+            self,
+            window,
+            min_periods=min_periods,
+            center=center,
+            closed=closed,
+        )
 
     def expanding(
         self,

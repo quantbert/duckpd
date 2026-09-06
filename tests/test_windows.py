@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
 import pytest
 
 import duckpd as dp
-from duckpd.errors import UnorderedOperationError
+from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
 
 
 def test_series_cumsum_skipna_differential() -> None:
@@ -358,6 +358,117 @@ def test_dataframe_rolling_and_expanding_differential() -> None:
         cast("dp.DataFrame", df[["a", "b"]].expanding(2).var()).collect(),
         pdf[["a", "b"]].expanding(2).var(),
     )
+
+
+@pytest.mark.parametrize("closed", ["right", "left", "both", "neither"])
+def test_dataframe_fixed_duration_rolling_matches_pandas_across_dst(
+    closed: Literal["right", "left", "both", "neither"],
+) -> None:
+    source = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(
+                ["2024-03-10 01:30", "2024-03-10 03:00", "2024-03-10 04:00"]
+            ).tz_localize("America/New_York"),
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+    frame = dp.from_pandas(source, order_by="ts")
+
+    result = frame.rolling("2h", on="ts", closed=closed).sum(numeric_only=True)
+    expected = source.rolling("2h", on="ts", closed=closed).sum(numeric_only=True)
+
+    pd.testing.assert_frame_equal(cast("dp.DataFrame", result).collect(), expected)
+
+
+def test_series_fixed_duration_rolling_uses_datetime_index_and_current_frame_size() -> None:
+    source = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-10"]),
+            "value": [np.nan, 2.0, 3.0],
+        }
+    )
+    frame = dp.from_pandas(source, index="ts", order_by="ts")
+
+    result = frame["value"].rolling("2D", min_periods=2).count()
+    expected = source.set_index("ts")["value"].rolling("2D", min_periods=2).count()
+
+    pd.testing.assert_series_equal(cast("dp.Series", result).collect(), expected)
+
+
+def test_grouped_fixed_duration_rolling_matches_pandas_per_group() -> None:
+    source = pd.DataFrame(
+        {
+            "group": ["A", "B", "A", "B", "A"],
+            "ts": pd.to_datetime(
+                ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-05"]
+            ),
+            "value": [1.0, 10.0, 2.0, 20.0, 4.0],
+        }
+    )
+    frame = dp.from_pandas(source, order_by=["ts", "group"])
+
+    result = frame.groupby("group").rolling("2D", on="ts").sum(numeric_only=True)
+    expected = source.groupby("group").rolling("2D", on="ts").sum(numeric_only=True)
+
+    pd.testing.assert_frame_equal(cast("dp.DataFrame", result).collect(), expected)
+
+    indexed = dp.from_pandas(source, index="ts", order_by=["ts", "group"])
+    series_result = indexed.groupby("group")["value"].rolling("2D").sum()
+    series_expected = source.set_index("ts").groupby("group")["value"].rolling("2D").sum()
+    pd.testing.assert_series_equal(cast("dp.Series", series_result).collect(), series_expected)
+
+
+def test_fixed_duration_rolling_handles_empty_one_nanosecond_frame() -> None:
+    source = pd.DataFrame(
+        {
+            "ts": pd.to_datetime([0, 1], unit="ns"),
+            "value": [1.0, 2.0],
+        }
+    )
+    frame = dp.from_pandas(source, order_by="ts")
+
+    result = frame.rolling(
+        "1ns",
+        on="ts",
+        closed="neither",
+        min_periods=0,
+    ).sum(numeric_only=True)
+    expected = source.rolling(
+        "1ns",
+        on="ts",
+        closed="neither",
+        min_periods=0,
+    ).sum(numeric_only=True)
+
+    pd.testing.assert_frame_equal(cast("dp.DataFrame", result).collect(), expected)
+
+
+def test_fixed_duration_rolling_rejects_ambiguous_order_and_time_keys() -> None:
+    source = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+            "value": [1.0, 2.0],
+        }
+    )
+    session = dp.connect()
+
+    with pytest.raises(UnorderedOperationError, match="ascending order_by"):
+        session.from_pandas(source).rolling("1D", on="ts")
+    with pytest.raises(ValueError, match="fixed duration"):
+        session.from_pandas(source, order_by="ts").rolling("1M", on="ts")
+
+    duplicate = pd.concat([source.iloc[[0]], source.iloc[[0]]], ignore_index=True)
+    duplicate_frame = session.from_pandas(duplicate, order_by="ts")
+    with pytest.raises(UnsupportedOperationError, match="unique on="):
+        duplicate_frame.rolling("1D", on="ts").sum(numeric_only=True).collect()
+
+    null_time = source.copy()
+    null_time.loc[1, "ts"] = pd.NaT
+    null_frame = session.from_pandas(null_time, order_by="ts")
+    with pytest.raises(ValueError, match="null on="):
+        null_frame.rolling("1D", on="ts").sum(numeric_only=True).collect()
+
+    assert session.execution_count == 0
 
 
 def test_series_groupby_rolling_matches_pandas_with_multiple_keys() -> None:

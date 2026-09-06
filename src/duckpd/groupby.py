@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, cast, overload
+from datetime import timedelta
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 from duckpd._logical import (
     AggregateExpression,
@@ -168,12 +169,14 @@ class DataFrameGroupBy:
 
     def rolling(
         self,
-        window: int,
+        window: int | str | timedelta,
         min_periods: int | None = None,
         *,
         center: bool = False,
+        on: str | None = None,
+        closed: Literal["right", "left", "both", "neither"] | None = None,
     ) -> GroupedRolling:
-        """Create row-based rolling windows partitioned by the group keys."""
+        """Create rolling windows partitioned by the group keys."""
         from duckpd.window import GroupedRolling
 
         return GroupedRolling(
@@ -182,6 +185,8 @@ class DataFrameGroupBy:
             window,
             min_periods,
             center=center,
+            on=on,
+            closed=closed,
             as_index=self._as_index,
             sort=self._sort,
             dropna=self._dropna,
@@ -582,12 +587,13 @@ class SeriesGroupBy:
 
     def rolling(
         self,
-        window: int,
+        window: int | str | timedelta,
         min_periods: int | None = None,
         *,
         center: bool = False,
+        closed: Literal["right", "left", "both", "neither"] | None = None,
     ) -> GroupedRolling:
-        """Create row-based rolling windows partitioned by the group keys."""
+        """Create rolling windows partitioned by the group keys."""
         from duckpd.series import Series
         from duckpd.window import GroupedRolling
 
@@ -608,6 +614,7 @@ class SeriesGroupBy:
             window,
             min_periods,
             center=center,
+            closed=closed,
             as_index=self._as_index,
             sort=self._sort,
             dropna=self._dropna,

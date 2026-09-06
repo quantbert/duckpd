@@ -157,7 +157,7 @@ collect | Arrow batches | table | Parquet | commit
 - [x] `Limit`.
 - [x] `Union` for row-wise concatenation.
 - [x] `Window`.
-- [ ] `MaterializedScan` for persisted intermediates.
+- [x] Persisted intermediates represented as `ScanPlan(TableSource)`.
 
 Keep writes as executor sinks rather than relational nodes until a concrete
 optimizer need proves otherwise.
@@ -448,8 +448,10 @@ Goal: add positional and order-sensitive behavior only on sound foundations.
 - [x] Support alignment-safe assignment of grouped rolling results back to the
       originating frame without materialization; arbitrary Python
       `GroupBy.transform` callbacks remain out of scope.
-- [ ] Add time-based rolling windows only after timezone and closed-boundary
-      semantics are specified.
+- [x] Add fixed-duration time-based rolling windows with explicit ascending
+      timestamp ordering, timezone-aware instants, all four `closed` boundary
+      modes, grouped partitions, and explicit rejection of null or duplicate
+      timestamp peers.
 - [x] Track when joins, aggregates, unions, and materialization destroy or
       establish order guarantees.
 
@@ -696,8 +698,9 @@ product contract must remain explicitly unsupported and fail before execution.
       DuckPD's explicit ordering and `drop_null_keys` behavior.
 - [x] Map supported equi-joins and cross joins; reject as-of, semi, anti, other
       unsupported strategies, and ambiguous ordering before query execution.
-- [ ] Complete schema conversion for decimal, timestamp/time-zone, duration,
-      list, array, struct, and enum DuckDB types instead of reporting `Unknown`.
+- [x] Return precise Narwhals schemas for decimal, timestamp/time-zone, duration,
+      and common scalar DuckDB types; report intentionally unsupported nested
+      list, array, struct, map, union, and enum types as `Unknown`.
 - [ ] Implement namespace I/O that maps Narwhals `scan_csv` and `scan_parquet`
       to DuckPD lazy scans. Narwhals 2.25.0 still routes a plugin name through
       `Implementation.UNKNOWN.to_native_namespace()` before entry-point
@@ -782,7 +785,7 @@ decomposed into independently testable milestones below.
        benchmarks and execution limits.
 16. [x] Local Parquet atomic `commit()` workflow (staging file, validation,
        atomic `os.replace`) and persistent DuckDB table sinks (`save_as_table`).
-17. [ ] Complete the Linux-beta Narwhals lazy-frame contract.
+17. [x] Complete the supported Linux-beta Narwhals lazy-frame contract.
     - [x] Prototype wrapping, generated compatibility documentation, expression
           projection/filtering, string/datetime namespaces, and aggregation.
     - [x] Complete the supported expression, relational, join, schema, I/O, and
@@ -815,17 +818,18 @@ decomposed into independently testable milestones below.
 23. [x] Harden documentation, benchmark I/O metrics, and immutable release
         metadata checks.
 
-### Active Linux-beta workstreams and goals
+### Completed Linux-beta workstreams
 
-Cross-platform runtime validation is not an active beta priority. Development,
-performance claims, and release checks target Linux on Python 3.11 through 3.14.
-The portability work in the beta exit gate remains deferred.
+Linux release checks target Python 3.11 through 3.14. The Narwhals,
+semantic-metadata, and optimizer workstreams below are complete for their
+documented supported subsets. Public plugin-dispatched Narwhals scans remain
+blocked upstream; the direct DuckPD reader path remains lazy.
 
 ```mermaid
-graph TD
-    A[Current State: v0.0.7 Solid Lazy Core] --> N[Stream 1: Narwhals Compliance]
-    A --> M[Stream 2: Semantic and Metadata Hardening]
-    M --> O[Stream 3: Optimizer and Observability]
+graph LR
+    N[Narwhals supported subset] --> B[DuckPD 0.1.4 Linux beta]
+    M[Semantic metadata hardening] --> B
+    O[Optimizer and observability] --> B
 ```
 
 #### Stream 1: Narwhals lazy-frame compliance
@@ -1053,16 +1057,15 @@ shape and names, duplicate/non-string labels, rolling/rank, and memory lifetime.
 - Ibis as a compiler substrate. Decide by ADR after the bounded GroupBy/join/
       window spike; DuckPD retains ownership of its public IR and pandas semantic
       metadata either way.
-- Narwhals interoperability. Defer implementation until DuckPD's index/order
-      metadata and lazy public API are stable; the Narwhals extension mechanism is
-      currently experimental.
+- Narwhals public plugin-dispatched scans. Direct DuckPD readers followed by
+  `nw.from_native()` remain the supported lazy path until upstream dispatch
+  recognizes plugin backends.
 
-Narwhals is not planned as DuckPD's internal IR, SQL compiler, dtype authority,
-or primary test oracle. It exposes Polars-style semantics, already supports raw
-DuckDB relations, and its DuckDB equality helper intentionally ignores row
-order. DuckPD must retain its pandas-specific index, alignment, ordering, null,
-and mutation rewrites. Reuse the expression-metadata concepts and add optional
-ecosystem compatibility later.
+Narwhals is not DuckPD's internal IR, SQL compiler, dtype authority, or primary
+test oracle. Its DuckDB equality helper does not establish pandas row-order
+semantics, so DuckPD retains its pandas-specific index, alignment, ordering,
+null, and mutation rewrites. The shipped adapter reuses Narwhals expression
+metadata while preserving those DuckPD contracts.
 
 ## Current evidence
 

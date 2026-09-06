@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
 the [release policy](RELEASES.md).
 
+## Unreleased
+
+### Added
+
+- Fixed-duration `DataFrame.rolling(..., on=...)`,
+  `DataFrameGroupBy.rolling(..., on=...)`, and datetime-indexed Series rolling
+  windows with pandas-compatible `min_periods` defaults and
+  `closed='right'|'left'|'both'|'neither'` boundaries.
+- Typed row and range window frames in the logical plan. Duration windows
+  compile to nanosecond `RANGE` frames and preserve timezone-aware timestamps.
+
+### Changed
+
+- Fixed-duration rolling now rejects unordered timestamps, null timestamps,
+  and duplicate timestamps within a group instead of returning
+  engine-dependent peer results.
+- Replaced the stale feature-store implementation roadmap with an architecture
+  description of the shipped native DuckPD implementation and removed obsolete
+  external-project comparisons.
+
 ## 0.1.4 - 2026-09-06
 
 ### Added

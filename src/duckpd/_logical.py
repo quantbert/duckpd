@@ -296,6 +296,31 @@ class CaseWhen:
     otherwise: Expression
 
 
+class WindowFrameKind(Enum):
+    """Unit used to bound a window frame."""
+
+    ROWS = "rows"
+    RANGE = "range"
+
+
+class WindowClosed(Enum):
+    """Endpoint inclusion for a time-range window."""
+
+    RIGHT = "right"
+    LEFT = "left"
+    BOTH = "both"
+    NEITHER = "neither"
+
+
+@dataclass(frozen=True)
+class WindowFrame:
+    """Typed bounds for a row-count or fixed-duration window."""
+
+    kind: WindowFrameKind
+    preceding: int | None
+    closed: WindowClosed = WindowClosed.BOTH
+
+
 @dataclass(frozen=True)
 class WindowExpression:
     """An expression evaluated over a window specification."""
@@ -304,7 +329,7 @@ class WindowExpression:
     arguments: tuple[Expression, ...] = ()
     partition_by: tuple[Expression, ...] = ()
     order_by: tuple[SortKey, ...] = ()
-    frame_spec: str | None = None
+    frame: WindowFrame | None = None
 
 
 Expression: TypeAlias = (
