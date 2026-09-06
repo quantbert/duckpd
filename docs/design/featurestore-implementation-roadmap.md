@@ -110,7 +110,7 @@ DuckPD executes **Partition Pruning + Column Projection**:
 ### 2.3 Operational Advantages
 - **1:1 File Mapping:** There are no fragments or UUID files. Partition `ohlcv/year=2024/data.parquet` either exists locally or it does not.
 - **Zero File Overlaps:** Queries covering Jan–Feb and Mar–Apr simply read the same clean 2024 partition file. No interval subtraction math, and no duplicate-hiding `MAX()` SQL hacks.
-- **Multi-Worker Safety:** Standard atomic file writes (`data.parquet.tmp` -> `data.parquet`) mean multi-process training loops (e.g., `torch.utils.data.DataLoader(num_workers=4)`) read the exact same immutable files without lock contention or manifest corruption.
+- **Multi-Worker Safety:** Per-partition file locks serialize cache expansion, while unique temporary files and atomic replacement ensure multi-process training workers always observe a complete immutable Parquet file. Existing cached columns are retained when a later request expands the projection.
 - **Zero Magic:** The local cache directory is just a standard Parquet dataset.
 
 ---
@@ -336,10 +336,10 @@ If a technical indicator or economic signal updates infrequently (e.g., once a d
 - **Milestone:** Seamless, transparent JIT partition fetching.
 - **Deliverables:**
   - Partition resolver for standard path templates (`year={year}/data.parquet`).
-  - JIT partition fetcher with column projection and atomic file replacement (`.tmp` -> `.parquet`).
+  - JIT partition fetcher with cumulative column projection, per-partition coordination, unique temporary files, and atomic replacement.
   - Optional `duckpd[featurestore]` dependency extra (`huggingface-hub`).
   - Optional `store.sync(...)` headless pre-fetch helper.
-- **Exit Gate:** Multi-process test verifying that parallel PyTorch workers reading from the cache encounter zero locking issues or file corruption.
+- **Exit Gate:** Multi-process test verifying that parallel workers expanding the same cached partition retain every requested column without file corruption.
 
 ### Phase 4: Ergonomics, Benchmarks & Documentation
 - **Milestone:** Production readiness and documentation.
@@ -358,7 +358,7 @@ If a technical indicator or economic signal updates infrequently (e.g., once a d
 | **Cache Architecture** | Microsecond date fragments (`part-...<uuid>.parquet`) | Partition-mirrored (`year=YYYY/data.parquet`) |
 | **Overlapping Queries** | Broken `MAX(feature)` SQL reconciliation | Zero overlap; 1:1 partition mapping |
 | **Cache Execution** | Eager download in constructor | Transparent JIT at execution boundaries |
-| **Multi-Process Training** | High risk of manifest race conditions | Lock-free, atomic partition files |
+| **Multi-Process Training** | High risk of manifest race conditions | Coordinated expansion with unique staging files and atomic replacement |
 | **Time Spine** | Implicit (first selected feature) | Explicit parameter (`spine="ohlcv"`) |
 | **Downstream Queries** | Hardcoded SQL strings | Idiomatic pandas syntax (`df.assign()`, `.rolling()`) |
 | **Dependency Footprint** | Heavy mandatory dependencies | Core DuckPD (zero new deps); optional HF extra |

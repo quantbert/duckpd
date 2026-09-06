@@ -3,16 +3,42 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import tempfile
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
 
 import duckpd
 from duckpd.featurestore import FeatureStore, parse_availability_delay, parse_timestamp
+
+
+def _cache_partition_worker(
+    source: str,
+    cache: str,
+    column: str,
+    start_event: Any,
+) -> None:
+    import duckdb
+
+    from duckpd._feature_sources import ensure_cached_partition
+
+    start_event.wait(timeout=10)
+    connection = duckdb.connect()
+    try:
+        ensure_cached_partition(
+            source,
+            Path(cache),
+            "ohlcv/year=2024/data.parquet",
+            ["datetime", "ticker", column],
+            connection,
+        )
+    finally:
+        connection.close()
 
 
 @pytest.fixture
@@ -901,8 +927,9 @@ def test_remote_feature_store_mock_flow(feature_store_fixture: Path) -> None:
             catalog = store.catalog()
             assert catalog["name"] == "test/store"
 
-            # 2. Table access (downloads symbology to cache)
+            # 2. Table planning reads schema metadata but defers the full cache write
             sym_df = store.table("symbology")
+            assert not (cache_path / "symbols" / "data.parquet").exists()
             assert sym_df.collect()["ticker"].iloc[0] == "001"
             assert (cache_path / "symbols" / "data.parquet").is_file()
 
@@ -1037,3 +1064,207 @@ def test_featurestore_sync_method(feature_store_fixture: Path) -> None:
             start="2024-01-02T08:00:00Z",
             end="2024-01-02T08:00:00Z",
         )
+
+
+def test_cache_paths_cannot_escape_root(feature_store_fixture: Path, tmp_path: Path) -> None:
+    import duckdb
+
+    from duckpd._feature_sources import (
+        ensure_cached_partition,
+        ensure_cached_table,
+        load_dataset_metadata,
+    )
+
+    cache = tmp_path / "cache"
+    with pytest.raises(ValueError, match="remain relative"):
+        ensure_cached_partition(
+            str(feature_store_fixture),
+            cache,
+            "../outside.parquet",
+            ["ticker"],
+            duckdb.connect(),
+        )
+    with pytest.raises(ValueError, match="remain relative"):
+        ensure_cached_table(
+            "hf://datasets/test/store",
+            cache,
+            "../outside.parquet",
+            object(),
+        )
+    with pytest.raises(ValueError, match="remain relative"):
+        load_dataset_metadata(
+            feature_store_fixture,
+            {"metadata": "../outside.json"},
+        )
+    assert not (tmp_path / "outside.parquet").exists()
+
+
+def test_concurrent_cache_expansion_preserves_all_columns(
+    feature_store_fixture: Path,
+    tmp_path: Path,
+) -> None:
+    from duckpd._feature_sources import file_contains_columns
+
+    cache = tmp_path / "cache"
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    requested = ["open", "high", "low", "close", "volume"]
+    processes = [
+        context.Process(
+            target=_cache_partition_worker,
+            args=(str(feature_store_fixture), str(cache), column, start_event),
+        )
+        for column in requested
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    cached = cache / "ohlcv" / "year=2024" / "data.parquet"
+    assert file_contains_columns(cached, ["datetime", "ticker", *requested])
+
+
+def test_remote_feature_planning_defers_partition_fetch(
+    feature_store_fixture: Path,
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import patch
+
+    from duckpd._feature_sources import ensure_cached_partition
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "catalog.json").write_text((feature_store_fixture / "catalog.json").read_text())
+
+    class MockHfFileSystem:
+        def __init__(self, token: str | None = None) -> None:
+            self.token = token
+
+    calls: list[str] = []
+
+    def project_partition(
+        source_uri: str,
+        cache_root: Path,
+        relative_path: str,
+        needed_columns: list[str],
+        con: Any,
+        filters_sql: str | None = None,
+    ) -> Path:
+        calls.append(source_uri)
+        return ensure_cached_partition(
+            str(feature_store_fixture),
+            cache_root,
+            relative_path,
+            needed_columns,
+            con,
+            filters_sql,
+        )
+
+    with (
+        patch("huggingface_hub.HfFileSystem", return_value=MockHfFileSystem()),
+        patch(
+            "duckpd._feature_sources.ensure_cached_partition",
+            side_effect=project_partition,
+        ),
+    ):
+        store = FeatureStore(
+            source="hf://datasets/test/fdb",
+            cache=cache,
+        )
+        frame = store.features(
+            features={"price": "ohlcv:close"},
+            start="2024-01-02T08:00:00Z",
+            end="2024-01-02T08:03:00Z",
+            alignment="exact",
+        )
+        assert calls == []
+        assert "FeatureParquetSource" in frame.explain(mode="logical")
+        result = frame.collect()
+        assert calls == ["hf://datasets/test/fdb"]
+        assert list(result["price"]) == [100.5, 101.5, 102.5]
+
+
+def test_remote_constructor_does_not_create_cache(
+    feature_store_fixture: Path,
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import patch
+
+    class MockHfFileSystem:
+        def __init__(self, token: str | None = None) -> None:
+            self.token = token
+
+    cache = tmp_path / "not-created"
+    with patch("huggingface_hub.HfFileSystem", return_value=MockHfFileSystem()):
+        FeatureStore(
+            source="hf://datasets/test/fdb",
+            cache=cache,
+            catalog_path=feature_store_fixture / "catalog.json",
+        )
+    assert not cache.exists()
+
+
+def test_point_in_time_uses_predecessor_older_than_one_year(tmp_path: Path) -> None:
+    spine_path = tmp_path / "spine" / "year=2024"
+    sparse_path = tmp_path / "sparse" / "year=2022"
+    spine_path.mkdir(parents=True)
+    sparse_path.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2024-01-02T00:00:00Z"]),
+            "ticker": ["A"],
+        }
+    ).to_parquet(spine_path / "data.parquet", index=False)
+    pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2022-12-31T00:00:00Z"]),
+            "ticker": ["A"],
+            "signal": [42],
+        }
+    ).to_parquet(sparse_path / "data.parquet", index=False)
+    catalog = {
+        "catalog_version": 1,
+        "datasets": [
+            {
+                "name": "spine",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "min_time": "2024-01-02T00:00:00Z",
+                "max_time": "2024-01-02T00:00:00Z",
+            },
+            {
+                "name": "sparse",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "min_time": "2022-12-31T00:00:00Z",
+                "max_time": "2022-12-31T00:00:00Z",
+            },
+        ],
+        "features": {
+            "sparse:signal": {
+                "dataset": "sparse",
+                "name": "signal",
+                "availability_delay": "PT0S",
+                "lookahead_safe": True,
+            }
+        },
+    }
+    (tmp_path / "catalog.json").write_text(json.dumps(catalog))
+
+    frame = FeatureStore(source=tmp_path).features(
+        features=["sparse:signal"],
+        start="2024-01-02T00:00:00Z",
+        end="2024-01-03T00:00:00Z",
+        alignment="point_in_time",
+        spine="spine",
+    )
+    logical = frame.explain(mode="logical")
+    assert "AsOfJoinPlan" in logical
+    assert "SqlSource" not in logical
+    result = frame.collect()
+    assert list(result["signal"]) == [42]

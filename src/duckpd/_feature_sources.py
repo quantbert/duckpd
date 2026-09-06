@@ -3,16 +3,68 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import duckdb
 import pyarrow.parquet as pq
 
 from duckpd._feature_catalog import parse_timestamp
 from duckpd._quoting import quote_identifier, quote_literal
+
+if TYPE_CHECKING:
+    from duckpd._logical import FeatureParquetSource
+
+
+def _validated_relative_path(relative_path: str) -> PurePosixPath:
+    """Return a normalized catalog path that cannot escape its configured root."""
+    path = PurePosixPath(relative_path)
+    if not relative_path or path.is_absolute() or ".." in path.parts or "\\" in relative_path:
+        raise ValueError(f"Catalog path must remain relative to its root: {relative_path!r}")
+    return path
+
+
+def _rooted_path(root: Path, relative_path: str) -> Path:
+    relative = _validated_relative_path(relative_path)
+    target = (root / Path(*relative.parts)).resolve()
+    resolved_root = root.resolve()
+    if target == resolved_root or resolved_root not in target.parents:
+        raise ValueError(f"Catalog path escapes its configured root: {relative_path!r}")
+    return target
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Generator[None, None, None]:
+    """Serialize cache population across processes using an adjacent lock file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def load_dataset_metadata(
@@ -24,20 +76,21 @@ def load_dataset_metadata(
     metadata_rel = entry.get("metadata")
     if not metadata_rel or not isinstance(metadata_rel, str):
         return {}
+    metadata_path = _validated_relative_path(metadata_rel).as_posix()
     if isinstance(source_root, Path):
-        meta_path = source_root / metadata_rel
+        meta_path = _rooted_path(source_root, metadata_path)
         if not meta_path.is_file():
             return {}
         try:
             return json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
-    elif fs is not None:
-        remote_path = f"{str(source_root).rstrip('/')}/{metadata_rel}"
+    if fs is not None:
+        remote_path = f"{str(source_root).rstrip('/')}/{metadata_path}"
         try:
             if fs.exists(remote_path):
-                with fs.open(remote_path, "r") as f:
-                    return json.load(f)
+                with fs.open(remote_path, "r") as file:
+                    return json.load(file)
         except Exception:
             return {}
     return {}
@@ -101,21 +154,28 @@ def resolve_local_partition_paths(
 ) -> list[str]:
     """Resolve existing partition parquet paths for the requested interval in a local directory."""
     path_template = get_dataset_path_template(source_root, entry)
+    _validated_relative_path(path_template)
     paths: list[str] = []
     if "{year}" in path_template:
         years = partition_years_for_interval(entry, start, end)
         for year in years:
             pattern = path_template.format(year=year)
-            target = source_root / pattern
             if "*" in pattern or "?" in pattern:
                 matched = sorted(source_root.glob(pattern))
-                paths.extend(str(p.resolve()) for p in matched if p.is_file())
-            elif target.is_file():
-                paths.append(str(target.resolve()))
+                root = source_root.resolve()
+                paths.extend(
+                    str(path.resolve())
+                    for path in matched
+                    if path.is_file() and root in path.resolve().parents
+                )
+            else:
+                target = _rooted_path(source_root, pattern)
+                if target.is_file():
+                    paths.append(str(target))
     else:
-        target = source_root / path_template
+        target = _rooted_path(source_root, path_template)
         if target.is_file():
-            paths.append(str(target.resolve()))
+            paths.append(str(target))
     return paths
 
 
@@ -139,30 +199,41 @@ def ensure_cached_partition(
     con: duckdb.DuckDBPyConnection,
     filters_sql: str | None = None,
 ) -> Path:
-    """Ensure a partition is mirrored locally with the needed columns projected."""
-    local_target = cache_root / relative_path
-    if local_target.is_file() and file_contains_columns(local_target, needed_columns):
-        return local_target
+    """Ensure a partition contains the cumulative requested projection."""
+    local_target = _rooted_path(cache_root, relative_path)
+    lock_path = local_target.with_name(f".{local_target.name}.lock")
+    remote_path = _validated_relative_path(relative_path).as_posix()
+    remote_file_url = f"{source_uri.rstrip('/')}/{remote_path}"
 
-    local_target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = local_target.with_suffix(".parquet.tmp")
-    remote_file_url = f"{source_uri.rstrip('/')}/{relative_path}"
+    with _exclusive_file_lock(lock_path):
+        existing_columns: list[str] = []
+        if local_target.is_file():
+            try:
+                existing_columns = list(pq.ParquetFile(local_target).schema_arrow.names)
+            except Exception:
+                existing_columns = []
+        if set(needed_columns).issubset(existing_columns):
+            return local_target
 
-    cols_sql = ", ".join(quote_identifier(c) for c in needed_columns)
-    where_clause = f" WHERE {filters_sql}" if filters_sql else ""
-    copy_query = (
-        f"COPY (SELECT {cols_sql} FROM read_parquet({quote_literal(remote_file_url)})"
-        f"{where_clause}) TO {quote_literal(str(temp_target))} "
-        f"(FORMAT PARQUET, COMPRESSION ZSTD)"
-    )
+        projected_columns = list(dict.fromkeys([*existing_columns, *needed_columns]))
+        local_target.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = local_target.with_name(
+            f".{local_target.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        cols_sql = ", ".join(quote_identifier(column) for column in projected_columns)
+        where_clause = f" WHERE {filters_sql}" if filters_sql else ""
+        copy_query = (
+            f"COPY (SELECT {cols_sql} FROM read_parquet({quote_literal(remote_file_url)})"
+            f"{where_clause}) TO {quote_literal(str(temp_target))} "
+            f"(FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
 
-    temp_target.unlink(missing_ok=True)
-    try:
-        con.execute(copy_query)
-        temp_target.replace(local_target)
-    except BaseException:
-        temp_target.unlink(missing_ok=True)
-        raise
+        try:
+            con.execute(copy_query)
+            os.replace(temp_target, local_target)
+        except BaseException:
+            temp_target.unlink(missing_ok=True)
+            raise
 
     return local_target
 
@@ -174,23 +245,26 @@ def ensure_cached_table(
     fs: Any,
 ) -> Path:
     """Ensure a static reference table is downloaded in full to the local cache."""
-    local_target = cache_root / relative_path
-    if local_target.is_file():
-        return local_target
+    local_target = _rooted_path(cache_root, relative_path)
+    lock_path = local_target.with_name(f".{local_target.name}.lock")
+    remote_path = _validated_relative_path(relative_path).as_posix()
+    remote_file_path = source_uri.replace("hf://", "").rstrip("/") + f"/{remote_path}"
 
-    local_target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = local_target.with_suffix(".parquet.tmp")
-    # For HfFileSystem, path doesn't include 'hf://' prefix
-    remote_file_path = source_uri.replace("hf://", "").rstrip("/") + f"/{relative_path}"
+    with _exclusive_file_lock(lock_path):
+        if local_target.is_file():
+            return local_target
 
-    temp_target.unlink(missing_ok=True)
-    try:
-        with fs.open(remote_file_path, "rb") as src, temp_target.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
-        temp_target.replace(local_target)
-    except BaseException:
-        temp_target.unlink(missing_ok=True)
-        raise
+        local_target.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = local_target.with_name(
+            f".{local_target.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        try:
+            with fs.open(remote_file_path, "rb") as src, temp_target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            os.replace(temp_target, local_target)
+        except BaseException:
+            temp_target.unlink(missing_ok=True)
+            raise
 
     return local_target
 
@@ -203,3 +277,67 @@ def resolve_partition_paths(
 ) -> list[str]:
     """Resolve partition parquet paths for the requested interval."""
     return resolve_local_partition_paths(source_root, entry, start, end)
+
+
+def materialize_feature_source(
+    source: FeatureParquetSource,
+    con: duckdb.DuckDBPyConnection,
+    filesystem: Any = None,
+) -> list[str]:
+    """Resolve a feature scan and populate remote cache files at compilation."""
+    entry: dict[str, Any] = {
+        "name": "feature_source",
+        "kind": "table" if source.table else "timeseries",
+        "path_template": source.path_template,
+    }
+    if source.min_time is not None:
+        entry["min_time"] = source.min_time
+    if source.max_time is not None:
+        entry["max_time"] = source.max_time
+
+    if source.table:
+        if source.cache_root is None:
+            target = _rooted_path(Path(source.source_root), source.path_template)
+            return [str(target)] if target.is_file() else []
+        if filesystem is None:
+            raise RuntimeError("Feature table filesystem is unavailable")
+        return [
+            str(
+                ensure_cached_table(
+                    source.source_root,
+                    Path(source.cache_root),
+                    source.path_template,
+                    filesystem,
+                ).resolve()
+            )
+        ]
+
+    if source.start is None or source.end is None:
+        raise AssertionError("Timeseries feature scans require start and end")
+    start = parse_timestamp(source.start)
+    end = parse_timestamp(source.end)
+    if source.cache_root is None:
+        return resolve_local_partition_paths(Path(source.source_root), entry, start, end)
+
+    path_template = source.path_template
+    _validated_relative_path(path_template)
+    relative_paths = (
+        [
+            path_template.format(year=year)
+            for year in partition_years_for_interval(entry, start, end)
+        ]
+        if "{year}" in path_template
+        else [path_template]
+    )
+    return [
+        str(
+            ensure_cached_partition(
+                source.source_root,
+                Path(source.cache_root),
+                relative_path,
+                list(source.needed_columns),
+                con,
+            ).resolve()
+        )
+        for relative_path in relative_paths
+    ]

@@ -12,6 +12,7 @@ from typing import cast
 from uuid import UUID
 
 from duckpd._logical import (
+    AsOfJoinPlan,
     BinaryExpression,
     CaseWhen,
     CastExpression,
@@ -19,6 +20,7 @@ from duckpd._logical import (
     ColumnRef,
     CsvSource,
     Expression,
+    FeatureParquetSource,
     FilterPlan,
     FunctionCall,
     JoinPlan,
@@ -155,15 +157,22 @@ def _json_value(value: object) -> object:
         return value.value
     if isinstance(value, UUID):
         return str(value)
-    if isinstance(value, (ParquetSource, CsvSource)):
+    if isinstance(value, (ParquetSource, CsvSource, FeatureParquetSource)):
         result: dict[str, object] = {
             "node": type(value).__name__,
-            "paths": [sanitize_source_location(path) for path in value.paths],
+            "source": sanitize_source_location(value.source_root)
+            if isinstance(value, FeatureParquetSource)
+            else None,
+            "paths": (
+                [sanitize_source_location(path) for path in value.paths]
+                if not isinstance(value, FeatureParquetSource)
+                else None
+            ),
         }
         for field in fields(value):
-            if field.name != "paths":
+            if field.name not in {"paths", "source_root", "filesystem_key"}:
                 result[field.name] = _json_value(getattr(value, field.name))
-        return result
+        return {key: item for key, item in result.items() if item is not None}
     if isinstance(value, RemoteTableSource):
         return {
             "node": "RemoteTableSource",
@@ -215,7 +224,7 @@ def _json_value(value: object) -> object:
 def _rewrite_tree(plan: LogicalPlan, local: Rewrite) -> LogicalPlan:
     if isinstance(plan, ScanPlan):
         return local(plan)
-    if isinstance(plan, JoinPlan):
+    if isinstance(plan, (JoinPlan, AsOfJoinPlan)):
         rewritten = replace(
             plan,
             left=_rewrite_tree(plan.left, local),
@@ -424,7 +433,7 @@ def _common_subplan_recommendations(
         fingerprint = hashlib.sha256(encoded.encode()).hexdigest()[:16]
         count, _ = counts.get(fingerprint, (0, node))
         counts[fingerprint] = (count + 1, node)
-        if isinstance(node, JoinPlan):
+        if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             visit(node.left)
             visit(node.right)
         elif isinstance(node, UnionPlan):

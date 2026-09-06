@@ -14,6 +14,7 @@ from duckpd._logical import (
     AggregateOperator,
     AggregatePlan,
     ArrowSource,
+    AsOfJoinPlan,
     BinaryExpression,
     BinaryOperator,
     CaseWhen,
@@ -23,6 +24,7 @@ from duckpd._logical import (
     ColumnRef,
     CsvSource,
     Expression,
+    FeatureParquetSource,
     FilterPlan,
     FunctionCall,
     JoinPlan,
@@ -79,6 +81,7 @@ class DuckDBCompiler:
             | CsvSource
             | PandasSource
             | ParquetSource
+            | FeatureParquetSource
             | RemoteTableSource
             | SqlSource
             | TableSource
@@ -161,6 +164,8 @@ class DuckDBCompiler:
 
         if isinstance(plan, JoinPlan):
             return self._compile_join(plan)
+        if isinstance(plan, AsOfJoinPlan):
+            return self._compile_asof_join(plan)
 
         if isinstance(plan, UnionPlan):
             return self._compile_union(plan)
@@ -482,6 +487,7 @@ class DuckDBCompiler:
             | CsvSource
             | PandasSource
             | ParquetSource
+            | FeatureParquetSource
             | RemoteTableSource
             | SqlSource
             | TableSource
@@ -523,6 +529,26 @@ class DuckDBCompiler:
                 sep=source.delimiter,
                 auto_detect=source.auto_detect,
             )
+
+        if isinstance(source, FeatureParquetSource):
+            from duckpd._feature_sources import materialize_feature_source
+
+            filesystem = (
+                self._session._get_registered_source(source.filesystem_key)
+                if source.filesystem_key is not None
+                else None
+            )
+            feature_paths = materialize_feature_source(
+                source,
+                self._session._connection,
+                filesystem,
+            )
+            if not feature_paths:
+                raise FileNotFoundError(
+                    f"No partition files found for feature source {source.path_template!r}"
+                )
+            paths: str | list[str] = feature_paths[0] if len(feature_paths) == 1 else feature_paths
+            return self._session._connection.read_parquet(paths)
 
         paths: str | list[str] = source.paths[0] if len(source.paths) == 1 else list(source.paths)
         return self._session._connection.read_parquet(
@@ -718,6 +744,64 @@ class DuckDBCompiler:
             invalid,
             duckdb.ConstantExpression(None),
         ).otherwise(value)
+
+    def _compile_asof_join(self, plan: AsOfJoinPlan) -> CompiledFrame:
+        left_compiled = self._compile(plan.left)
+        right_compiled = self._compile(plan.right)
+
+        left_bindings: dict[ColumnId, str] = {}
+        left_projection: list[duckdb.Expression] = []
+        for column in plan.left.columns:
+            temporary = f"l_{column.id.value.hex}"
+            left_bindings[column.id] = temporary
+            left_projection.append(
+                duckdb.SQLExpression(quote_identifier(left_compiled.bindings[column.id])).alias(
+                    temporary
+                )
+            )
+
+        right_bindings: dict[ColumnId, str] = {}
+        right_projection: list[duckdb.Expression] = []
+        for column in plan.right.columns:
+            temporary = f"r_{column.id.value.hex}"
+            right_bindings[column.id] = temporary
+            right_projection.append(
+                duckdb.SQLExpression(quote_identifier(right_compiled.bindings[column.id])).alias(
+                    temporary
+                )
+            )
+
+        left_relation = left_compiled.relation.project(*left_projection)
+        right_relation = right_compiled.relation.project(*right_projection)
+        conditions = [
+            (
+                f"lhs.{quote_identifier(left_bindings[left_id])} = "
+                f"rhs.{quote_identifier(right_bindings[right_id])}"
+            )
+            for left_id, right_id in zip(plan.left_keys, plan.right_keys, strict=True)
+        ]
+        conditions.append(
+            f"lhs.{quote_identifier(left_bindings[plan.left_time])} >= "
+            f"rhs.{quote_identifier(right_bindings[plan.right_time])} "
+            f"+ INTERVAL {plan.delay_microseconds} MICROSECOND"
+        )
+        joined = self._session._connection.sql(
+            f"SELECT * FROM ({left_relation.sql_query()}) AS lhs "
+            f"ASOF LEFT JOIN ({right_relation.sql_query()}) AS rhs "
+            f"ON {' AND '.join(conditions)}"
+        )
+
+        output_projection: list[duckdb.Expression] = []
+        output_bindings: dict[ColumnId, str] = {}
+        for column in plan.metadata.columns:
+            binding = left_bindings.get(column.id) or right_bindings.get(column.id)
+            if binding is None:
+                raise AssertionError(f"ASOF compiler omitted column {column.label!r}")
+            output_projection.append(
+                duckdb.SQLExpression(quote_identifier(binding)).alias(column.label)
+            )
+            output_bindings[column.id] = column.label
+        return CompiledFrame(joined.project(*output_projection), output_bindings)
 
     def _compile_join(self, plan: JoinPlan) -> CompiledFrame:
         left_compiled = self._compile(plan.left)

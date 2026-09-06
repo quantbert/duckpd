@@ -26,9 +26,11 @@ import pyarrow.parquet as pq
 
 from duckpd._logical import (
     AggregatePlan,
+    AsOfJoinPlan,
     BinaryExpression,
     ColumnId,
     ColumnRef,
+    FeatureParquetSource,
     FilterPlan,
     JoinPlan,
     JoinType,
@@ -279,7 +281,7 @@ def _execution_context(
 def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
     """Yield a plan tree without compiling or executing it."""
     yield plan
-    if isinstance(plan, JoinPlan):
+    if isinstance(plan, (JoinPlan, AsOfJoinPlan)):
         yield from _plan_nodes(plan.left)
         yield from _plan_nodes(plan.right)
     elif isinstance(plan, UnionPlan):
@@ -440,6 +442,10 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
                 kind = node.metadata.provenance.kind
                 source_name = source.qualified_name
                 capabilities = source.capabilities
+            elif isinstance(source, FeatureParquetSource) and source.cache_root is not None:
+                kind = SourceKind.FEATURE_STORE
+                source_name = sanitize_source_location(source.source_root)
+                capabilities = _REMOTE_PARQUET_CAPABILITIES
             elif isinstance(source, ParquetSource) and any("://" in path for path in source.paths):
                 kind = SourceKind.PARQUET
                 source_name = ",".join(sanitize_source_location(path) for path in source.paths)
@@ -470,7 +476,7 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
                 )
             )
             return
-        if isinstance(node, JoinPlan):
+        if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             branch_operations = requested | {SourceOperation.JOIN}
             visit(node.left, branch_operations, blocked)
             visit(node.right, branch_operations, blocked)
@@ -534,14 +540,14 @@ def _movement_plans(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
                     tuple(sanitize_source_location(location) for location in provenance.locations),
                 ),
             )
-        if isinstance(node, JoinPlan):
+        if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             return (*sources(node.left), *sources(node.right))
         if isinstance(node, UnionPlan):
             return tuple(item for child in node.inputs for item in sources(child))
         return sources(node.input)
 
     def visit(node: LogicalPlan) -> None:
-        if isinstance(node, JoinPlan):
+        if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             left = sources(node.left)
             right = sources(node.right)
             if set(left) != set(right):
@@ -576,7 +582,29 @@ def _remote_boundaries(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
     """Describe remote source movement and known native pushdown."""
     boundaries: list[dict[str, object]] = []
     for node in _plan_nodes(plan):
-        if not isinstance(node, ScanPlan) or not isinstance(node.source, RemoteTableSource):
+        if not isinstance(node, ScanPlan):
+            continue
+        if isinstance(node.source, FeatureParquetSource) and node.source.cache_root is not None:
+            boundaries.append(
+                {
+                    "kind": "feature_store_cache",
+                    "source": sanitize_source_location(node.source.source_root),
+                    "location": str(node.source.cache_root),
+                    "estimated_transfer_bytes": None,
+                    "unbounded_scan": "allow",
+                    "pushdown": {
+                        "projection": True,
+                        "filter": False,
+                        "aggregation": False,
+                        "join": False,
+                        "window": False,
+                        "limit": False,
+                        "sort": False,
+                    },
+                }
+            )
+            continue
+        if not isinstance(node.source, RemoteTableSource):
             continue
         source = node.source
         capabilities = source.capabilities
@@ -757,7 +785,7 @@ class Executor:
                 for column in plan.metadata.columns
                 if column.label in source.columns
             }
-        if isinstance(plan, JoinPlan):
+        if isinstance(plan, (JoinPlan, AsOfJoinPlan)):
             left_dtypes = self._pandas_dtypes(plan.left)
             right_dtypes = self._pandas_dtypes(plan.right)
             return {**left_dtypes, **right_dtypes}
@@ -977,7 +1005,7 @@ class Executor:
             ):
                 _walk(p.input)
                 return
-            if isinstance(p, JoinPlan):
+            if isinstance(p, (JoinPlan, AsOfJoinPlan)):
                 _walk(p.left)
                 _walk(p.right)
                 return
@@ -1267,7 +1295,14 @@ class Executor:
         visible_rel = self._compiler.project_visible(compiled, plan).relation
         self._session._begin_execution()
         nodes = tuple(_plan_nodes(plan))
-        blocking_types = (SortPlan, TopKPlan, AggregatePlan, JoinPlan, LocIndexPlan)
+        blocking_types = (
+            SortPlan,
+            TopKPlan,
+            AggregatePlan,
+            JoinPlan,
+            AsOfJoinPlan,
+            LocIndexPlan,
+        )
         blocking = tuple(
             dict.fromkeys(type(node).__name__ for node in nodes if isinstance(node, blocking_types))
         )

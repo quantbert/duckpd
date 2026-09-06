@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import uuid4
 
 from duckpd._feature_catalog import (
     normalize_filters,
@@ -18,9 +19,25 @@ from duckpd._feature_catalog import (
     validate_catalog,
 )
 from duckpd._feature_sources import (
+    _rooted_path,
+    _validated_relative_path,
     get_dataset_path_template,
-    resolve_partition_paths,
 )
+from duckpd._logical import (
+    AsOfJoinPlan,
+    Column,
+    ColumnId,
+    ColumnRef,
+    FeatureParquetSource,
+    FrameMetadata,
+    NamedExpression,
+    Nullability,
+    ProjectPlan,
+    ScanPlan,
+    SourceKind,
+    SourceProvenance,
+)
+from duckpd._metadata import after_join, after_projection
 from duckpd.series import Series
 
 if TYPE_CHECKING:
@@ -67,6 +84,7 @@ class FeatureStore:
 
         self._is_remote = self._source_raw.startswith(("hf://", "http://", "https://"))
         self._filesystem: Any = None
+        self._filesystem_key: str | None = None
 
         if self._is_remote:
             if not self._source_raw.startswith("hf://"):
@@ -76,7 +94,6 @@ class FeatureStore:
                 raise ValueError(msg)
             self._source_path = None
             self._cache_path = Path(self._cache_raw).expanduser().resolve()
-            self._cache_path.mkdir(parents=True, exist_ok=True)
             self._init_remote_filesystem()
         else:
             self._source_path = Path(self._source_raw).expanduser().resolve()
@@ -136,7 +153,8 @@ class FeatureStore:
             raise ImportError(msg) from None
 
         self._filesystem = HfFileSystem(token=self._token)
-        # Register filesystem with session DuckDB connection if not already registered
+        self._filesystem_key = f"featurestore:{uuid4().hex}"
+        self._session._registered_sources[self._filesystem_key] = self._filesystem
         from contextlib import suppress
 
         with suppress(Exception):
@@ -162,9 +180,6 @@ class FeatureStore:
                     catalog_text = f.read()
             except Exception as err:
                 raise FileNotFoundError(f"Remote catalog not found: {remote_cat_path}") from err
-            # Cache local copy of catalog.json
-            if self._cache_path is not None:
-                (self._cache_path / "catalog.json").write_text(catalog_text, encoding="utf-8")
         else:
             raise FileNotFoundError(f"Catalog not found in {self._source_raw}")
 
@@ -189,7 +204,7 @@ class FeatureStore:
         return self._session
 
     def table(self, name: Any) -> DataFrame:
-        """Return a registered catalog reference table as a lazy DataFrame."""
+        """Return a lazy scan of a registered catalog reference table."""
         if not isinstance(name, str) or not name:
             raise ValueError("table name must be a non-empty string")
         if name not in self._dataset_entries:
@@ -198,28 +213,67 @@ class FeatureStore:
         if entry["kind"] != "table":
             raise ValueError(f"Dataset {name!r} is a {entry['kind']}, not a table")
 
-        root_ctx = self._source_path if self._source_path else self._source_raw
-        path_template = get_dataset_path_template(root_ctx, entry, fs=self._filesystem)
+        root_context = self._source_raw if self._is_remote else cast(Path, self._source_path)
+        path_template = get_dataset_path_template(
+            root_context,
+            entry,
+            fs=self._filesystem,
+        )
+        _validated_relative_path(path_template)
         if "{year}" in path_template:
             raise ValueError(f"Table dataset {name!r} cannot have year partition template")
 
-        if self._source_path is not None:
-            table_path = self._source_path / path_template
-            if not table_path.is_file():
-                raise FileNotFoundError(f"Table file not found for {name!r}: {table_path}")
-            return self._session.read_parquet(str(table_path.resolve()))
-        else:
-            # Remote source: ensure cached locally
-            assert self._cache_path is not None
-            from duckpd._feature_sources import ensure_cached_table
+        columns = self._inspect_table_columns(path_template)
+        source = FeatureParquetSource(
+            source_root=self._source_raw if self._is_remote else str(self._source_path),
+            cache_root=str(self._cache_path) if self._is_remote else None,
+            path_template=path_template,
+            needed_columns=tuple(column.label for column in columns),
+            filesystem_key=self._filesystem_key,
+            table=True,
+        )
+        metadata = FrameMetadata(
+            columns,
+            provenance=SourceProvenance(
+                SourceKind.FEATURE_STORE,
+                (self._source_raw,),
+            ),
+        )
+        from duckpd.frame import DataFrame
 
-            cached_file = ensure_cached_table(
-                self._source_raw,
-                self._cache_path,
-                path_template,
-                self._filesystem,
-            )
-            return self._session.read_parquet(str(cached_file.resolve()))
+        return DataFrame(self._session, ScanPlan(source, metadata))
+
+    def _inspect_table_columns(self, path_template: str) -> tuple[Column, ...]:
+        """Read only Parquet schema metadata; table bytes remain uncached until execution."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        if self._source_path is not None:
+            table_path = _rooted_path(self._source_path, path_template)
+            if not table_path.is_file():
+                raise FileNotFoundError(f"Table file not found: {table_path}")
+            schema = pq.ParquetFile(table_path).schema_arrow
+        else:
+            assert self._filesystem is not None
+            assert self._cache_path is not None
+            cached_path = _rooted_path(self._cache_path, path_template)
+            if cached_path.is_file():
+                schema = pq.ParquetFile(cached_path).schema_arrow
+            else:
+                remote_path = (
+                    self._source_raw.replace("hf://", "").rstrip("/")
+                    + "/"
+                    + _validated_relative_path(path_template).as_posix()
+                )
+                with self._filesystem.open(remote_path, "rb") as remote_file:
+                    schema = pq.ParquetFile(remote_file).schema_arrow
+
+        empty = pa.Table.from_batches([], schema=schema)
+        relation = self._session._connection.from_arrow(empty)
+        return tuple(
+            Column(ColumnId.create(), label, str(dtype))
+            for label, dtype in zip(relation.columns, relation.types, strict=True)
+        )
 
     def _configure(
         self,
@@ -346,53 +400,87 @@ class FeatureStore:
 
         return frame
 
-    def _resolve_paths_for_dataset(
+    def _timeseries_frame(
         self,
         dataset: str,
         start: datetime,
         end: datetime,
-        needed_features: list[str],
-    ) -> list[str]:
-        """Resolve local paths or fetch and project remote partitions into cache."""
+        needed_features: Sequence[str],
+    ) -> DataFrame:
+        """Build a typed deferred scan for one cataloged timeseries dataset."""
         entry = self._dataset_entries[dataset]
-        if self._source_path is not None:
-            return resolve_partition_paths(self._source_path, entry, start, end)
-
-        # Remote source: ensure cached
-        assert self._cache_path is not None
-        from duckpd._feature_sources import (
-            ensure_cached_partition,
-            get_dataset_path_template,
-            partition_years_for_interval,
+        root_context = self._source_raw if self._is_remote else cast(Path, self._source_path)
+        path_template = get_dataset_path_template(
+            root_context,
+            entry,
+            fs=self._filesystem,
         )
-
-        path_template = get_dataset_path_template(self._cache_path, entry, fs=self._filesystem)
-        key_cols = [entry["time_column"], *entry["series_keys"]]
-        all_needed = list(dict.fromkeys(key_cols + needed_features))
-
-        paths: list[str] = []
-        if "{year}" in path_template:
-            years = partition_years_for_interval(entry, start, end)
-            for year in years:
-                rel_path = path_template.format(year=year)
-                cached_file = ensure_cached_partition(
-                    self._source_raw,
-                    self._cache_path,
-                    rel_path,
-                    all_needed,
-                    self._session._connection,
-                )
-                paths.append(str(cached_file.resolve()))
-        else:
-            cached_file = ensure_cached_partition(
-                self._source_raw,
-                self._cache_path,
-                path_template,
-                all_needed,
-                self._session._connection,
+        _validated_relative_path(path_template)
+        labels = list(
+            dict.fromkeys(
+                [
+                    entry["time_column"],
+                    *entry["series_keys"],
+                    *needed_features,
+                ]
             )
-            paths.append(str(cached_file.resolve()))
-        return paths
+        )
+        columns = tuple(Column(ColumnId.create(), label, "UNKNOWN") for label in labels)
+        source = FeatureParquetSource(
+            source_root=self._source_raw if self._is_remote else str(self._source_path),
+            cache_root=str(self._cache_path) if self._is_remote else None,
+            path_template=path_template,
+            needed_columns=tuple(labels),
+            start=start.isoformat(),
+            end=end.isoformat(),
+            min_time=entry.get("min_time"),
+            max_time=entry.get("max_time"),
+            filesystem_key=self._filesystem_key,
+        )
+        metadata = FrameMetadata(
+            columns,
+            provenance=SourceProvenance(
+                SourceKind.FEATURE_STORE,
+                (self._source_raw,),
+            ),
+        )
+        from duckpd.frame import DataFrame
+
+        return DataFrame(self._session, ScanPlan(source, metadata))
+
+    @staticmethod
+    def _project_feature_outputs(
+        frame: DataFrame,
+        keys: Sequence[str],
+        features: Sequence[tuple[str, str]],
+    ) -> DataFrame:
+        """Project keys and feature aliases without collapsing repeated physical columns."""
+        by_label = {column.label: column for column in frame._plan.metadata.visible_columns}
+        projections: list[NamedExpression] = []
+        output_columns: list[Column] = []
+        for label in keys:
+            column = by_label[label]
+            projections.append(NamedExpression(column, ColumnRef(column.id)))
+            output_columns.append(column)
+        for output_name, physical_name in features:
+            source_column = by_label[physical_name]
+            output_column = Column(
+                ColumnId.create(),
+                output_name,
+                source_column.duckdb_type,
+                nullable=source_column.nullable,
+                alias_of=source_column.id,
+            )
+            projections.append(NamedExpression(output_column, ColumnRef(source_column.id)))
+            output_columns.append(output_column)
+
+        metadata = after_projection(frame._plan.metadata, tuple(output_columns))
+        from duckpd.frame import DataFrame
+
+        return DataFrame(
+            frame._session,
+            ProjectPlan(frame._plan, tuple(projections), metadata),
+        )
 
     def _build_exact_alignment(
         self,
@@ -402,74 +490,53 @@ class FeatureStore:
         end: datetime,
         filters: dict[str, list[str]] | None,
     ) -> DataFrame:
-        # Validate compatibility of timeseries keys across all datasets
         key_specs = {
             (
-                self._dataset_entries[ds]["time_column"],
-                tuple(self._dataset_entries[ds]["series_keys"]),
+                self._dataset_entries[dataset]["time_column"],
+                tuple(self._dataset_entries[dataset]["series_keys"]),
             )
-            for ds in grouped
+            for dataset in grouped
         }
         if len(key_specs) != 1:
-            msg = (
+            raise ValueError(
                 "Exact alignment requires compatible time_column and series_keys "
                 "across all selected datasets"
             )
-            raise ValueError(msg)
         time_column, series_keys = next(iter(key_specs))
         all_keys = [time_column, *series_keys]
 
-        # Scan each dataset family
         family_frames: list[DataFrame] = []
-        for dataset, feats in grouped.items():
-            feat_names = [f_name for _, f_name in feats]
-            paths = self._resolve_paths_for_dataset(dataset, start, end, feat_names)
-            if not paths:
-                raise FileNotFoundError(
-                    f"No partition files found for dataset {dataset!r} between {start} and {end}"
-                )
-            df: Any = self._session.read_parquet(paths)
-            # Filter time range [start, end)
-            t_col: Any = df[time_column]
-            df = df[(t_col >= start) & (t_col < end)]
-
-            # Apply filters
+        for dataset, features in grouped.items():
+            physical_names = list(dict.fromkeys(name for _, name in features))
+            frame = self._timeseries_frame(dataset, start, end, physical_names)
+            time_series = cast("Series", frame[time_column])
+            frame = frame[(time_series >= start) & (time_series < end)]
             if filters is not None:
-                for f_col, f_vals in filters.items():
-                    if f_col in all_keys:
-                        # Construct OR condition for matching values
-                        match_expr: Any = None
-                        for val in f_vals:
-                            cond: Any = df[f_col] == val
-                            match_expr = cond if match_expr is None else (match_expr | cond)
-                        if match_expr is not None:
-                            df = df[match_expr]
+                for filter_column, filter_values in filters.items():
+                    if filter_column not in all_keys:
+                        raise ValueError(f"Unknown filter column: {filter_column!r}")
+                    match_expression: Series | None = None
+                    for value in filter_values:
+                        condition = frame[filter_column] == value
+                        match_expression = (
+                            condition
+                            if match_expression is None
+                            else (match_expression | condition)
+                        )
+                    assert match_expression is not None
+                    frame = frame[match_expression]
+            family_frames.append(self._project_feature_outputs(frame, all_keys, features))
 
-            # Project keys + requested features (with renaming to out_name)
-            needed_cols = list(all_keys)
-            rename_map: dict[str, str] = {}
-            for out_name, feat_name in feats:
-                if feat_name not in needed_cols:
-                    needed_cols.append(feat_name)
-                rename_map[feat_name] = out_name
+        result = family_frames[0]
+        for next_frame in family_frames[1:]:
+            result = result.merge(next_frame, on=all_keys, how="inner")
 
-            df = df[needed_cols]
-            if rename_map:
-                df = df.rename(columns=rename_map)
-            family_frames.append(df)
-
-        # Merge family frames on all_keys with inner join
-        result_df = family_frames[0]
-        for next_df in family_frames[1:]:
-            result_df = result_df.merge(next_df, on=all_keys, how="inner")
-
-        # Project final column ordering: keys + output features in resolution order
-        final_cols = list(all_keys)
-        for out_name, _, _, _ in resolved:
-            if out_name not in final_cols:
-                final_cols.append(out_name)
-
-        return result_df[final_cols]
+        return result[
+            [
+                *all_keys,
+                *(output_name for output_name, _, _, _ in resolved),
+            ]
+        ]
 
     def _build_pit_alignment(
         self,
@@ -480,126 +547,117 @@ class FeatureStore:
         end: datetime,
         filters: dict[str, list[str]] | None,
     ) -> DataFrame:
-        # Check lookahead safety and availability delays
         delays: dict[str, timedelta] = {}
-        for _, ref, _, _ in resolved:
-            entry = self._feature_entries[ref]
-            if entry.get("lookahead_safe") is not True:
-                raise ValueError(f"Feature {ref} is not marked lookahead_safe")
-            val = entry.get("availability_delay")
-            if val is None:
-                raise ValueError(f"Feature {ref} must define availability_delay")
-            delays[ref] = parse_availability_delay(val, ref)
+        for _, reference, _, _ in resolved:
+            feature_entry = self._feature_entries[reference]
+            if feature_entry.get("lookahead_safe") is not True:
+                raise ValueError(f"Feature {reference} is not marked lookahead_safe")
+            delays[reference] = parse_availability_delay(
+                feature_entry.get("availability_delay"),
+                reference,
+            )
 
         spine_entry = self._dataset_entries[spine_dataset]
-        spine_time_col = spine_entry["time_column"]
-        spine_series_keys = list(spine_entry["series_keys"])
-
-        for ds in grouped:
-            entry = self._dataset_entries[ds]
-            if (
-                entry["time_column"] != spine_time_col
-                or list(entry["series_keys"]) != spine_series_keys
-            ):
-                msg = (
+        time_column = spine_entry["time_column"]
+        series_keys = list(spine_entry["series_keys"])
+        for dataset in grouped:
+            entry = self._dataset_entries[dataset]
+            if entry["time_column"] != time_column or list(entry["series_keys"]) != series_keys:
+                raise ValueError(
                     "Point-in-time alignment requires compatible time_column and series_keys: "
-                    f"{ds} != {spine_dataset}"
+                    f"{dataset} != {spine_dataset}"
                 )
-                raise ValueError(msg)
 
-        # Build native SQL query executed through session.sql()
-        # This provides vectorized ASOF LEFT JOIN execution
-        from duckpd._quoting import quote_identifier, quote_literal
+        spine = self._timeseries_frame(spine_dataset, start, end, ())
+        spine_time = cast("Series", spine[time_column])
+        spine = spine[(spine_time >= start) & (spine_time < end)]
+        if filters is not None:
+            for filter_column, filter_values in filters.items():
+                if filter_column not in series_keys:
+                    raise ValueError(f"Unknown filter column: {filter_column!r}")
+                match_expression: Series | None = None
+                for value in filter_values:
+                    condition = spine[filter_column] == value
+                    match_expression = (
+                        condition if match_expression is None else (match_expression | condition)
+                    )
+                assert match_expression is not None
+                spine = spine[match_expression]
 
-        ctes: list[str] = []
-        quoted_keys = [quote_identifier(k) for k in [spine_time_col, *spine_series_keys]]
-
-        # Scan spine
-        spine_feats = [
-            f_name for ds, feats in grouped.items() if ds == spine_dataset for _, f_name in feats
-        ]
-        spine_paths = self._resolve_paths_for_dataset(spine_dataset, start, end, spine_feats)
-        if not spine_paths:
-            raise FileNotFoundError(f"No partitions found for spine {spine_dataset!r}")
-        spine_path_sql = ", ".join(quote_literal(p) for p in spine_paths)
-
-        spine_filters = (
-            f"{quote_identifier(spine_time_col)} >= TIMESTAMPTZ {quote_literal(start.isoformat())} "
-            f"AND {quote_identifier(spine_time_col)} < TIMESTAMPTZ {quote_literal(end.isoformat())}"
-        )
-        if filters:
-            for f_col, f_vals in filters.items():
-                if f_col in spine_series_keys:
-                    val_list = ", ".join(quote_literal(v) for v in f_vals)
-                    spine_filters += f" AND {quote_identifier(f_col)} IN ({val_list})"
-
-        spine_cte = (
-            f"spine AS (SELECT {', '.join(quoted_keys)} "
-            f"FROM read_parquet([{spine_path_sql}]) WHERE {spine_filters})"
-        )
-        ctes.append(spine_cte)
-
-        # Build each family CTE
-        # To ensure predecessor rows are available for ASOF, scan from earliest necessary history
-        max_delay = max(delays.values(), default=timedelta())
-        history_start = start - max_delay - timedelta(days=366)
-
-        dataset_aliases: dict[str, str] = {}
-        for idx, (ds, feats) in enumerate(grouped.items()):
-            ds_alias = f"family_{idx}"
-            dataset_aliases[ds] = ds_alias
-            feat_names = list({f_name for _, f_name in feats})
-            ds_paths = self._resolve_paths_for_dataset(ds, history_start, end, feat_names)
-            if not ds_paths:
-                # If no history paths exist, fall back to start-end paths
-                ds_paths = self._resolve_paths_for_dataset(ds, start, end, feat_names)
-            if not ds_paths:
-                raise FileNotFoundError(f"No partitions found for dataset {ds!r}")
-            path_sql = ", ".join(quote_literal(p) for p in ds_paths)
-
-            feat_names = list({f_name for _, f_name in feats})
-            col_list = ", ".join(
-                quote_identifier(c) for c in [spine_time_col, *spine_series_keys, *feat_names]
-            )
-            time_filter = (
-                f"{quote_identifier(spine_time_col)} < TIMESTAMPTZ {quote_literal(end.isoformat())}"
-            )
-            family_cte = (
-                f"{ds_alias} AS (SELECT {col_list} "
-                f"FROM read_parquet([{path_sql}]) WHERE {time_filter})"
-            )
-            ctes.append(family_cte)
-
-        # Group joins by (dataset, delay_microseconds)
-        alignment_groups: dict[tuple[str, int], str] = {}
-        for _, ref, ds, _ in resolved:
-            d_us = delays[ref] // timedelta(microseconds=1)
-            alignment_groups.setdefault((ds, d_us), f"aligned_{len(alignment_groups)}")
-
-        select_cols = [f"spine.{k}" for k in quoted_keys]
-        for out_name, ref, ds, feat_name in resolved:
-            d_us = delays[ref] // timedelta(microseconds=1)
-            group_alias = alignment_groups[(ds, d_us)]
-            select_cols.append(
-                f"{group_alias}.{quote_identifier(feat_name)} AS {quote_identifier(out_name)}"
+        alignment_groups: dict[
+            tuple[str, int],
+            list[tuple[str, str]],
+        ] = {}
+        for output_name, reference, dataset, physical_name in resolved:
+            delay_microseconds = delays[reference] // timedelta(microseconds=1)
+            alignment_groups.setdefault((dataset, delay_microseconds), []).append(
+                (output_name, physical_name)
             )
 
-        joins: list[str] = []
-        for (ds, d_us), g_alias in alignment_groups.items():
-            ds_alias = dataset_aliases[ds]
-            conds = [
-                f"spine.{quote_identifier(k)} = {g_alias}.{quote_identifier(k)}"
-                for k in spine_series_keys
+        result: DataFrame = spine
+        for (dataset, delay_microseconds), features in alignment_groups.items():
+            entry = self._dataset_entries[dataset]
+            root_context = self._source_raw if self._is_remote else cast(Path, self._source_path)
+            path_template = get_dataset_path_template(
+                root_context,
+                entry,
+                fs=self._filesystem,
+            )
+            min_time = entry.get("min_time")
+            if "{year}" in path_template and min_time is None:
+                raise ValueError(
+                    f"Point-in-time dataset {dataset!r} requires min_time "
+                    "to resolve complete predecessor history"
+                )
+            history_start = (
+                parse_timestamp(min_time)
+                if min_time is not None
+                else datetime.min.replace(tzinfo=start.tzinfo)
+            )
+            physical_names = list(dict.fromkeys(name for _, name in features))
+            right = self._timeseries_frame(dataset, history_start, end, physical_names)
+            right_time = cast("Series", right[time_column])
+            right = right[right_time < end]
+            right = self._project_feature_outputs(
+                right,
+                [time_column, *series_keys],
+                features,
+            )
+
+            left_columns = {column.label: column for column in result._plan.metadata.columns}
+            right_columns = {column.label: column for column in right._plan.metadata.columns}
+            payload_columns = tuple(
+                Column(
+                    right_columns[output_name].id,
+                    output_name,
+                    right_columns[output_name].duckdb_type,
+                    nullable=Nullability.NULLABLE,
+                    alias_of=right_columns[output_name].alias_of,
+                )
+                for output_name, _ in features
+            )
+            metadata = after_join((*result._plan.metadata.columns, *payload_columns))
+            plan = AsOfJoinPlan(
+                left=result._plan,
+                right=right._plan,
+                left_time=left_columns[time_column].id,
+                right_time=right_columns[time_column].id,
+                left_keys=tuple(left_columns[key].id for key in series_keys),
+                right_keys=tuple(right_columns[key].id for key in series_keys),
+                delay_microseconds=delay_microseconds,
+                metadata=metadata,
+            )
+            from duckpd.frame import DataFrame
+
+            result = DataFrame(self._session, plan)
+
+        return result[
+            [
+                time_column,
+                *series_keys,
+                *(output_name for output_name, _, _, _ in resolved),
             ]
-            conds.append(
-                f"spine.{quote_identifier(spine_time_col)} >= "
-                f"{g_alias}.{quote_identifier(spine_time_col)} + INTERVAL {d_us} MICROSECOND"
-            )
-            joins.append(f"ASOF LEFT JOIN {ds_alias} AS {g_alias} ON {' AND '.join(conds)}")
-
-        joins_sql = " ".join(joins)
-        query = f"WITH {', '.join(ctes)} SELECT {', '.join(select_cols)} FROM spine {joins_sql}"
-        return self._session.sql(query)
+        ]
 
     def feature_batches(
         self,
@@ -692,13 +750,23 @@ class FeatureStore:
                 if feat_name not in grouped.setdefault(ds, []):
                     grouped[ds].append(feat_name)
 
-            for ds, feat_names in grouped.items():
-                paths = self._resolve_paths_for_dataset(ds, start_dt, end_dt, feat_names)
+            from duckpd._feature_sources import materialize_feature_source
+
+            for dataset, feature_names in grouped.items():
+                frame = self._timeseries_frame(dataset, start_dt, end_dt, feature_names)
+                source = cast(ScanPlan, frame._plan).source
+                if not isinstance(source, FeatureParquetSource):
+                    raise AssertionError("Feature sync expected a deferred feature source")
+                paths = materialize_feature_source(
+                    source,
+                    self._session._connection,
+                    self._filesystem,
+                )
                 partitions_count += len(paths)
-                for p in paths:
-                    p_file = Path(p)
-                    if p_file.is_file():
-                        bytes_count += p_file.stat().st_size
+                for path in paths:
+                    path_file = Path(path)
+                    if path_file.is_file():
+                        bytes_count += path_file.stat().st_size
 
         return SyncReport(
             partitions_synced=partitions_count,

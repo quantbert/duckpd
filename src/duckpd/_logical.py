@@ -80,6 +80,22 @@ class ParquetSource:
 
 
 @dataclass(frozen=True)
+class FeatureParquetSource:
+    """A cataloged Parquet scan materialized into the local cache at compilation."""
+
+    source_root: str
+    cache_root: str | None
+    path_template: str
+    needed_columns: tuple[str, ...]
+    start: str | None = None
+    end: str | None = None
+    min_time: str | None = None
+    max_time: str | None = None
+    filesystem_key: str | None = None
+    table: bool = False
+
+
+@dataclass(frozen=True)
 class CsvSource:
     """One or more CSV files scanned by DuckDB."""
 
@@ -170,6 +186,7 @@ Source = (
     | CsvSource
     | PandasSource
     | ParquetSource
+    | FeatureParquetSource
     | RemoteTableSource
     | SqlSource
     | TableSource
@@ -398,6 +415,7 @@ class SourceKind(Enum):
     PANDAS = "pandas"
     ARROW = "arrow"
     PARQUET = "parquet"
+    FEATURE_STORE = "feature_store"
     CSV = "csv"
     TABLE = "table"
     POSTGRES = "postgres"
@@ -662,6 +680,20 @@ class JoinPlan(LogicalPlanBase):
 
 
 @dataclass(frozen=True)
+class AsOfJoinPlan(LogicalPlanBase):
+    """Backward ASOF left join with an availability-delay predicate."""
+
+    left: LogicalPlan
+    right: LogicalPlan
+    left_time: ColumnId
+    right_time: ColumnId
+    left_keys: tuple[ColumnId, ...]
+    right_keys: tuple[ColumnId, ...]
+    delay_microseconds: int
+    metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
 class UnionPlan(LogicalPlanBase):
     """Concatenate multiple logical plans row-wise."""
 
@@ -703,6 +735,7 @@ LogicalPlan: TypeAlias = (
     | LimitPlan
     | AggregatePlan
     | JoinPlan
+    | AsOfJoinPlan
     | UnionPlan
     | LocIndexPlan
     | SamplePlan

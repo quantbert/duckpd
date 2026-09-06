@@ -18,10 +18,16 @@ the [release policy](RELEASES.md).
   pruning irrelevant years and projecting only requested feature columns to minimize disk
   usage.
 - Transparent JIT remote fetching and partition caching at execution boundaries
-  (`.collect()`, `.to_arrow()`, `.to_arrow_batches()`) with lock-free atomic file replacement.
+  (`.collect()`, `.to_arrow()`, `.to_arrow_batches()`) with per-partition
+  coordination and atomic file replacement.
 - Headless `store.sync()` pre-fetching helper (`SyncReport`) for batch/cluster orchestration.
 - Lazy reference table access (`store.table()`) returning first-class plan-backed `DataFrame`s.
 - Time-windowed batch streaming via `store.feature_batches(window=...)`.
+- Typed `FeatureParquetSource` and `AsOfJoinPlan` nodes keep remote cache
+  materialization and point-in-time alignment visible to the logical planner.
+- Cache expansion preserves the cumulative projected column set, validates
+  catalog paths against root traversal, and retains sparse predecessors across
+  the full declared dataset history.
 
 ### Changed
 
