@@ -6,31 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 DuckPD uses the Semantic Versioning-inspired, PEP 440-compatible policy in
 the [release policy](RELEASES.md).
 
-## 0.1.3 - 2026-09-05
+## 0.1.4 - 2026-09-06
 
 ### Added
 
-- Added native `duckpd.FeatureStore` and `Session.feature_store()` for multi-family
-  feature selection, exact multi-series time alignment, and point-in-time (`ASOF LEFT JOIN`)
-  alignment with `availability_delay` lookahead bias protection.
-- Partition-mirrored local caching downloads and caches remote Hugging Face or
-  HTTP(S) Parquet datasets by yearly or monthly calendar partition, pruning
-  irrelevant partitions and projecting only requested feature columns to
-  minimize disk usage.
-- Transparent JIT remote fetching and partition caching at execution boundaries
-  (`.collect()`, `.to_arrow()`, `.to_arrow_batches()`) with per-partition
-  coordination and atomic file replacement.
-- Headless `store.sync()` pre-fetching helper (`SyncReport`) for batch/cluster orchestration.
-- Lazy reference table access (`store.table()`) returning first-class plan-backed `DataFrame`s.
-- Time-windowed batch streaming via `store.feature_batches(window=...)`.
-- Typed `FeatureParquetSource` and `AsOfJoinPlan` nodes keep remote cache
-  materialization and point-in-time alignment visible to the logical planner.
-- Cache expansion preserves the cumulative projected column set, validates
-  catalog paths against root traversal, and retains sparse predecessors across
-  the full declared dataset history.
-- A standalone `python -m benchmark.featurestore` harness records cold remote
-  feature fetches, repeated warm local-cache execution, row counts, cache
-  bytes, and cold-to-warm speedup as JSON.
+- Native `duckpd.FeatureStore` and `Session.feature_store()` APIs for building
+  lazy feature frames from a versioned `catalog.json`.
+- Exact multi-family alignment and point-in-time alignment backed by DuckDB's
+  native `ASOF LEFT JOIN`. Catalog-declared `availability_delay` values prevent
+  features from becoming visible before they would have been known, including
+  sparse predecessors from the full declared dataset history.
+- Local, Hugging Face (`hf://`), and HTTP(S) feature stores with yearly and
+  monthly partition templates.
+- Execution-time partition caching that prunes irrelevant time partitions,
+  projects only required columns, and preserves the cumulative requested
+  column set as subsequent queries expand a cached partition.
+- Shared-cache safety through validated root-relative catalog paths,
+  per-partition process coordination, unique staging files, and atomic
+  replacement.
+- Lazy reference-table access through `store.table()`, time-windowed lazy
+  frames through `store.feature_batches()`, and headless cache pre-warming
+  through `store.sync()` and `SyncReport`.
+- Typed `FeatureParquetSource` and `AsOfJoinPlan` logical nodes, keeping remote
+  materialization and point-in-time joins visible to planning, explain, and
+  execution rather than hiding them behind eager preprocessing.
+- A standalone `python -m benchmark.featurestore` harness reporting cold
+  remote execution, repeated warm-cache execution, row counts, cache bytes,
+  and cold-to-warm speedup as JSON.
+- An end-to-end FeatureStore notebook and README documentation covering the
+  feature-store workflow and every supported local, remote, database, and
+  in-memory source feeding DuckPD's lazy DataFrame engine.
+
+### Fixed
+
+- `feature_batches(frame=...)` now resolves the time column from the supplied
+  frame instead of depending on catalog dataset order.
+- Exact alignment now supports multiple output aliases for the same physical
+  feature.
+- Remote timeseries datasets now honor path templates declared in
+  `metadata.json`.
+
+## 0.1.3 - 2026-09-05
 
 ### Changed
 
@@ -51,10 +67,6 @@ the [release policy](RELEASES.md).
 - `DataFrame.commit()` now preserves automatic Parquet row identity after file
   replacement, while schema validation ignores only DuckPD's generated
   identity and continues to validate user-defined hidden index columns.
-- Feature batching resolves its time column from the supplied frame instead of
-  relying on catalog dataset order.
-- Exact alignment supports multiple output aliases for one physical feature.
-- Remote timeseries datasets honor path templates declared in `metadata.json`.
 
 ## 0.1.2 - 2026-09-05
 
@@ -124,11 +136,12 @@ the [release policy](RELEASES.md).
 - Compiler output is checked against declared logical schemas; unknown types remain conservative rather than suppressing known mismatches.
 - Stable-order requirements now cover first-tie ranking and composite `.loc` request/source identities; unordered operations reject before execution.
 
-## Untagged development milestones
+## Pre-tag development milestones
 
-The repository has no `v<version>` tags. The snapshots below were reconstructed
-from package-version commits and are historical development milestones, not
-formal release records. Versions without attributable release notes are omitted.
+The snapshots below predate the repository's first version tag. They were
+reconstructed from package-version commits and are historical development
+milestones, not formal release records. Versions without attributable release
+notes are omitted.
 
 ### Package version 0.0.7 snapshot — 2026-08-15
 
