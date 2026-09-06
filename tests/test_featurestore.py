@@ -820,9 +820,8 @@ def test_session_feature_store_method(feature_store_fixture: Path) -> None:
 
 
 def test_remote_feature_store_validation() -> None:
-    # Non-hf remote uri
-    with pytest.raises(ValueError, match="supports hf:// URIs"):
-        FeatureStore(source="http://remote.store/data", cache="/tmp/cache")
+    with pytest.raises(ValueError, match="Invalid HTTP feature store URI"):
+        FeatureStore(source="http:///data", cache="/tmp/cache")
 
     # Remote hf without cache directory
     with pytest.raises(ValueError, match="local cache directory is required"):
@@ -1268,3 +1267,358 @@ def test_point_in_time_uses_predecessor_older_than_one_year(tmp_path: Path) -> N
     assert "SqlSource" not in logical
     result = frame.collect()
     assert list(result["signal"]) == [42]
+
+
+def test_feature_batches_ignores_catalog_dataset_order(
+    feature_store_fixture: Path,
+) -> None:
+    catalog_path = feature_store_fixture / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["datasets"] = [
+        catalog["datasets"][2],
+        catalog["datasets"][0],
+        catalog["datasets"][1],
+    ]
+    catalog_path.write_text(json.dumps(catalog))
+
+    store = FeatureStore(
+        source=feature_store_fixture,
+        features={"price": "ohlcv:close"},
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:04:00Z",
+        alignment="exact",
+    )
+    frame = store.features()
+    batches = list(store.feature_batches(frame, window=timedelta(minutes=2)))
+    assert [list(batch.collect()["price"]) for batch in batches] == [
+        [100.5, 101.5],
+        [102.5, 103.5],
+    ]
+
+
+def test_exact_alignment_supports_two_aliases_for_one_feature(
+    feature_store_fixture: Path,
+) -> None:
+    frame = FeatureStore(source=feature_store_fixture).features(
+        features={"first": "ohlcv:close", "second": "ohlcv:close"},
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:03:00Z",
+        alignment="exact",
+    )
+    result = frame.collect()
+    assert list(result.columns) == ["datetime", "ticker", "first", "second"]
+    assert list(result["first"]) == [100.5, 101.5, 102.5]
+    assert result["first"].equals(result["second"])
+
+
+def test_remote_timeseries_uses_metadata_path_template(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from duckpd._feature_sources import ensure_cached_partition
+
+    backing = tmp_path / "backing"
+    custom_partition = backing / "custom" / "year=2024"
+    custom_partition.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2024-01-02T08:00:00Z"]),
+            "ticker": ["001"],
+            "close": [100.5],
+        }
+    ).to_parquet(custom_partition / "values.parquet", index=False)
+    metadata_path = backing / "ohlcv" / "metadata.json"
+    metadata_path.parent.mkdir()
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "storage": {
+                    "path_template": "custom/year={year}/values.parquet",
+                }
+            }
+        )
+    )
+    catalog = {
+        "catalog_version": 1,
+        "datasets": [
+            {
+                "name": "ohlcv",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "metadata": "ohlcv/metadata.json",
+                "min_time": "2024-01-01T00:00:00Z",
+                "max_time": "2024-12-31T23:59:59Z",
+            }
+        ],
+        "features": {
+            "ohlcv:close": {
+                "dataset": "ohlcv",
+                "name": "close",
+                "availability_delay": "PT0S",
+                "lookahead_safe": True,
+            }
+        },
+    }
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "catalog.json").write_text(json.dumps(catalog))
+
+    class MockHfFileSystem:
+        def __init__(self, token: str | None = None) -> None:
+            self.token = token
+
+        def exists(self, path: str) -> bool:
+            relative = path.replace("datasets/test/fdb/", "")
+            return (backing / relative).exists()
+
+        def open(self, path: str, mode: str = "rb"):  # type: ignore
+            relative = path.replace("datasets/test/fdb/", "")
+            return open(backing / relative, mode)
+
+    requested_paths: list[str] = []
+
+    def project_partition(
+        source_uri: str,
+        cache_root: Path,
+        relative_path: str,
+        needed_columns: list[str],
+        con: Any,
+        filters_sql: str | None = None,
+    ) -> Path:
+        requested_paths.append(relative_path)
+        return ensure_cached_partition(
+            str(backing),
+            cache_root,
+            relative_path,
+            needed_columns,
+            con,
+            filters_sql,
+        )
+
+    with (
+        patch("huggingface_hub.HfFileSystem", return_value=MockHfFileSystem()),
+        patch(
+            "duckpd._feature_sources.ensure_cached_partition",
+            side_effect=project_partition,
+        ),
+    ):
+        frame = FeatureStore(
+            source="hf://datasets/test/fdb",
+            cache=cache,
+        ).features(
+            features=["ohlcv:close"],
+            start="2024-01-02T08:00:00Z",
+            end="2024-01-02T08:01:00Z",
+            alignment="exact",
+        )
+        assert requested_paths == []
+        result = frame.collect()
+
+    assert requested_paths == ["custom/year=2024/values.parquet"]
+    assert list(result["close"]) == [100.5]
+
+
+def test_monthly_partition_paths_obey_half_open_interval(tmp_path: Path) -> None:
+    from duckpd._feature_sources import (
+        get_dataset_path_template,
+        partition_paths_for_interval,
+        resolve_partition_paths,
+    )
+
+    entry = {
+        "name": "prices",
+        "kind": "timeseries",
+        "partitioning": {"unit": "month"},
+        "time_column": "datetime",
+        "series_keys": ["ticker"],
+    }
+    path_template = get_dataset_path_template(tmp_path, entry)
+    assert path_template == "prices/year={year}/month={month:02d}/data.parquet"
+
+    expected = [
+        "prices/year=2024/month=12/data.parquet",
+        "prices/year=2025/month=01/data.parquet",
+    ]
+    assert (
+        partition_paths_for_interval(
+            entry,
+            path_template,
+            datetime(2024, 12, 31, 23, 59, tzinfo=UTC),
+            datetime(2025, 2, 1, tzinfo=UTC),
+        )
+        == expected
+    )
+
+    for relative_path in expected:
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True)
+        pd.DataFrame({"value": [1]}).to_parquet(target, index=False)
+    assert [
+        Path(path).relative_to(tmp_path).as_posix()
+        for path in resolve_partition_paths(
+            tmp_path,
+            entry,
+            datetime(2024, 12, 31, 23, 59, tzinfo=UTC),
+            datetime(2025, 2, 1, tzinfo=UTC),
+        )
+    ] == expected
+
+
+def test_http_monthly_store_fetches_only_intersecting_partitions(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from duckpd._feature_sources import ensure_cached_partition
+
+    backing = tmp_path / "backing"
+    cache = tmp_path / "cache"
+    for timestamp, month, value in (
+        (datetime(2024, 12, 31, 23, 59, tzinfo=UTC), 12, 10.0),
+        (datetime(2025, 1, 1, 0, 0, tzinfo=UTC), 1, 11.0),
+    ):
+        partition = backing / f"prices/year={timestamp.year}/month={month:02d}"
+        partition.mkdir(parents=True)
+        pd.DataFrame({"datetime": [timestamp], "ticker": ["001"], "value": [value]}).to_parquet(
+            partition / "data.parquet", index=False
+        )
+
+    catalog = {
+        "catalog_version": 1,
+        "name": "test/http-monthly",
+        "datasets": [
+            {
+                "name": "prices",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "path_template": ("prices/year={year}/month={month:02d}/data.parquet"),
+            }
+        ],
+        "features": {
+            "prices:value": {
+                "dataset": "prices",
+                "name": "value",
+                "availability_delay": "PT0S",
+                "lookahead_safe": True,
+            }
+        },
+    }
+    catalog_path = backing / "catalog.json"
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    calls: list[tuple[str, str]] = []
+
+    def project_partition(
+        source_uri: str,
+        cache_root: Path,
+        relative_path: str,
+        needed_columns: list[str],
+        con: Any,
+        filters_sql: str | None = None,
+    ) -> Path:
+        calls.append((source_uri, relative_path))
+        return ensure_cached_partition(
+            str(backing),
+            cache_root,
+            relative_path,
+            needed_columns,
+            con,
+            filters_sql,
+        )
+
+    with patch(
+        "duckpd._feature_sources.ensure_cached_partition",
+        side_effect=project_partition,
+    ):
+        frame = FeatureStore(
+            source="https://features.example.test/store",
+            cache=cache,
+            catalog_path=catalog_path,
+        ).features(
+            features=["prices:value"],
+            start="2024-12-31T23:59:00Z",
+            end="2025-02-01T00:00:00Z",
+            alignment="exact",
+        )
+        assert calls == []
+        result = frame.collect()
+
+    assert calls == [
+        (
+            "https://features.example.test/store",
+            "prices/year=2024/month=12/data.parquet",
+        ),
+        (
+            "https://features.example.test/store",
+            "prices/year=2025/month=01/data.parquet",
+        ),
+    ]
+    assert list(result["value"]) == [10.0, 11.0]
+
+
+def test_http_feature_store_end_to_end(tmp_path: Path) -> None:
+    from functools import partial
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    backing = tmp_path / "backing"
+    partition = backing / "prices" / "year=2024"
+    partition.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "datetime": [datetime(2024, 1, 2, tzinfo=UTC)],
+            "ticker": ["001"],
+            "value": [42.0],
+        }
+    ).to_parquet(partition / "data.parquet", index=False)
+    catalog = {
+        "catalog_version": 1,
+        "name": "test/http",
+        "datasets": [
+            {
+                "name": "prices",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "path_template": "prices/year={year}/data.parquet",
+            }
+        ],
+        "features": {
+            "prices:value": {
+                "dataset": "prices",
+                "name": "value",
+                "availability_delay": "PT0S",
+                "lookahead_safe": True,
+            }
+        },
+    }
+    (backing / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        partial(QuietHandler, directory=str(backing)),
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = f"http://127.0.0.1:{server.server_port}"
+        result = (
+            FeatureStore(source=source, cache=tmp_path / "cache")
+            .features(
+                features=["prices:value"],
+                start="2024-01-01T00:00:00Z",
+                end="2024-02-01T00:00:00Z",
+                alignment="exact",
+            )
+            .collect()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert list(result["value"]) == [42.0]

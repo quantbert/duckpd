@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from benchmark.featurestore import (
+    FeatureStoreBenchmarkResult,
+    run_featurestore_benchmark,
+)
 from benchmark.generate import PRESET_SIZES, ensure_dataset, generate_dataset
 from benchmark.metrics import BenchmarkComparison, run_benchmark
 from benchmark.report import generate_markdown_report
@@ -21,10 +25,12 @@ __all__ = [
     "PRESET_SIZES",
     "WORKLOADS",
     "BenchmarkComparison",
+    "FeatureStoreBenchmarkResult",
     "ensure_dataset",
     "generate_dataset",
     "generate_markdown_report",
     "run_benchmark",
+    "run_featurestore_benchmark",
     "run_suite",
 ]
 

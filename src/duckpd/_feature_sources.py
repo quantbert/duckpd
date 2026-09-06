@@ -8,8 +8,11 @@ import shutil
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from io import BytesIO, TextIOWrapper
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, TextIO, cast
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import duckdb
@@ -37,6 +40,47 @@ def _rooted_path(root: Path, relative_path: str) -> Path:
     if target == resolved_root or resolved_root not in target.parents:
         raise ValueError(f"Catalog path escapes its configured root: {relative_path!r}")
     return target
+
+
+class HttpFileSystem:
+    """Minimal read-only filesystem adapter for HTTP feature stores."""
+
+    def __init__(self, token: str | None = None) -> None:
+        self._token = token
+
+    def _request(self, path: str, *, method: str = "GET") -> Request:
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        return Request(path, headers=headers, method=method)
+
+    def open(self, path: str, mode: str = "rb") -> BinaryIO | TextIO:
+        if mode not in {"r", "rb"}:
+            raise ValueError("HTTP feature stores are read-only")
+        with urlopen(self._request(path), timeout=30) as response:
+            payload = response.read()
+        raw = BytesIO(payload)
+        if mode == "rb":
+            return raw
+        return TextIOWrapper(raw, encoding="utf-8")
+
+    def exists(self, path: str) -> bool:
+        try:
+            with urlopen(self._request(path, method="HEAD"), timeout=30):
+                return True
+        except HTTPError as error:
+            if error.code not in {405, 501}:
+                return False
+        try:
+            with urlopen(self._request(path), timeout=30):
+                return True
+        except HTTPError:
+            return False
+
+
+def remote_file_path(source_root: str, relative_path: str) -> str:
+    """Join a provider root and validated relative path."""
+    remote_root = source_root.removeprefix("hf://").rstrip("/")
+    remote_path = _validated_relative_path(relative_path).as_posix()
+    return f"{remote_root}/{remote_path}"
 
 
 @contextmanager
@@ -86,7 +130,7 @@ def load_dataset_metadata(
         except Exception:
             return {}
     if fs is not None:
-        remote_path = f"{str(source_root).rstrip('/')}/{metadata_path}"
+        remote_path = remote_file_path(str(source_root), metadata_path)
         try:
             if fs.exists(remote_path):
                 with fs.open(remote_path, "r") as file:
@@ -109,7 +153,16 @@ def get_dataset_path_template(
     if not isinstance(path_template, str) or not path_template:
         dataset_name = entry["name"]
         if entry["kind"] == "timeseries":
-            path_template = f"{dataset_name}/year={{year}}/data.parquet"
+            partitioning = entry.get("partitioning")
+            unit = (
+                cast("dict[str, Any]", partitioning).get("unit")
+                if isinstance(partitioning, dict)
+                else None
+            )
+            if unit == "month":
+                path_template = f"{dataset_name}/year={{year}}/month={{month:02d}}/data.parquet"
+            else:
+                path_template = f"{dataset_name}/year={{year}}/data.parquet"
         else:
             path_template = f"{dataset_name}/data.parquet"
     return path_template
@@ -132,18 +185,35 @@ def available_interval(
     return start, end
 
 
-def partition_years_for_interval(
+def partition_paths_for_interval(
     entry: dict[str, Any],
+    path_template: str,
     start: datetime,
     end: datetime,
-) -> list[int]:
-    """Return all partition calendar years intersecting [start, end)."""
+) -> list[str]:
+    """Format all partition paths intersecting the half-open interval."""
     interval = available_interval(entry, start, end)
     if interval is None:
         return []
     avail_start, avail_end = interval
     final_time = avail_end - timedelta(microseconds=1)
-    return list(range(avail_start.year, final_time.year + 1))
+
+    if "{month" in path_template:
+        cursor = avail_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        paths: list[str] = []
+        while cursor <= final_time:
+            paths.append(path_template.format(year=cursor.year, month=cursor.month))
+            if cursor.month == 12:
+                cursor = cursor.replace(year=cursor.year + 1, month=1)
+            else:
+                cursor = cursor.replace(month=cursor.month + 1)
+        return paths
+
+    if "{year" in path_template:
+        return [
+            path_template.format(year=year) for year in range(avail_start.year, final_time.year + 1)
+        ]
+    return [path_template]
 
 
 def resolve_local_partition_paths(
@@ -156,26 +226,19 @@ def resolve_local_partition_paths(
     path_template = get_dataset_path_template(source_root, entry)
     _validated_relative_path(path_template)
     paths: list[str] = []
-    if "{year}" in path_template:
-        years = partition_years_for_interval(entry, start, end)
-        for year in years:
-            pattern = path_template.format(year=year)
-            if "*" in pattern or "?" in pattern:
-                matched = sorted(source_root.glob(pattern))
-                root = source_root.resolve()
-                paths.extend(
-                    str(path.resolve())
-                    for path in matched
-                    if path.is_file() and root in path.resolve().parents
-                )
-            else:
-                target = _rooted_path(source_root, pattern)
-                if target.is_file():
-                    paths.append(str(target))
-    else:
-        target = _rooted_path(source_root, path_template)
-        if target.is_file():
-            paths.append(str(target))
+    for pattern in partition_paths_for_interval(entry, path_template, start, end):
+        if "*" in pattern or "?" in pattern:
+            matched = sorted(source_root.glob(pattern))
+            root = source_root.resolve()
+            paths.extend(
+                str(path.resolve())
+                for path in matched
+                if path.is_file() and root in path.resolve().parents
+            )
+        else:
+            target = _rooted_path(source_root, pattern)
+            if target.is_file():
+                paths.append(str(target))
     return paths
 
 
@@ -248,7 +311,7 @@ def ensure_cached_table(
     local_target = _rooted_path(cache_root, relative_path)
     lock_path = local_target.with_name(f".{local_target.name}.lock")
     remote_path = _validated_relative_path(relative_path).as_posix()
-    remote_file_path = source_uri.replace("hf://", "").rstrip("/") + f"/{remote_path}"
+    remote_file_pathname = remote_file_path(source_uri, remote_path)
 
     with _exclusive_file_lock(lock_path):
         if local_target.is_file():
@@ -259,7 +322,7 @@ def ensure_cached_table(
             f".{local_target.name}.{os.getpid()}.{uuid4().hex}.tmp"
         )
         try:
-            with fs.open(remote_file_path, "rb") as src, temp_target.open("wb") as dst:
+            with fs.open(remote_file_pathname, "rb") as src, temp_target.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
             os.replace(temp_target, local_target)
         except BaseException:
@@ -321,14 +384,7 @@ def materialize_feature_source(
 
     path_template = source.path_template
     _validated_relative_path(path_template)
-    relative_paths = (
-        [
-            path_template.format(year=year)
-            for year in partition_years_for_interval(entry, start, end)
-        ]
-        if "{year}" in path_template
-        else [path_template]
-    )
+    relative_paths = partition_paths_for_interval(entry, path_template, start, end)
     return [
         str(
             ensure_cached_partition(

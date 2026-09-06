@@ -285,3 +285,80 @@ def test_validated_release_tracks(tmp_path: Path) -> None:
     assert entries["duckpd"]["median_cold_seconds"] is not None
     assert entries["duckpd"]["median_warm_seconds"] is not None
     assert entries["duckpd"]["transfer_byte_measurements"] == 0
+
+
+def test_featurestore_remote_cache_benchmark(tmp_path: Path) -> None:
+    import json
+    from datetime import UTC, datetime
+    from functools import partial
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    from typing import Any
+
+    import pandas as pd
+
+    from benchmark.featurestore import run_featurestore_benchmark
+
+    backing = tmp_path / "backing"
+    partition = backing / "prices" / "year=2024"
+    partition.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "datetime": [datetime(2024, 1, 2, tzinfo=UTC)],
+            "ticker": ["001"],
+            "value": [42.0],
+        }
+    ).to_parquet(partition / "data.parquet", index=False)
+    catalog = {
+        "catalog_version": 1,
+        "name": "benchmark/http",
+        "datasets": [
+            {
+                "name": "prices",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "path_template": "prices/year={year}/data.parquet",
+            }
+        ],
+        "features": {
+            "prices:value": {
+                "dataset": "prices",
+                "name": "value",
+                "availability_delay": "PT0S",
+                "lookahead_safe": True,
+            }
+        },
+    }
+    (backing / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        partial(QuietHandler, directory=str(backing)),
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = run_featurestore_benchmark(
+            source=f"http://127.0.0.1:{server.server_port}",
+            cache=tmp_path / "cache",
+            features=["prices:value"],
+            start="2024-01-01T00:00:00Z",
+            end="2024-02-01T00:00:00Z",
+            repetitions=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.rows == 1
+    assert len(result.warm_seconds) == 2
+    assert result.cold_seconds > 0
+    assert result.warm_median_seconds > 0
+    assert result.cache_bytes > 0
+    assert json.loads(result.to_json())["rows"] == 1

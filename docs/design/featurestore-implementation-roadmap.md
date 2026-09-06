@@ -335,7 +335,8 @@ If a technical indicator or economic signal updates infrequently (e.g., once a d
 ### Phase 3: Partition-Mirrored Remote Caching (Hugging Face / HTTP)
 - **Milestone:** Seamless, transparent JIT partition fetching.
 - **Deliverables:**
-  - Partition resolver for standard path templates (`year={year}/data.parquet`).
+  - Partition resolver for yearly and monthly path templates
+    (`year={year}/data.parquet` and `year={year}/month={month:02d}/data.parquet`).
   - JIT partition fetcher with cumulative column projection, per-partition coordination, unique temporary files, and atomic replacement.
   - Optional `duckpd[featurestore]` dependency extra (`huggingface-hub`).
   - Optional `store.sync(...)` headless pre-fetch helper.
@@ -344,8 +345,10 @@ If a technical indicator or economic signal updates infrequently (e.g., once a d
 ### Phase 4: Ergonomics, Benchmarks & Documentation
 - **Milestone:** Production readiness and documentation.
 - **Deliverables:**
-  - End-to-end interactive demo walkthrough (`demo/DuckPD_FeatureStore_Walkthrough.ipynb`).
-  - Performance benchmarks comparing remote streaming vs. local NVMe cached execution.
+  - End-to-end interactive demo walkthrough
+    (`demo/featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb`).
+  - Performance benchmark comparing cold remote transfer and projection with
+    warm local-cache execution (`python -m benchmark.featurestore`).
   - Update `docs/COMPATIBILITY.md` and `docs/CHANGELOG.md`.
 
 ---

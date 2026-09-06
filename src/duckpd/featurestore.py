@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from duckpd._feature_catalog import (
@@ -19,9 +20,11 @@ from duckpd._feature_catalog import (
     validate_catalog,
 )
 from duckpd._feature_sources import (
+    HttpFileSystem,
     _rooted_path,
     _validated_relative_path,
     get_dataset_path_template,
+    remote_file_path,
 )
 from duckpd._logical import (
     AsOfJoinPlan,
@@ -88,7 +91,16 @@ class FeatureStore:
 
         if self._is_remote:
             if not self._source_raw.startswith("hf://"):
-                raise ValueError("Remote feature store currently supports hf:// URIs")
+                parsed_source = urlsplit(self._source_raw)
+                if (
+                    parsed_source.scheme not in {"http", "https"}
+                    or not parsed_source.netloc
+                    or parsed_source.username is not None
+                    or parsed_source.password is not None
+                    or parsed_source.query
+                    or parsed_source.fragment
+                ):
+                    raise ValueError("Invalid HTTP feature store URI")
             if not self._cache_raw:
                 msg = "A local cache directory is required when using a remote feature store"
                 raise ValueError(msg)
@@ -142,23 +154,27 @@ class FeatureStore:
         return alignment
 
     def _init_remote_filesystem(self) -> None:
-        try:
-            from huggingface_hub import HfFileSystem  # pyright: ignore[reportMissingImports]
-        except ImportError:
-            msg = (
-                "huggingface-hub is required for remote Hugging Face feature store access. "
-                "Install it with `pip install duckpd[featurestore]` or "
-                "`pip install huggingface-hub`."
-            )
-            raise ImportError(msg) from None
+        if self._source_raw.startswith("hf://"):
+            try:
+                from huggingface_hub import HfFileSystem
+            except ImportError:
+                msg = (
+                    "huggingface-hub is required for remote Hugging Face feature store access. "
+                    "Install it with `pip install duckpd[featurestore]` or "
+                    "`pip install huggingface-hub`."
+                )
+                raise ImportError(msg) from None
+            self._filesystem = HfFileSystem(token=self._token)
+        else:
+            self._filesystem = HttpFileSystem(token=self._token)
 
-        self._filesystem = HfFileSystem(token=self._token)
         self._filesystem_key = f"featurestore:{uuid4().hex}"
         self._session._registered_sources[self._filesystem_key] = self._filesystem
-        from contextlib import suppress
+        if self._source_raw.startswith("hf://"):
+            from contextlib import suppress
 
-        with suppress(Exception):
-            self._session._connection.register_filesystem(self._filesystem)
+            with suppress(Exception):
+                self._session._connection.register_filesystem(self._filesystem)
 
     def _load_catalog(self) -> None:
         candidates: list[Path] = []
@@ -174,7 +190,7 @@ class FeatureStore:
             catalog_text = cat_file.read_text(encoding="utf-8")
         elif self._is_remote and self._filesystem is not None:
             # Read from remote filesystem
-            remote_cat_path = f"{self._source_raw.replace('hf://', '').rstrip('/')}/catalog.json"
+            remote_cat_path = remote_file_path(self._source_raw, "catalog.json")
             try:
                 with self._filesystem.open(remote_cat_path, "r") as f:
                     catalog_text = f.read()
@@ -220,8 +236,10 @@ class FeatureStore:
             fs=self._filesystem,
         )
         _validated_relative_path(path_template)
-        if "{year}" in path_template:
+        if "{year" in path_template:
             raise ValueError(f"Table dataset {name!r} cannot have year partition template")
+        if "{month" in path_template:
+            raise ValueError(f"Table dataset {name!r} cannot have month partition template")
 
         columns = self._inspect_table_columns(path_template)
         source = FeatureParquetSource(
@@ -260,11 +278,7 @@ class FeatureStore:
             if cached_path.is_file():
                 schema = pq.ParquetFile(cached_path).schema_arrow
             else:
-                remote_path = (
-                    self._source_raw.replace("hf://", "").rstrip("/")
-                    + "/"
-                    + _validated_relative_path(path_template).as_posix()
-                )
+                remote_path = remote_file_path(self._source_raw, path_template)
                 with self._filesystem.open(remote_path, "rb") as remote_file:
                     schema = pq.ParquetFile(remote_file).schema_arrow
 
@@ -659,6 +673,21 @@ class FeatureStore:
             ]
         ]
 
+    def _frame_time_column(self, frame: DataFrame) -> str:
+        """Resolve the sole cataloged time column retained by a supplied frame."""
+        frame_columns = set(frame.columns)
+        candidates = {
+            entry["time_column"]
+            for entry in self._dataset_entries.values()
+            if entry["kind"] == "timeseries" and entry["time_column"] in frame_columns
+        }
+        if len(candidates) != 1:
+            raise ValueError(
+                "feature_batches frame must contain exactly one cataloged timeseries "
+                f"time column; found {sorted(candidates)!r}"
+            )
+        return next(iter(candidates))
+
     def feature_batches(
         self,
         frame: DataFrame | None = None,
@@ -680,16 +709,16 @@ class FeatureStore:
         if end_dt <= start_dt:
             raise ValueError("end must be later than start")
 
+        frame_time_column = self._frame_time_column(frame) if frame is not None else None
+
         cursor = start_dt
         while cursor < end_dt:
             step_end = min(cursor + window, end_dt)
             if frame is not None:
-                # Slicing existing frame on its time column
-                # Identify time column from catalog
-                time_col = next(iter(self._dataset_entries.values()))["time_column"]
-                series_t = cast("Series", frame[time_col])
-                cond = (series_t >= cursor) & (series_t < step_end)
-                yield frame[cond]
+                assert frame_time_column is not None
+                series_t = frame[frame_time_column]
+                condition = (series_t >= cursor) & (series_t < step_end)
+                yield frame[condition]
             else:
                 yield self.features(start=cursor.isoformat(), end=step_end.isoformat())
             cursor = step_end

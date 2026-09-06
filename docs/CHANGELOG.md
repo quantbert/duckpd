@@ -13,10 +13,10 @@ the [release policy](RELEASES.md).
 - Added native `duckpd.FeatureStore` and `Session.feature_store()` for multi-family
   feature selection, exact multi-series time alignment, and point-in-time (`ASOF LEFT JOIN`)
   alignment with `availability_delay` lookahead bias protection.
-- Partition-mirrored local caching: downloads and caches remote Hugging Face Parquet
-  datasets (`hf://datasets/...`) by calendar partition (`year={year}/data.parquet`),
-  pruning irrelevant years and projecting only requested feature columns to minimize disk
-  usage.
+- Partition-mirrored local caching downloads and caches remote Hugging Face or
+  HTTP(S) Parquet datasets by yearly or monthly calendar partition, pruning
+  irrelevant partitions and projecting only requested feature columns to
+  minimize disk usage.
 - Transparent JIT remote fetching and partition caching at execution boundaries
   (`.collect()`, `.to_arrow()`, `.to_arrow_batches()`) with per-partition
   coordination and atomic file replacement.
@@ -28,6 +28,9 @@ the [release policy](RELEASES.md).
 - Cache expansion preserves the cumulative projected column set, validates
   catalog paths against root traversal, and retains sparse predecessors across
   the full declared dataset history.
+- A standalone `python -m benchmark.featurestore` harness records cold remote
+  feature fetches, repeated warm local-cache execution, row counts, cache
+  bytes, and cold-to-warm speedup as JSON.
 
 ### Changed
 
@@ -48,6 +51,10 @@ the [release policy](RELEASES.md).
 - `DataFrame.commit()` now preserves automatic Parquet row identity after file
   replacement, while schema validation ignores only DuckPD's generated
   identity and continues to validate user-defined hidden index columns.
+- Feature batching resolves its time column from the supplied frame instead of
+  relying on catalog dataset order.
+- Exact alignment supports multiple output aliases for one physical feature.
+- Remote timeseries datasets honor path templates declared in `metadata.json`.
 
 ## 0.1.2 - 2026-09-05
 
