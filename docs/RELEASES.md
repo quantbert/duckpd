@@ -38,8 +38,10 @@ minor release before removal.
 
 Each release should:
 
-1. Set the intended version in `pyproject.toml`.
-2. Move relevant entries from `Unreleased` into a dated changelog section.
+1. Run `make bump [patch|minor|major|<version>]` (defaults to `patch`). This
+   updates `pyproject.toml`, synchronizes `uv.lock`, ensures a dated section
+   exists in `docs/CHANGELOG.md`, and runs metadata verification.
+2. Complete or review release entries in `docs/CHANGELOG.md`.
 3. Run `make release-check`; it validates source, metadata, distributions, and
    clean wheel installs on every supported Python version.
 4. Tag the verified commit as `v<version>`, for example `v0.1.0a1`.

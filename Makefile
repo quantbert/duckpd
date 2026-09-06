@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test remote-db-setup remote-db-test remote-db-cleanup lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all benchmark-tracks optimizer-gate release-check clean publish
+.PHONY: help install test remote-db-setup remote-db-test remote-db-cleanup lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all benchmark-tracks optimizer-gate bump release-check clean publish
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -124,6 +124,19 @@ benchmark-tracks: ## Run validated cold/warm tracks and evidence scorecard
 
 optimizer-gate: ## Verify optimizer correctness and regression threshold
 	uv run python scripts/benchmark_optimizer.py --rows 250000 --iterations 7
+
+# Support both `make bump patch`, `make bump minor`, `make bump 0.1.4` and `make bump PART=0.1.4`
+ifeq (bump,$(firstword $(MAKECMDGOALS)))
+  BUMP_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  ifneq ($(BUMP_ARGS),)
+    PART ?= $(firstword $(BUMP_ARGS))
+    $(eval $(BUMP_ARGS):;@:)
+  endif
+endif
+PART ?= patch
+
+bump: ## Bump version, update lockfile, and verify changelog (e.g. make bump [patch|minor|major|0.1.4])
+	uv run python scripts/bump_version.py $(PART)
 
 release-check: check package-smoke ## Validate source, metadata, and installed artifacts
 	uv run python scripts/verify_release.py
