@@ -628,8 +628,11 @@ Goal: broaden sources after local semantics are stable.
 - [x] Validate PostgreSQL/MySQL physical projection/filter placement assertions
       against PostgreSQL 17 and MySQL 8.4 disposable live test servers.
 - [x] Add safety guards against unexpectedly large network scans.
-- [ ] Add source-specific cost estimates once transferred-row or byte estimates
-      are available from DuckDB extension plans.
+- [ ] Revisit source-specific PostgreSQL/MySQL transfer-cost estimates in 2027,
+      or earlier if DuckDB exposes attributable row or byte metrics. Until then,
+      preserve them as unavailable rather than deriving them from file I/O,
+      result-set size, or row counts. This is an accepted, non-blocking
+      observability limitation.
 - [ ] Use versioned object paths plus a manifest/catalog for remote replacement;
       do not claim atomic rename semantics on object stores.
 - [ ] Delegate recurring row-level updates to DuckDB, Iceberg, or DuckLake
@@ -641,8 +644,11 @@ Exit gate:
       `EXPLAIN ANALYZE` and measures bytes served by a range-capable endpoint.
 - [x] Run the PostgreSQL/MySQL source-extension physical-plan assertions against
       PostgreSQL 17 and MySQL 8.4.
-- [ ] Measure attributable PostgreSQL/MySQL network bytes once DuckDB exposes a
-      source-specific transfer metric; total source bytes are not a substitute.
+- [x] Preserve attributable PostgreSQL/MySQL network bytes as unavailable
+      (`null`) while DuckDB exposes no source-specific transfer metric. Live
+      PostgreSQL 17 and MySQL 8.4 probes confirmed that remote scans report zero
+      filesystem bytes and no network-byte counter; total source bytes and
+      in-engine result-set sizes are not substitutes.
 - [x] Cross-source joins have explicit movement plans visible in `explain()`.
 
 ### Phase 12: release quality
@@ -976,9 +982,11 @@ preserve schema, index, ordering, row identity, provenance, and null semantics;
 retained passes improve representative validated Linux workloads without
 material regressions.
 
-The next active remote-source priority is PostgreSQL/MySQL transfer attribution:
-integration tests must prove candidate placement and measured network bytes
-before source-specific cost estimates can be claimed. Remote replacement
+PostgreSQL/MySQL transfer attribution is an accepted, non-blocking observability
+limitation. DuckPD proves lazy plan construction, native execution, and physical
+projection/filter placement, but does not claim exact network bytes or
+source-specific cost estimates. Revisit the open estimate work in 2027, or
+earlier if DuckDB exposes an attributable transfer metric. Remote replacement
 manifests and row-level storage remain deferred. Public Narwhals plugin scans
 remain blocked upstream; direct DuckPD readers followed by `nw.from_native()`
 remain lazy.
