@@ -751,6 +751,66 @@ Exit gate:
       package artifacts install cleanly on supported Linux/Python combinations,
       and unsupported behavior is explicit.
 
+### Phase 13: native vector search and analytical retrieval
+
+Goal: make exact nearest-neighbor retrieval a typed, lazy DuckPD operation
+using native DuckDB array functions, with no new required dependency.
+
+- [ ] Define the supported fixed-size numeric array contract, including element
+      types, dimensions, query coercion, null vectors, and non-finite values.
+- [ ] Add lazy `Series.vector.distance(query, metric=...)` expressions for
+      `cosine`, `l2`, and `inner_product`, with one documented DuckDB function
+      and result type for each metric.
+- [ ] Add a typed `VectorSearchPlan` carrying the input plan, vector column,
+      query vector, metric, `k`, execution mode, distance label, and optional
+      tie-break metadata.
+- [ ] Add lazy `DataFrame.vector.search(...)` in exact mode, returning an
+      ordinary DuckPD DataFrame ordered by distance and the optional tie-break
+      key.
+- [ ] Reject invalid dimensions, unsupported element types and metrics,
+      non-positive `k`, output-label collisions, and invalid tie-break columns
+      before source execution where metadata permits.
+- [ ] Preserve the semantic distinction between filtering before search and
+      filtering after top-k retrieval; optimizer tests must prove neither plan
+      is rewritten into the other.
+- [ ] Define `OrderSpec`, row-identity, nullability, schema, and provenance
+      transitions for distance expressions and vector search results.
+- [ ] Compile query vectors as typed parameters rather than interpolated SQL
+      literals, including hostile identifiers and invalid numeric inputs.
+- [ ] Extend `explain()` and `profile()` with metric, dimension, `k`, filter
+      placement, exact/approximate strategy, tie-break ordering, and physical
+      index use when applicable.
+- [ ] Add differential tests against an independent brute-force reference for
+      all supported metrics, ties, filters, empty inputs, invalid vectors, and
+      deterministic ordering.
+- [ ] Prove exact search remains lazy, executes as one DuckDB query, composes
+      with joins/grouping/Arrow streaming/direct sinks, and works for Parquet
+      scans and DuckDB tables.
+- [ ] Benchmark exhaustive search across vector dimensions and row counts,
+      recording latency, peak RSS, spill behavior, and direct DuckDB parity
+      before making larger-than-memory claims.
+- [ ] Qualify DuckDB's optional `vss` extension separately for supported DuckDB
+      versions, HNSW lifecycle, generated-plan eligibility, filtering
+      semantics, persistence, recall, reproducibility, and index memory use.
+- [ ] Add explicit vector-index create/inspect/drop APIs and
+      `mode="approximate"` only after DuckPD can verify that a compatible HNSW
+      index is used; approximate requests must otherwise fail before retrieval.
+- [ ] Update the compatibility matrix, API documentation, changelog, and a
+      runnable exact-search example without adding a vector database
+      dependency.
+- [ ] Defer `mode="auto"`, full-text and hybrid retrieval, automatic embedding
+      generation, and batched per-row point-in-time search until exact and
+      approximate vector contracts are stable.
+
+Exit gate:
+
+- [ ] Exact search matches the brute-force oracle, remains lazy through normal
+      composition, preserves filter-before-top-k semantics, and exposes its
+      strategy in plans and profiles without adding a required dependency.
+- [ ] Approximate search cannot execute unless DuckPD verifies a compatible
+      indexed physical plan, and its recall, memory, persistence, and
+      reproducibility limits are documented with benchmark evidence.
+
 ### Beta exit portability gate
 
 Windows-specific release validation is intentionally deferred until DuckPD is
@@ -839,6 +899,8 @@ decomposed into independently testable milestones below.
         `LazyFrame.join_asof()` without hidden collection.
 26. [x] Reject non-spillable `list` and `string_agg` aggregate states before
         execution and expose the strict policy in explain output.
+27. [ ] Add native vector search and analytical retrieval through the
+      dependency-lean exact-first milestones in Phase 13.
 
 ### Completed Linux-beta workstreams
 
