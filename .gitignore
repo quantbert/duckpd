@@ -12,6 +12,7 @@ data/
 *.duckdb.tmp/
 demo/data/
 demo/.tmp/
+demo/generate_data/source_data/
 demo/language_summary.csv
 demo/stock_news_summary.parquet
 benchmark/data/

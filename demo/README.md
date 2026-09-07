@@ -34,6 +34,9 @@ uv run python demo/market_data_demo.py smoke
 - `market_data_demo.py` benchmarks and compares execution time and memory usage
   between DuckPD and standard pandas across OHLC market datasets. Running with
   `smoke` executes in ~3 seconds on a 4.99 MB file.
+- `generate_data/` contains the deterministic Nasdaq Stockholm feature-store
+  generator. It writes yearly OHLCV and simple-moving-average Parquet partitions,
+  reference tables, catalog metadata, and a Hugging Face dataset card.
 - `DuckPD_Quickstart.ipynb` is a 5-minute interactive Jupyter Notebook
   demonstrating remote data loading, column reductions, string transformations,
   `groupby` aggregations, query plans, and Parquet exports on the Goodreads
@@ -59,6 +62,28 @@ uv run python demo/market_data_demo.py smoke
   quantized text embedding model preparation, lazy remote Parquet streaming,
   in-engine batch embedding via `.embed_text()`, and exact cosine vector
   similarity search via `.vector.search_text()`.
+
+## Generate Feature-Store Data
+
+Generate a small local feature store from the repository root:
+
+```bash
+make -C demo/generate_data generate \
+  START_DATE=2024-01-01 \
+  END_DATE=2025-01-01 \
+  TICKER_COUNT=10
+```
+
+To build the metadata and preview a Hugging Face upload, configure `HF_TOKEN` and
+`HF_DESTINATION` in `demo/generate_data/.env`, then run:
+
+```bash
+make -C demo/generate_data data TICKER_COUNT=10 DRY_RUN=true
+```
+
+The generated values are synthetic and must not be used for trading or investment
+decisions. See [generate_data/README.md](generate_data/README.md) for configuration,
+individual commands, upload behavior, and tests.
 
 Run market data benchmarks:
 

@@ -51,9 +51,8 @@ never sends text to a remote service.
 
 ## Catalog schema
 
-This proposal introduces catalog version 2. Version 1 remains readable and has
-no embedding declarations. Writers must emit version 2 when using the new
-fields.
+This proposal extends the current catalog schema in place. Catalogs continue to
+use `catalog_version: 1`.
 
 Models are defined once in a top-level `embedding_models` mapping. Embedding
 columns reference a model by name so large catalogs do not duplicate model
@@ -61,7 +60,7 @@ specifications.
 
 ```json
 {
-  "catalog_version": 2,
+  "catalog_version": 1,
   "embedding_models": {
     "bge-small-en-v1.5": {
       "model": "BAAI/bge-small-en-v1.5",
@@ -78,12 +77,12 @@ specifications.
     {
       "name": "news",
       "kind": "timeseries",
-      "time_column": "published_at",
-      "series_keys": ["document_id"],
+      "time_column": "datetime",
+      "series_keys": ["ticker"],
       "partitioning": {
-        "column": "published_at",
+        "column": "datetime",
         "timezone": "UTC",
-        "unit": "year"
+        "unit": "month"
       }
     },
     {
@@ -123,6 +122,12 @@ The first release accepts only `backend: "fastembed"` in a portable catalog.
 A future custom or hosted backend requires a separately designed, explicitly
 registered trust policy. Catalog values must never import Python objects,
 contain credentials, or select arbitrary code.
+
+The backend must enforce every field that contributes to model identity. In
+particular, automatic preparation must resolve the declared immutable
+`revision`, and document/query inference must honor the declared normalization,
+pooling, and prefix settings. A field must not contribute to the fingerprint if
+the backend silently ignores it.
 
 ### Validation
 
@@ -213,7 +218,7 @@ feature or table column declarations to `EmbeddingColumnSpec`.
 
 ```mermaid
 flowchart LR
-    C[catalog.json v2] --> V[Catalog validation]
+    C[catalog.json] --> V[Catalog validation]
     V --> M[EmbeddingModelSpec registry]
     M --> S[Feature or table scan columns]
     S --> P[Projection and alias propagation]
@@ -239,6 +244,112 @@ The following implementation points are required:
 A point-in-time or exact alignment must not change embedding identity. If the
 same physical feature is selected under two aliases, both outputs carry the same
 immutable specification.
+
+## Generated feature-store data
+
+`demo/generate_data` should exercise the schema with a deterministic derived
+copy of the Apache-2.0
+[`AlphaDojo/dojo_stock_news`](https://huggingface.co/datasets/AlphaDojo/dojo_stock_news)
+dataset. The article text is derived from that real dataset, while ticker
+associations and event times are deliberately synthetic. The source revision
+and file must be pinned rather than read from `/resolve/main/`; the source
+currently changes over time.
+
+The stress dataset includes all 3,951,636 rows from source revision
+`9d7a641b5cb5eaedc1874c34e74aa186a0a768f1`. At design time, every row has a
+parseable publication date and nonempty title, while 1,701,269 rows have an
+empty description. Source IDs and URLs are not unique across the full archive.
+Pinning the revision makes those characteristics a testable input contract
+rather than a moving sample.
+
+The output is a `news` timeseries dataset partitioned by generated `datetime`
+UTC year and month. It contains `datetime`, `ticker`, `document_id`,
+`source_publish_date`, `source_symbol`, `title`, `description`, `publisher`,
+`url`, `source`, and `embedding`. `datetime` and `ticker` deliberately match the
+OHLCV contract, while the original timestamp and symbol remain available only
+as provenance.
+
+Rows are ordered by the pinned Parquet `file_row_number`. For source row ordinal
+`i`, assign ticker index `i % ticker_count` and per-ticker event index
+`i // ticker_count`. For each ticker, map its event indexes monotonically and
+evenly over the complete XSTO trading-minute sequence in the requested
+`[start, end)` interval. This produces balanced coverage of every configured
+synthetic ticker and the complete generated price period without implying a
+real relationship between an article and its assigned ticker or time. Reject a
+configuration when there are more news rows than available
+`ticker_count * trading_minutes` slots, because `(datetime, ticker)` must remain
+unique.
+
+`document_id` is derived from the pinned source revision and physical
+`file_row_number`, preserving duplicate source rows without depending on the
+source's non-unique floating-point `id` or URL. The embedding input is `title`,
+followed by a blank line and `description`, matching DuckPD's default
+multi-column separator. Empty descriptions are retained with
+`null_policy="empty"`, so all rows receive an embedding. The text and provenance
+columns should also be selectable feature entries so a search result can return
+the headline, publisher, and URL alongside distance.
+
+The 384-dimensional float32 vectors alone require 6,069,712,896 bytes
+(5.65 GiB) before Parquet encoding and non-vector columns. The generator must
+report estimated output and free-disk requirements before starting. It must not
+hold a year, month, or the complete embedding result in memory.
+
+The generator changes are:
+
+1. Define the pinned `EmbeddingModelSpec` once in generator code and use the
+   same object both to generate vectors and to serialize `embedding_models`.
+   Catalog serialization should use a shared DuckPD helper so fingerprint fields
+   cannot drift from runtime parsing.
+2. Add a separate news-generation step that reads only the required columns
+   from the revision-pinned source, includes `file_row_number`, rejects missing
+  titles or dates, preserves the original text as `source_publish_date`,
+  derives `document_id`, assigns synthetic tickers and trading-minute
+  timestamps using the algorithm above, and writes rows deterministically.
+3. Prepare the model explicitly and embed `title` plus `description` in bounded
+   record batches. Write `embedding` as Arrow
+   `fixed_size_list<float32, dimension>`. Generation is an eager publishing
+   operation; it must not depend on the feature store's query-time automatic
+   preparation policy.
+4. Add the top-level `embedding_models` mapping while retaining
+   `catalog_version: 1`. `build_catalog.py` must inspect the Parquet schema and
+   reject a missing, variable-length, non-numeric, or dimension-mismatched
+   embedding column before upload. Add the `news` dataset and its text,
+   provenance, and embedding feature declarations to `DATASETS`; the embedding
+   feature references `bge-small-en-v1.5`. Generalize catalog partition
+   discovery to `year=*/month=*/*.parquet` for monthly datasets.
+5. Add an `embeddings` generation dependency or run this step with
+   `--extra embeddings`. The Makefile should expose a clear opt-in such as
+   `generate-news`; ordinary synthetic OHLCV/SMA generation should remain usable
+   without a network source or model download.
+6. Extend the generated dataset card with the model identifier, immutable
+   model revision, source dataset and revision, Apache-2.0 attribution, text
+   composition, vector dimension, and a semantic-search example that omits
+   `model=`. Preserve any license or notice files required when redistributing
+   the derived rows.
+7. Test catalog JSON, the physical Arrow type, dimension mismatch rejection,
+  date normalization, deterministic IDs, balanced ticker assignment, complete
+  trading-period coverage, key uniqueness, source cardinality, metadata
+  propagation from `FeatureStore.features()`, and `search_text()` model
+  inference. Unit tests should use an injected small fixture and fake provider;
+  one opt-in qualification test can read the pinned source and use the real
+  FastEmbed model.
+8. Make generation resumable. Write bounded intermediate chunks under a staging
+   directory, record the source revision, model fingerprint, row interval, row
+   count, and checksum for each completed chunk, then atomically finalize each
+   monthly Parquet partition. A restart may reuse only chunks whose complete
+   generation identity matches. `--overwrite` discards incompatible state.
+9. Validate the completed artifact before upload: exactly 3,951,636 rows, one
+   embedding per row, unique `document_id`, finite vectors of dimension 384,
+   complete source-row coverage, sorted partition contents, and catalog totals
+   equal to physical Parquet totals.
+
+The generator should record source provenance in generated metadata, including
+the repository, revision, source path, full-source selection, transformation,
+synthetic assignment algorithm, configured date/ticker range, and source/output
+row counts. The generated artifact is intentionally a large stress dataset and
+must state that its ticker and timestamp associations are artificial. A separate
+small test fixture remains necessary for fast local and CI tests; tests must not
+regenerate the full archive.
 
 ## Preparation lifecycle
 
@@ -311,12 +422,11 @@ Failures are early and specific:
 No fallback to raw string search, a different model, post-filtering, or an
 unverified same-dimension vector space is permitted.
 
-## Compatibility and rollout
+## Implementation plan
 
 ### Phase 1: catalog metadata
 
-- Add catalog version 2 and parse the top-level model registry.
-- Preserve version 1 behavior unchanged.
+- Parse and validate the top-level model registry in catalog version 1.
 - Attach model metadata to timeseries features and table columns.
 - Preserve metadata through feature aliases and alignment.
 - Add catalog inspection through `FeatureStore.embedding_model()`.
@@ -339,16 +449,17 @@ unverified same-dimension vector space is permitted.
 
 - Add a catalog-generation helper that serializes an
   `EmbeddingModelSpec` without duplicating fingerprint logic.
+- Update `demo/generate_data` to publish the pinned news subset, fixed-size
+  embeddings, source provenance, and model declaration.
 - Update the feature-store walkthrough with local, remote, pre-warmed, and
   offline examples.
-- Publish a version 1 to version 2 migration example.
 
 ## Testing and qualification
 
 Permanent tests should cover:
 
-- version 1 catalogs retain existing behavior;
-- valid version 2 timeseries and table declarations attach the expected model
+- catalogs without embedding declarations retain existing behavior;
+- valid timeseries and table declarations attach the expected model
   fingerprint and fixed-size vector type;
 - malformed model specs, unknown references, unsupported backends, missing
   columns, and dimension mismatches fail with stable messages;
@@ -380,8 +491,8 @@ hidden.
 1. Whether the preparation policy should also be exposed directly on
    `Session`, and how store-scoped policy composes when callers inject a shared
    session.
-2. Whether catalog version 2 should reject all unknown model fields or preserve
-   extension fields under a dedicated `metadata` object.
+2. Whether model definitions should reject all unknown fields or preserve
+  extension fields under a dedicated `metadata` object.
 3. Whether model preparation needs an explicit timeout and download-size limit
    before automatic preparation ships enabled by default.
 4. Whether `FeatureStore.embedding_models()` should expose all definitions in

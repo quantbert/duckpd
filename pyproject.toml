@@ -51,6 +51,9 @@ embeddings = [
 ]
 
 [dependency-groups]
+generation = [
+    "exchange-calendars>=4.11,<5",
+]
 dev = [
     "huggingface-hub>=0.23.0",
     "hypothesis>=6.100",
