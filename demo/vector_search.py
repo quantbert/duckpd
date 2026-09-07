@@ -29,8 +29,8 @@ def main() -> None:
         else:
             build_started = perf_counter()
             news = session.read_parquet(DATA_URL)
-            nvidia = news[news["symbol"] == "NVDA"]
-            embedded = nvidia.embed_text(
+            nvidia_news = news[news["symbol"] == "NVDA"]
+            embedded = nvidia_news.embed_text(
                 columns=["title", "description"],
                 into="embedding",
                 model=MODEL,
