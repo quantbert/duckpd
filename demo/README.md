@@ -8,6 +8,7 @@ uv sync --frozen --group dev
 uv run python demo/basic_pipeline.py
 uv run python demo/parquet_pipeline.py
 uv run python demo/reduction_pipeline.py
+uv run python demo/vector_search.py
 uv run python demo/generate_market_data.py
 uv run python demo/market_data_demo.py smoke
 ```
@@ -21,6 +22,9 @@ uv run python demo/market_data_demo.py smoke
   `min`, and `max` execution over a lazy frame. It covers DataFrame
   `numeric_only`, Series null handling, `skipna`, `min_count`, hidden indexes,
   expression reductions, and the session execution counter.
+- `vector_search.py` builds an exact cosine search over fixed-size embeddings,
+  proves planning executes nothing, exposes prefilter placement in the logical
+  plan, and collects the bounded nearest-neighbor result once.
 - `generate_market_data.py` calibrates compressed bytes per row, then streams a
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.

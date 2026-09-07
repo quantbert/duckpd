@@ -41,6 +41,7 @@ from duckpd._logical import (
     SourceProvenance,
     SqlSource,
     TableSource,
+    VectorMetric,
     sanitize_source_location,
 )
 from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
@@ -75,6 +76,22 @@ class ArrowUDFSpec:
     deterministic: bool
     side_effects: bool
     batch_independent: bool
+
+
+@dataclass(frozen=True)
+class VectorIndexInfo:
+    """Verified session-owned DuckDB HNSW index metadata."""
+
+    name: str
+    table: str
+    column: str
+    metric: Literal["cosine", "l2"]
+    dimension: int
+    duckdb_version: str
+    extension: str = "vss"
+    index_type: str = "HNSW"
+    persistent: bool = False
+    memory_limit_applies: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,6 +219,7 @@ class Session:
         self._arrow_udfs: dict[str, ArrowUDFSpec] = {}
         self._attachments: dict[str, _RemoteAttachmentState] = {}
         self._object_store_secrets: dict[str, _ObjectStoreSecretState] = {}
+        self._vector_indexes: dict[str, VectorIndexInfo] = {}
         self._last_materialization_report: MaterializationReport | None = None
         self._closed = False
         self._execution_count = 0
@@ -227,6 +245,135 @@ class Session:
     def last_materialization_report(self) -> MaterializationReport | None:
         """Metrics for the latest explicit bounded materialization."""
         return self._last_materialization_report
+
+    def create_vector_index(
+        self,
+        *,
+        table: str,
+        column: str,
+        name: str,
+        metric: Literal["cosine", "l2"] = "cosine",
+    ) -> VectorIndexInfo:
+        """Eagerly create and verify an in-memory DuckDB HNSW index."""
+        from duckpd.vector import _metric, _vector_type
+
+        self._ensure_open()
+        if not table or not column or not name:
+            raise ValueError("table, column, and name must be non-empty strings")
+        if "." in table:
+            raise UnsupportedOperationError(
+                "Vector index management currently supports main-schema tables only"
+            )
+        frame = self.table(table)
+        try:
+            vector_column = next(item for item in frame._plan.columns if item.label == column)
+        except StopIteration:
+            raise KeyError(column) from None
+        element_type, dimension = _vector_type(vector_column.duckdb_type)
+        if element_type != "FLOAT" or dimension is None:
+            raise UnsupportedOperationError(
+                "DuckDB vss indexes require a fixed-size FLOAT[n] table column"
+            )
+        vector_metric = _metric(metric)
+        if vector_metric is VectorMetric.INNER_PRODUCT:
+            raise UnsupportedOperationError("DuckDB vss does not support inner_product indexes")
+        if name in self._vector_indexes:
+            raise ValueError(f"Vector index {name!r} already exists")
+
+        quoted_table = quote_identifier(table)
+        quoted_column = quote_identifier(column)
+        quoted_name = quote_identifier(name)
+        norm = f"array_inner_product({quoted_column}, {quoted_column})"
+        invalid = f"{quoted_column} IS NULL OR {norm} IS NULL OR NOT isfinite({norm})"
+        if vector_metric is VectorMetric.COSINE:
+            invalid = f"({invalid}) OR {norm} = 0"
+        invalid_row = self._connection.execute(
+            f"SELECT 1 FROM {quoted_table} WHERE {invalid} LIMIT 1"
+        ).fetchone()
+        if invalid_row is not None:
+            raise ValueError(
+                "Vector indexes require non-null finite vectors"
+                + (" with non-zero norm" if vector_metric is VectorMetric.COSINE else "")
+            )
+
+        self._begin_execution()
+        try:
+            self._connection.install_extension("vss")
+            self._connection.load_extension("vss")
+            index_metric = "cosine" if vector_metric is VectorMetric.COSINE else "l2sq"
+            self._connection.execute(
+                f"CREATE INDEX {quoted_name} ON {quoted_table} "
+                f"USING HNSW ({quoted_column}) WITH (metric = {quote_literal(index_metric)})"
+            )
+        except duckdb.Error as error:
+            raise UnsupportedOperationError(
+                f"DuckDB vss index creation failed ({type(error).__name__})"
+            ) from None
+        row = self._connection.execute(
+            "SELECT index_name, table_name, sql FROM duckdb_indexes() WHERE index_name = ?",
+            [name],
+        ).fetchone()
+        if row is None or row[1] != table or "USING HNSW" not in str(row[2]).upper():
+            raise UnsupportedOperationError("DuckDB did not expose the created HNSW index")
+        info = VectorIndexInfo(
+            name,
+            table,
+            column,
+            vector_metric.value,
+            dimension,
+            duckdb.__version__,
+        )
+        self._vector_indexes[name] = info
+        return info
+
+    def inspect_vector_indexes(self) -> tuple[VectorIndexInfo, ...]:
+        """Return verified HNSW indexes still present in this session."""
+        self._ensure_open()
+        names = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT index_name FROM duckdb_indexes()"
+            ).fetchall()
+        }
+        stale = set(self._vector_indexes) - names
+        for name in stale:
+            del self._vector_indexes[name]
+        return tuple(self._vector_indexes[name] for name in sorted(self._vector_indexes))
+
+    def drop_vector_index(self, name: str) -> None:
+        """Eagerly drop a session-owned HNSW index."""
+        self._ensure_open()
+        if name not in {item.name for item in self.inspect_vector_indexes()}:
+            raise KeyError(name)
+        self._begin_execution()
+        self._connection.execute(f"DROP INDEX {quote_identifier(name)}")
+        del self._vector_indexes[name]
+
+    def _resolve_vector_index(
+        self,
+        plan: object,
+        column: Column,
+        metric: VectorMetric,
+    ) -> str:
+        if not isinstance(plan, ScanPlan) or not isinstance(plan.source, TableSource):
+            raise UnsupportedOperationError(
+                "Approximate vector search requires an unfiltered local DuckDB table; "
+                "prefilter semantics are not yet qualified"
+            )
+        if metric is VectorMetric.INNER_PRODUCT:
+            raise UnsupportedOperationError("DuckDB vss does not support inner_product indexes")
+        matches = [
+            item
+            for item in self.inspect_vector_indexes()
+            if item.table == plan.source.name
+            and item.column == column.label
+            and item.metric == metric.value
+        ]
+        if len(matches) != 1:
+            raise UnsupportedOperationError(
+                "Approximate vector search requires exactly one compatible session-owned HNSW index"
+            )
+        return matches[0].name
 
     def register_arrow_udf(
         self,

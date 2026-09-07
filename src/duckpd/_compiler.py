@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -48,6 +49,10 @@ from duckpd._logical import (
     UnaryExpression,
     UnaryOperator,
     UnionPlan,
+    VectorDistanceExpression,
+    VectorExecutionMode,
+    VectorMetric,
+    VectorSearchPlan,
     WindowClosed,
     WindowExpression,
     WindowFrameKind,
@@ -96,10 +101,17 @@ class DuckDBCompiler:
         columns: list[Column] = []
         for label, duckdb_type in zip(labels, relation.types, strict=True):
             dtype = str(duckdb_type)
-            if dtype.endswith("[]") or dtype.startswith(("STRUCT(", "MAP(", "UNION(")):
+            array_match = re.fullmatch(r"(FLOAT|DOUBLE)\[(\d*)\]", dtype)
+            nested = dtype.endswith("[]") or dtype.startswith(("STRUCT(", "MAP(", "UNION("))
+            if nested and array_match is None:
                 raise UnsupportedOperationError(
                     f"DuckPD does not yet define pandas collection semantics for "
                     f"nested DuckDB type {dtype} in column {label!r}"
+                )
+            if "[" in dtype and dtype.endswith("]") and array_match is None:
+                raise UnsupportedOperationError(
+                    f"Vector columns require FLOAT or DOUBLE elements; "
+                    f"column {label!r} has DuckDB type {dtype}"
                 )
             columns.append(Column(ColumnId.create(), label, dtype))
         stable_order_label = getattr(source, "stable_order_label", None)
@@ -173,6 +185,8 @@ class DuckDBCompiler:
 
         if isinstance(plan, LocIndexPlan):
             return self._compile_loc_index(plan)
+        if isinstance(plan, VectorSearchPlan):
+            return self._compile_vector_search(plan)
 
         compiled_input = self._compile(plan.input)
         if isinstance(plan, FilterPlan):
@@ -375,6 +389,116 @@ class DuckDBCompiler:
             return f"timezone('UTC', {timestamp})"
         return timestamp
 
+    def _compile_vector_distance(
+        self,
+        expression: VectorDistanceExpression,
+        bindings: dict[ColumnId, str],
+        *,
+        checked: bool = True,
+    ) -> duckdb.Expression:
+        """Compile a vector distance from a typed DuckDB constant."""
+        operand = self.compile_expression(expression.operand, bindings)
+        dimension = expression.query.dimension
+        array_type = f"{expression.query.element_type}[{dimension}]"
+        if expression.input_type.endswith("[]"):
+            operand = operand.cast(array_type)
+        query = duckdb.ConstantExpression(list(expression.query.values)).cast(array_type)
+        function = {
+            VectorMetric.COSINE: "array_cosine_distance",
+            VectorMetric.L2: "array_distance",
+            VectorMetric.INNER_PRODUCT: "array_negative_inner_product",
+        }[expression.metric]
+        distance = duckdb.FunctionExpression(function, operand, query)
+        if not checked:
+            return distance
+        norm = duckdb.FunctionExpression("array_inner_product", operand, operand)
+        invalid = (
+            operand.isnull()
+            | norm.isnull()
+            | ~duckdb.FunctionExpression("isfinite", norm)
+            | distance.isnull()
+            | ~duckdb.FunctionExpression("isfinite", distance)
+        )
+        error = duckdb.FunctionExpression(
+            "error",
+            duckdb.ConstantExpression(
+                "DuckPD vector columns cannot contain null, non-finite, "
+                "null-element, dimension-mismatched, or undefined-distance vectors"
+            ),
+        )
+        return duckdb.CaseExpression(invalid, error).otherwise(distance)
+
+    def _compile_vector_search(self, plan: VectorSearchPlan) -> CompiledFrame:
+        if (
+            plan.mode is VectorExecutionMode.APPROXIMATE
+            and isinstance(plan.input, ScanPlan)
+            and isinstance(plan.input.source, TableSource)
+        ):
+            compiled = CompiledFrame(
+                self._relation_for_source(plan.input.source),
+                {column.id: column.label for column in plan.input.metadata.columns},
+            )
+        else:
+            compiled = self._compile(plan.input)
+        vector = VectorDistanceExpression(
+            ColumnRef(plan.vector_column),
+            plan.query,
+            plan.metric,
+            next(
+                column.duckdb_type
+                for column in plan.input.metadata.columns
+                if column.id == plan.vector_column
+            ),
+        )
+        checked = plan.mode is VectorExecutionMode.EXACT
+        distance = self._compile_vector_distance(
+            vector,
+            compiled.bindings,
+            checked=checked,
+        )
+        bindings = {
+            **compiled.bindings,
+            plan.distance_column.id: plan.distance_column.label,
+        }
+        if plan.mode is VectorExecutionMode.APPROXIMATE:
+            relation = compiled.relation.sort(distance.asc().nulls_last()).limit(plan.k)
+            projected = [
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
+                    column.label
+                )
+                for column in plan.input.metadata.columns
+            ]
+            projected.append(distance.alias(plan.distance_column.label))
+            relation = relation.project(*projected)
+            physical = relation.explain()
+            if (
+                plan.index_name is None
+                or "HNSW_INDEX_SCAN" not in physical
+                or plan.index_name not in physical
+            ):
+                raise UnsupportedOperationError(
+                    "Approximate vector search requires DuckDB to verify use of "
+                    f"HNSW index {plan.index_name!r}; generated plan was not eligible"
+                )
+            return CompiledFrame(relation, bindings)
+
+        projected = [
+            duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(column.label)
+            for column in plan.input.metadata.columns
+        ]
+        projected.append(distance.alias(plan.distance_column.label))
+        relation = compiled.relation.project(*projected)
+        keys = [
+            duckdb.SQLExpression(quote_identifier(plan.distance_column.label)).asc().nulls_last()
+        ]
+        if plan.tie_breaker is not None:
+            keys.append(
+                duckdb.SQLExpression(quote_identifier(bindings[plan.tie_breaker]))
+                .asc()
+                .nulls_last()
+            )
+        return CompiledFrame(relation.sort(*keys).limit(plan.k), bindings)
+
     def compile_expression(
         self, expression: Expression, bindings: dict[ColumnId, str]
     ) -> duckdb.Expression:
@@ -408,6 +532,8 @@ class DuckDBCompiler:
             val = self.compile_expression(expression.value, bindings)
             other = self.compile_expression(expression.otherwise, bindings)
             return duckdb.CaseExpression(cond, val).otherwise(other)
+        if isinstance(expression, VectorDistanceExpression):
+            return self._compile_vector_distance(expression, bindings)
         if isinstance(expression, FunctionCall):
             internal_sql = self._internal_function_sql(expression, bindings)
             if internal_sql is not None:
@@ -530,6 +656,10 @@ class DuckDBCompiler:
             }
             op_str = op_map[expression.operator]
             return f"(({left_sql}) {op_str} ({right_sql}))"
+        if isinstance(expression, VectorDistanceExpression):
+            raise UnsupportedOperationError(
+                "Vector distance expressions cannot be nested inside SQL-only windows"
+            )
 
         args_str = ", ".join(self._expression_to_sql(arg, bindings) for arg in expression.arguments)
         window_parts: list[str] = []

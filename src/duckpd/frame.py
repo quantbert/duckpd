@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from duckpd.indexing import ILocIndexer, LocIndexer
     from duckpd.series import Series
     from duckpd.session import Session
+    from duckpd.vector import VectorFrameMethods
     from duckpd.window import Expanding, Rolling
 
 
@@ -142,6 +143,13 @@ class DataFrame:
         from duckpd.indexing import ILocIndexer
 
         return ILocIndexer(self)
+
+    @property
+    def vector(self) -> VectorFrameMethods:
+        """Access lazy nearest-neighbor retrieval operations."""
+        from duckpd.vector import VectorFrameMethods
+
+        return VectorFrameMethods(self)
 
     def collect(self) -> pd.DataFrame:
         """Execute the complete plan and return a pandas DataFrame."""

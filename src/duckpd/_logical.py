@@ -251,6 +251,33 @@ class AggregateOperator(Enum):
 NON_SPILLABLE_AGGREGATE_NAMES = frozenset({"list", "string_agg"})
 
 
+class VectorMetric(Enum):
+    """Supported nearest-neighbor distance semantics."""
+
+    COSINE = "cosine"
+    L2 = "l2"
+    INNER_PRODUCT = "inner_product"
+
+
+class VectorExecutionMode(Enum):
+    """Explicit vector retrieval strategy."""
+
+    EXACT = "exact"
+    APPROXIMATE = "approximate"
+
+
+@dataclass(frozen=True)
+class VectorQuery:
+    """Finite, typed query vector bound through DuckDB expressions."""
+
+    values: tuple[float, ...]
+    element_type: Literal["FLOAT", "DOUBLE"]
+
+    @property
+    def dimension(self) -> int:
+        return len(self.values)
+
+
 @dataclass(frozen=True)
 class ColumnRef:
     """Reference a logical column by identity."""
@@ -290,6 +317,16 @@ class FunctionCall:
     arguments: tuple[Expression, ...]
     return_type: str | None = None
     is_arrow_udf: bool = False
+
+
+@dataclass(frozen=True)
+class VectorDistanceExpression:
+    """Typed distance from one vector expression to a scalar query vector."""
+
+    operand: Expression
+    query: VectorQuery
+    metric: VectorMetric
+    input_type: str
 
 
 @dataclass(frozen=True)
@@ -351,6 +388,7 @@ Expression: TypeAlias = (
     | BinaryExpression
     | UnaryExpression
     | FunctionCall
+    | VectorDistanceExpression
     | CastExpression
     | CaseWhen
     | WindowExpression
@@ -546,6 +584,8 @@ def expression_metadata(expression: Expression) -> ExpressionMetadata:
             has_window=any(m.has_window for m in arg_metas),
             order_dependency_count=sum(m.order_dependency_count for m in arg_metas),
         )
+    if isinstance(expression, VectorDistanceExpression):
+        return expression_metadata(expression.operand)
     if isinstance(expression, WindowExpression):
         arg_metas = [expression_metadata(arg) for arg in expression.arguments]
         part_metas = [expression_metadata(p) for p in expression.partition_by]
@@ -594,6 +634,8 @@ def expression_nullability(
         if expression.name.lower() in {"isnull", "notnull", "isnan", "isfinite"}:
             return Nullability.NON_NULL
         values = [expression_nullability(argument, metadata) for argument in expression.arguments]
+    elif isinstance(expression, VectorDistanceExpression):
+        return Nullability.NON_NULL
     elif isinstance(expression, CaseWhen):
         values = [
             expression_nullability(expression.value, metadata),
@@ -679,6 +721,22 @@ class TopKPlan(LogicalPlanBase):
     count: int
     offset: int
     metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
+class VectorSearchPlan(LogicalPlanBase):
+    """Exact or verified-index nearest-neighbor retrieval."""
+
+    input: LogicalPlan
+    vector_column: ColumnId
+    query: VectorQuery
+    metric: VectorMetric
+    k: int
+    mode: VectorExecutionMode
+    distance_column: Column
+    tie_breaker: ColumnId | None
+    metadata: FrameMetadata
+    index_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -771,6 +829,7 @@ LogicalPlan: TypeAlias = (
     | ProjectPlan
     | SortPlan
     | TopKPlan
+    | VectorSearchPlan
     | LimitPlan
     | AggregatePlan
     | JoinPlan

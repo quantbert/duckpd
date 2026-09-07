@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from duckpd.frame import DataFrame
     from duckpd.groupby import SeriesGroupBy
     from duckpd.session import Session
+    from duckpd.vector import VectorMethods
     from duckpd.window import Expanding, Rolling
 
 
@@ -1142,6 +1143,13 @@ class Series:
         from duckpd.accessors import CategoricalMethods
 
         return CategoricalMethods(self)
+
+    @property
+    def vector(self) -> VectorMethods:
+        """Access fixed-size numeric-array operations."""
+        from duckpd.vector import VectorMethods
+
+        return VectorMethods(self)
 
     def _require_order(self) -> tuple[SortKey, ...]:
         """Validate that the plan has guaranteed ordering and return SortKeys."""

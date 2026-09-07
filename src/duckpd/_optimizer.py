@@ -37,6 +37,7 @@ from duckpd._logical import (
     TopKPlan,
     UnaryExpression,
     UnionPlan,
+    VectorDistanceExpression,
     sanitize_source_location,
 )
 from duckpd._metadata import after_filter, after_projection
@@ -360,7 +361,7 @@ def _expression_columns(expression: Expression) -> set[ColumnId]:
         return {expression.column_id}
     if isinstance(expression, LiteralValue):
         return set()
-    if isinstance(expression, (UnaryExpression, CastExpression)):
+    if isinstance(expression, (UnaryExpression, CastExpression, VectorDistanceExpression)):
         return _expression_columns(expression.operand)
     if isinstance(expression, BinaryExpression):
         return _expression_columns(expression.left) | _expression_columns(expression.right)
@@ -394,7 +395,7 @@ def _map_expression_columns(
         return ColumnRef(target) if target is not None else None
     if isinstance(expression, LiteralValue):
         return expression
-    if isinstance(expression, (UnaryExpression, CastExpression)):
+    if isinstance(expression, (UnaryExpression, CastExpression, VectorDistanceExpression)):
         operand = _map_expression_columns(expression.operand, mapping)
         return replace(expression, operand=operand) if operand is not None else None
     if isinstance(expression, BinaryExpression):

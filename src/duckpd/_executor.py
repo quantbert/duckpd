@@ -57,6 +57,8 @@ from duckpd._logical import (
     TopKPlan,
     UnaryExpression,
     UnionPlan,
+    VectorDistanceExpression,
+    VectorSearchPlan,
     WindowExpression,
     WindowFrameKind,
     expression_metadata,
@@ -162,6 +164,7 @@ class ProfileResult:
     optimization: dict[str, Any] | None = None
     fallback_boundaries: tuple[dict[str, object], ...] = ()
     materialization_boundaries: tuple[dict[str, object], ...] = ()
+    vector_operations: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return DuckDB metrics plus DuckPD planning and optimizer details."""
@@ -179,6 +182,7 @@ class ProfileResult:
                 "fallback_policy": "error",
                 "fallback_boundaries": list(self.fallback_boundaries),
                 "materialization_boundaries": list(self.materialization_boundaries),
+                "vector_operations": list(self.vector_operations),
             },
         }
 
@@ -305,6 +309,7 @@ def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
             AggregatePlan,
             SamplePlan,
             LocIndexPlan,
+            VectorSearchPlan,
         ),
     ):
         yield from _plan_nodes(plan.input)
@@ -335,7 +340,7 @@ def _range_window_signatures(
         ]
     elif isinstance(expression, BinaryExpression):
         children = [expression.left, expression.right]
-    elif isinstance(expression, UnaryExpression):
+    elif isinstance(expression, (UnaryExpression, VectorDistanceExpression)):
         children = [expression.operand]
     elif isinstance(expression, FunctionCall):
         children = list(expression.arguments)
@@ -348,6 +353,50 @@ def _range_window_signatures(
     for child in children:
         signatures.update(_range_window_signatures(child))
     return signatures
+
+
+def _vector_operations(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
+    """Describe vector semantics without compiling or executing the plan."""
+    operations: list[dict[str, object]] = []
+    for node in _plan_nodes(plan):
+        if isinstance(node, VectorSearchPlan):
+            tie_label = next(
+                (
+                    column.label
+                    for column in node.input.metadata.columns
+                    if column.id == node.tie_breaker
+                ),
+                None,
+            )
+            operations.append(
+                {
+                    "operation": "search",
+                    "strategy": node.mode.value,
+                    "metric": node.metric.value,
+                    "dimension": node.query.dimension,
+                    "k": node.k,
+                    "filter_placement": (
+                        "before_search" if isinstance(node.input, FilterPlan) else "none"
+                    ),
+                    "tie_breaker": tie_label,
+                    "index_name": node.index_name,
+                    "physical_index_use": node.index_name is not None,
+                }
+            )
+        if isinstance(node, ProjectPlan):
+            for projection in node.projections:
+                if isinstance(projection.expression, VectorDistanceExpression):
+                    expression = projection.expression
+                    operations.append(
+                        {
+                            "operation": "distance",
+                            "strategy": "exact",
+                            "metric": expression.metric.value,
+                            "dimension": expression.query.dimension,
+                            "output": projection.column.label,
+                        }
+                    )
+    return tuple(operations)
 
 
 def _redact_plan_text(text: str, plan: LogicalPlan) -> str:
@@ -409,6 +458,9 @@ def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
         if isinstance(node, (LimitPlan, TopKPlan)):
             input_rows = row_upper_bound(node.input)
             return None if input_rows is None else min(input_rows, node.count)
+        if isinstance(node, VectorSearchPlan):
+            input_rows = row_upper_bound(node.input)
+            return None if input_rows is None else min(input_rows, node.k)
         if isinstance(node, AggregatePlan):
             input_rows = row_upper_bound(node.input)
             if input_rows is None:
@@ -551,6 +603,9 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
             operations.add(SourceOperation.LIMIT)
         elif isinstance(node, TopKPlan):
             operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
+        elif isinstance(node, VectorSearchPlan):
+            operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
+            blocked_operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
         elif isinstance(node, SortPlan):
             operations.add(SourceOperation.SORT)
         visit(
@@ -1058,6 +1113,7 @@ class Executor:
                     SortPlan,
                     LimitPlan,
                     TopKPlan,
+                    VectorSearchPlan,
                     AggregatePlan,
                     SamplePlan,
                     LocIndexPlan,
@@ -1282,6 +1338,7 @@ class Executor:
             _fragment_to_dict(fragment) for fragment in _source_fragments(optimization.plan)
         )
         movement_plans = _movement_plans(optimization.plan)
+        vector_operations = _vector_operations(plan)
         resource_policy = {
             "non_spillable_aggregate_states": "error",
             "rejected": sorted(NON_SPILLABLE_AGGREGATE_NAMES),
@@ -1292,7 +1349,8 @@ class Executor:
             f"Remote source boundaries: {remote_text}\n"
             f"Source fragments: {json.dumps(source_fragments, sort_keys=True)}\n"
             f"Cross-source movement: {json.dumps(movement_plans, sort_keys=True)}\n"
-            f"Resource policy: {json.dumps(resource_policy, sort_keys=True)}"
+            f"Resource policy: {json.dumps(resource_policy, sort_keys=True)}\n"
+            f"Vector operations: {json.dumps(vector_operations, sort_keys=True)}"
         )
         if mode == "logical":
             return f"{boundaries}\nDuckPD logical plan:\n{logical}"
@@ -1309,6 +1367,10 @@ class Executor:
                 "movement": list(movement_plans),
                 "resource_policy": resource_policy,
             }
+            if vector_operations:
+                cast("dict[str, object]", payload["execution_boundaries"])["vector_operations"] = (
+                    list(vector_operations)
+                )
             return json.dumps(payload, indent=2)
         if mode == "analyze":
             self._validate_execution(optimization.plan)
@@ -1368,6 +1430,7 @@ class Executor:
             JoinPlan,
             AsOfJoinPlan,
             LocIndexPlan,
+            VectorSearchPlan,
         )
         blocking = tuple(
             dict.fromkeys(type(node).__name__ for node in nodes if isinstance(node, blocking_types))
@@ -1456,6 +1519,7 @@ class Executor:
             ),
             movement_plans=_movement_plans(optimization.plan),
             measured_transfer_bytes=None,
+            vector_operations=_vector_operations(plan),
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:
@@ -1589,7 +1653,15 @@ class Executor:
             return
         if isinstance(
             plan,
-            (FilterPlan, ProjectPlan, SortPlan, TopKPlan, LimitPlan, AggregatePlan),
+            (
+                FilterPlan,
+                ProjectPlan,
+                SortPlan,
+                TopKPlan,
+                VectorSearchPlan,
+                LimitPlan,
+                AggregatePlan,
+            ),
         ):
             self._validate_execution(plan.input)
 

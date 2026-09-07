@@ -15,6 +15,7 @@ from duckpd.session import (
     AttachedDatabase,
     ObjectStoreSecret,
     Session,
+    VectorIndexInfo,
     connect,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "SeriesGroupBy",
     "Session",
     "SyncReport",
+    "VectorIndexInfo",
     "__version__",
     "concat",
     "connect",

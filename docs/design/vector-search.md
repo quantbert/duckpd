@@ -1,6 +1,6 @@
 # Vector Search and Analytical Retrieval
 
-**Status: exploratory design; no public API is implemented.**
+**Status: implemented exact search; experimental approximate mode is guarded by verified DuckDB HNSW plans.**
 
 ## Product thesis
 
@@ -55,8 +55,7 @@ with pd.connect(memory_limit="2GB") as session:
     )
 
     eligible = documents[
-        (documents["available_at"] <= observation_time)
-        & (documents["language"] == "en")
+        (documents["available_at"] <= observation_time) & (documents["language"] == "en")
     ]
 
     matches = eligible.vector.search(
@@ -76,7 +75,7 @@ The value is the composition: semantic retrieval, temporal eligibility,
 relational enrichment, feature engineering, and output remain in one lazy
 DuckDB-backed plan.
 
-## Proposed public API
+## Public API
 
 ### Distance expressions
 
@@ -151,10 +150,9 @@ session.create_vector_index(
 )
 ```
 
-`create_vector_index()` is proposed syntax. Index management should require a
-physical DuckDB table and reject arbitrary lazy plans. It should expose
-creation, inspection, and deletion explicitly rather than creating indexes as
-a side effect of search.
+`create_vector_index()` is an eager, explicit side effect for a physical
+main-schema DuckDB table with a fixed-size `FLOAT[n]` column. Inspection and
+deletion are explicit; searches never create indexes.
 
 ## Search modes
 
@@ -280,6 +278,35 @@ Vector operations should strengthen DuckPD's existing execution visibility.
 
 For `mode="approximate"`, inability to demonstrate a compatible indexed plan
 is an error, not a performance warning.
+
+### DuckDB 1.5.5 `vss` qualification
+
+DuckPD installs and loads `vss` only from the explicit
+`Session.create_vector_index()` boundary. The supported indexed subset is
+in-memory, main-schema `FLOAT[n]` tables using `cosine` or `l2`. Index creation
+rejects null, null-element, non-finite, and zero-norm cosine vectors.
+`inner_product`, prefiltered inputs, tie-break ordering, persistent indexes, and
+`mode="auto"` are rejected before retrieval.
+
+Every approximate compilation checks the generated DuckDB physical plan for
+both `HNSW_INDEX_SCAN` and the expected session-owned index name. Catalog
+metadata alone is insufficient. `inspect_vector_indexes()` reports only indexes
+created and still present in the current session.
+
+The reproducible command
+`uv run python -m benchmark.vector --rows 1000 --dimensions 16 --k 10 --vss`
+was run on DuckDB 1.5.5. The deterministic smoke case reported exact/direct-SQL
+parity, `1.0` recall@10, identical repeated approximate IDs, a verified
+`HNSW_INDEX_SCAN`, 6.29 ms DuckPD exact latency, 1.73 ms direct DuckDB exact
+latency, 57.14 ms index creation, 4.23 ms approximate latency, 187,793,408-byte
+process peak RSS, and no exact-search spill. These are smoke observations, not
+larger-than-memory or performance guarantees.
+
+DuckDB documents `vss` as experimental. HNSW memory is outside DuckDB's
+`memory_limit`; persistent custom indexes require an experimental setting and
+have WAL recovery risks. DuckPD therefore does not enable persistence and makes
+no bounded-memory, cross-version recall, or reproducibility promise for
+approximate retrieval.
 
 ## Non-goals
 

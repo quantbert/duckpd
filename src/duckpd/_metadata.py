@@ -288,6 +288,32 @@ def after_reindex(
     return result
 
 
+def after_vector_search(
+    metadata: FrameMetadata,
+    distance: Column,
+    *,
+    tie_breaker: Column | None,
+) -> FrameMetadata:
+    """Add a non-null distance and establish nearest-first result ordering."""
+    keys = [
+        OrderColumn(distance.id, SortDirection.ASCENDING, NullPlacement.LAST),
+    ]
+    if tie_breaker is not None:
+        keys.append(OrderColumn(tie_breaker.id, SortDirection.ASCENDING, NullPlacement.LAST))
+    result = replace(
+        metadata,
+        columns=(*metadata.columns, distance),
+        ordering=OrderSpec(tuple(keys)),
+        provenance=replace(
+            metadata.provenance,
+            row_preserving=False,
+            transformations=(*metadata.provenance.transformations, "vector_search"),
+        ),
+    )
+    validate_metadata(result)
+    return result
+
+
 def _after_transform(
     provenance: SourceProvenance,
     operation: str,

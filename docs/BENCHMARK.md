@@ -56,6 +56,24 @@ evidence. The optimizer gate alternates optimized/unoptimized plans,
 checks Arrow result equality, measures each pass by ablation, and enforces the
 configured median regression ratio.
 
+### Vector retrieval track
+
+`python -m benchmark.vector` generates deterministic `FLOAT[n]` table vectors
+and runs exhaustive DuckPD search against direct DuckDB SQL across configurable
+row counts and dimensions. Each result records end-to-end latency, process peak
+RSS, spill-directory bytes, and result parity:
+
+```bash
+uv run python -m benchmark.vector --rows 10000 100000 --dimensions 16 64 384
+```
+
+Add `--vss` to run the optional in-memory HNSW qualification. That path records
+index creation and approximate latency, recall against exact DuckPD results,
+repeat-result equality, peak RSS, and physical `HNSW_INDEX_SCAN` verification.
+It does not claim that HNSW memory follows DuckDB's memory limit or spill
+policy. Current smoke evidence and excluded persistence/filtering modes are
+recorded in [`design/vector-search.md`](design/vector-search.md).
+
 
 ### Why this workload favors DuckPD
 

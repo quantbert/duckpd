@@ -227,6 +227,24 @@
       "since": "0.0.7",
       "status": "supported",
       "notes": "Writes directly through DuckDB without pandas conversion; in-memory BytesIO sinks are rejected."
+    },
+    {
+      "method": "DuckPD Series.vector.distance",
+      "arguments": "finite query; metric='cosine'|'l2'|'inner_product'",
+      "dtypes": "FLOAT[n], DOUBLE[n], and runtime-validated FLOAT[]/DOUBLE[]",
+      "ordering": "preserved",
+      "since": "0.1.5",
+      "status": "supported",
+      "notes": "DuckPD-native lazy expression; not currently exposed through the Narwhals protocol."
+    },
+    {
+      "method": "DuckPD DataFrame.vector.search",
+      "arguments": "column, finite query, metric, positive k, mode, distance_column, tie_breaker",
+      "dtypes": "FLOAT[n], DOUBLE[n], and exact runtime-validated FLOAT[]/DOUBLE[]",
+      "ordering": "distance ascending; optional exact tie-breaker ascending",
+      "since": "0.1.5",
+      "status": "subset",
+      "notes": "Exact search is dependency-free and lazy. Approximate search requires a session-owned in-memory HNSW index and a verified HNSW_INDEX_SCAN."
     }
   ]
 }

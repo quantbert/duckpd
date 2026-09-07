@@ -245,7 +245,32 @@ Methods operate lazily on plan-backed Series, compiling directly into DuckDB exp
 * Sorting non-string categoricals is rejected until DuckDB can apply arbitrary
   declared category order without rematerialization.
 
-## 9. Narwhals Interoperability
+## 9. Native Vector Retrieval
+
+DuckPD supports `FLOAT[n]` and `DOUBLE[n]` fixed arrays from DuckDB/Arrow
+sources. Numeric `FLOAT[]` and `DOUBLE[]` Parquet lists are accepted for exact
+search and cast to the query dimension inside the execution query.
+
+| Method | Classification | Parameters | Execution | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `Series.vector.distance()` | **`[DuckPD Native]`** | finite query; `cosine`, `l2`, `inner_product` | Lazy | Maps to `array_cosine_distance`, `array_distance`, or `array_negative_inner_product`; result is `FLOAT` or `DOUBLE`. |
+| `DataFrame.vector.search()` | **`[DuckPD Native]`** | `column`, `query`, `metric`, positive `k`, `mode`, distance label, optional exact tie-breaker | Lazy | Exact by default; preserves prefilter-before-top-k semantics and returns an ordinary DataFrame ordered by distance. |
+| `Session.create_vector_index()` | **`[Experimental DuckPD Native]`** | main-schema `FLOAT[n]` table; `cosine` or `l2` | Eager | Installs/loads optional DuckDB `vss`; validates vectors and creates an in-memory HNSW index. |
+| `Session.inspect_vector_indexes()` / `drop_vector_index()` | **`[Experimental DuckPD Native]`** | session-owned index | Metadata/eager | Approximate search requires the physical plan to name the expected index and contain `HNSW_INDEX_SCAN`. |
+
+Queries, null vectors, vector elements, dimensions, metrics, `k`, labels, and
+tie-breakers are validated as early as metadata allows. Runtime-sized Parquet
+lists and source values are checked in the same DuckDB query. Invalid source
+vectors fail the execution rather than being silently filtered.
+
+Approximate mode excludes prefilters, tie-breakers, `inner_product`, persistent
+indexes, and `mode=\"auto\"`. DuckDB documents HNSW memory as outside
+`memory_limit`; DuckPD makes no spill, recall, or cross-version reproducibility
+guarantee for this experimental path.
+
+---
+
+## 10. Narwhals Interoperability
 
 DuckPD ships an experimental
 [Narwhals plugin](https://narwhals-dev.github.io/narwhals/extending/).
@@ -304,7 +329,7 @@ the scan workaround, use a DuckPD reader and pass the result to
 
 ---
 
-## 10. Ordering and Resource Contract
+## 11. Ordering and Resource Contract
 
 * **Hidden Row Identity**: CSV and Parquet scans plus pandas and Arrow snapshots carry a hidden stable row identity. It is never exposed in columns, indexes, Arrow output, or file sinks.
 * **Deterministic Tie-Breaking**: User sorts append row identity only as a final tie-breaker. SQL and table scans remain unordered unless callers establish an order.

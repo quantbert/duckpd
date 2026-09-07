@@ -23,6 +23,7 @@ from duckpd._logical import (
     LogicalPlan,
     Nullability,
     UnaryExpression,
+    VectorDistanceExpression,
     WindowExpression,
 )
 from duckpd._metadata import after_aggregate
@@ -243,6 +244,8 @@ def expression_type(plan: LogicalPlan, expression: Expression) -> str:
         if is_numeric_type(value_type) and is_numeric_type(otherwise_type):
             return binary_numeric_type(value_type, otherwise_type, "add")
         return "UNKNOWN"
+    if isinstance(expression, VectorDistanceExpression):
+        return expression.query.element_type
     if isinstance(expression, FunctionCall):
         if expression.return_type is not None:
             return expression.return_type

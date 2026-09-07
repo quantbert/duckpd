@@ -31,6 +31,16 @@ the [release policy](RELEASES.md).
   `list` and `string_agg` states are rejected before execution.
 - Architecture decision 0004 records the measured Ibis substrate spike and the
   decision to retain DuckPD's native DuckDB compiler.
+- Lazy fixed-array `Series.vector.distance()` expressions and exact
+  `DataFrame.vector.search()` for cosine, L2, and negative inner-product
+  distance, including typed queries, prefilter semantics, deterministic
+  tie-breaks, plan/profile observability, and runtime source-vector validation.
+- Explicit experimental `Session.create_vector_index()`,
+  `inspect_vector_indexes()`, and `drop_vector_index()` APIs. Approximate
+  retrieval requires an in-memory DuckDB `vss` HNSW index and verifies
+  `HNSW_INDEX_SCAN` plus the expected index name before execution.
+- Reproducible exhaustive/direct-DuckDB and optional HNSW benchmark tracks, plus
+  a runnable exact vector-search example.
 
 ### Changed
 
