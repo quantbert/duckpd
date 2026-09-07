@@ -75,6 +75,28 @@ policy. Current smoke evidence and excluded persistence/filtering modes are
 recorded in [`design/vector-search.md`](design/vector-search.md).
 
 
+### Text embedding track
+
+`benchmark.embeddings` qualifies the optional CPU FastEmbed/ONNX boundary with
+the pinned `BAAI/bge-small-en-v1.5` revision. It varies candidate count, batch
+size, and deterministic text length; records approximate whitespace tokens,
+preparation/inference/sink/query wall time, throughput, peak process RSS, and
+Parquet size; and requires direct-provider parity within `1e-6`.
+
+```bash
+uv run --extra embeddings python -m benchmark.embeddings \
+  --rows 100 1000 --batch-sizes 32 256 --text-words 12 96
+```
+
+A 32-row, 12-word smoke on AMD Ryzen AI 9 HX 370 CPU with
+`CPUExecutionProvider` produced four 8-row inference batches, 57.0 rows/s
+provider time, 345,702,400 bytes peak process RSS, and a 50,740-byte Parquet
+file. Direct-provider parity had zero maximum absolute error; repeated query
+inference returned the same fingerprinted vector. These are qualification
+observations, not portable throughput promises. Each result includes the
+immutable model revision, fingerprint, artifact digest, execution providers,
+maximum absolute error, and cold/repeated query timings.
+
 ### Why this workload favors DuckPD
 
 - **Predicate & Projection Pushdown**: DuckPD compiles the lazy plan directly to DuckDB's vectorized query engine. Rather than deserializing all columns and rows into Python heap memory, DuckDB scans only the requested columns (`ticker`, `open`, `close`, `high`, `low`) and pushes filtering into the Parquet reader.

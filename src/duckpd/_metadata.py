@@ -288,6 +288,20 @@ def after_reindex(
     return result
 
 
+def after_embedding(metadata: FrameMetadata, output: Column) -> FrameMetadata:
+    """Append a verified embedding while preserving row identity and order."""
+    result = replace(
+        metadata,
+        columns=(*metadata.columns, output),
+        provenance=replace(
+            metadata.provenance,
+            transformations=(*metadata.provenance.transformations, "embed_text"),
+        ),
+    )
+    validate_metadata(result)
+    return result
+
+
 def after_vector_search(
     metadata: FrameMetadata,
     distance: Column,

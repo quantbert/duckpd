@@ -30,6 +30,7 @@ dependencies = [
     "duckdb>=1.5,<1.6",
     "pandas>=3.0,<3.1",
     "pyarrow>=18",
+    "tqdm>=4.66,<5",
 ]
 
 [project.urls]
@@ -44,6 +45,9 @@ duckpd = "duckpd._narwhals_plugin"
 [project.optional-dependencies]
 featurestore = [
     "huggingface-hub>=0.23.0",
+]
+embeddings = [
+    "fastembed>=0.7,<0.8",
 ]
 
 [dependency-groups]

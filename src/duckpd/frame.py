@@ -82,6 +82,11 @@ from duckpd.errors import (
 
 if TYPE_CHECKING:
     from duckpd._logical import Expression, LogicalPlan
+    from duckpd.embeddings import (
+        EmbeddingModelSpec,
+        NullTextPolicy,
+        SemanticMethods,
+    )
     from duckpd.groupby import DataFrameGroupBy
     from duckpd.indexing import ILocIndexer, LocIndexer
     from duckpd.series import Series
@@ -150,6 +155,36 @@ class DataFrame:
         from duckpd.vector import VectorFrameMethods
 
         return VectorFrameMethods(self)
+
+    @property
+    def semantic(self) -> SemanticMethods:
+        """Access lazy text-to-text semantic retrieval."""
+        from duckpd.embeddings import SemanticMethods
+
+        return SemanticMethods(self)
+
+    def embed_text(
+        self,
+        *,
+        columns: str | Sequence[str],
+        into: str,
+        model: EmbeddingModelSpec,
+        batch_size: int = 256,
+        separator: str = "\n\n",
+        null_policy: NullTextPolicy = "error",
+    ) -> DataFrame:
+        """Append text embeddings lazily through a bounded Arrow provider."""
+        from duckpd.embeddings import embed_text
+
+        return embed_text(
+            self,
+            columns=columns,
+            into=into,
+            model=model,
+            batch_size=batch_size,
+            separator=separator,
+            null_policy=null_policy,
+        )
 
     def collect(self) -> pd.DataFrame:
         """Execute the complete plan and return a pandas DataFrame."""
@@ -220,6 +255,7 @@ class DataFrame:
         """Persist the complete plan while retaining index and order metadata."""
         table_name = name if name is not None else f"__duckpd_persist_{uuid4().hex}__"
         self._session._executor.persist(self._plan, table_name)
+        self._session._register_table_embeddings(table_name, self._plan.metadata)
         metadata = dataclass_replace(
             self._plan.metadata,
             provenance=SourceProvenance(
@@ -255,7 +291,11 @@ class DataFrame:
             - 'overwrite': drop existing table and create new table.
             - 'append': append rows to existing table with schema validation.
         """
+        if mode == "append":
+            self._session._register_table_embeddings(name, self._plan.metadata, mode=mode)
         self._session._executor.save_as_table(self._plan, name, mode=mode)
+        if mode != "append":
+            self._session._register_table_embeddings(name, self._plan.metadata, mode=mode)
 
     def commit(
         self,

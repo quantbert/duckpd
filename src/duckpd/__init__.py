@@ -4,6 +4,14 @@ from importlib.metadata import version
 
 from duckpd._executor import CommitReport, MaterializationReport, ProfileResult
 from duckpd._merging import merge_asof
+from duckpd.embeddings import (
+    EmbeddedQuery,
+    EmbeddingModelSpec,
+    FastEmbedProvider,
+    PreparedModelInfo,
+    TextEmbeddingProvider,
+    embedding_model,
+)
 from duckpd.errors import ConcurrentModificationError, MergeError
 from duckpd.featurestore import FeatureStore, SyncReport
 from duckpd.frame import DataFrame
@@ -28,19 +36,25 @@ __all__ = [
     "ConcurrentModificationError",
     "DataFrame",
     "DataFrameGroupBy",
+    "EmbeddedQuery",
+    "EmbeddingModelSpec",
+    "FastEmbedProvider",
     "FeatureStore",
     "MaterializationReport",
     "MergeError",
     "ObjectStoreSecret",
+    "PreparedModelInfo",
     "ProfileResult",
     "Series",
     "SeriesGroupBy",
     "Session",
     "SyncReport",
+    "TextEmbeddingProvider",
     "VectorIndexInfo",
     "__version__",
     "concat",
     "connect",
+    "embedding_model",
     "from_arrow",
     "from_pandas",
     "merge_asof",

@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from duckpd._typing import ScalarValue
+from duckpd.embeddings import EmbeddingColumnSpec, EmbeddingModelSpec, NullTextPolicy
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class Column:
     alias_of: ColumnId | None = None
     categorical: CategoricalSpec | None = None
     timezone: str | None = None
+    embedding: EmbeddingColumnSpec | None = None
 
 
 def sanitize_source_location(location: str) -> str:
@@ -724,6 +726,39 @@ class TopKPlan(LogicalPlanBase):
 
 
 @dataclass(frozen=True)
+class EmbeddingPlan(LogicalPlanBase):
+    """Row-preserving Arrow-batched text embedding projection."""
+
+    input: LogicalPlan
+    text_columns: tuple[ColumnId, ...]
+    output_column: Column
+    model: EmbeddingModelSpec
+    batch_size: int
+    separator: str
+    null_policy: NullTextPolicy
+    metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
+class SemanticSearchPlan(LogicalPlanBase):
+    """Exact text-query retrieval over persisted or transient embeddings."""
+
+    input: LogicalPlan
+    text_columns: tuple[ColumnId, ...]
+    vector_column: ColumnId | None
+    query_key: str
+    model: EmbeddingModelSpec
+    batch_size: int
+    separator: str
+    null_policy: NullTextPolicy
+    metric: VectorMetric
+    k: int
+    distance_column: Column
+    tie_breaker: ColumnId | None
+    metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
 class VectorSearchPlan(LogicalPlanBase):
     """Exact or verified-index nearest-neighbor retrieval."""
 
@@ -826,10 +861,12 @@ class SamplePlan(LogicalPlanBase):
 LogicalPlan: TypeAlias = (
     ScanPlan
     | FilterPlan
+    | EmbeddingPlan
     | ProjectPlan
     | SortPlan
     | TopKPlan
     | VectorSearchPlan
+    | SemanticSearchPlan
     | LimitPlan
     | AggregatePlan
     | JoinPlan

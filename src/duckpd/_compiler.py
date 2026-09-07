@@ -23,6 +23,7 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     CsvSource,
+    EmbeddingPlan,
     Expression,
     FeatureParquetSource,
     FilterPlan,
@@ -40,6 +41,7 @@ from duckpd._logical import (
     RemoteTableSource,
     SamplePlan,
     ScanPlan,
+    SemanticSearchPlan,
     SortDirection,
     SortKey,
     SortPlan,
@@ -187,6 +189,10 @@ class DuckDBCompiler:
             return self._compile_loc_index(plan)
         if isinstance(plan, VectorSearchPlan):
             return self._compile_vector_search(plan)
+        if isinstance(plan, EmbeddingPlan):
+            return self._compile_embedding(plan)
+        if isinstance(plan, SemanticSearchPlan):
+            return self._compile_semantic_search(plan)
 
         compiled_input = self._compile(plan.input)
         if isinstance(plan, FilterPlan):
@@ -427,6 +433,108 @@ class DuckDBCompiler:
             ),
         )
         return duckdb.CaseExpression(invalid, error).otherwise(distance)
+
+    @staticmethod
+    def _embedding_text_expression(
+        plan: EmbeddingPlan | SemanticSearchPlan,
+        bindings: dict[ColumnId, str],
+    ) -> duckdb.Expression:
+        columns = [quote_identifier(bindings[column_id]) for column_id in plan.text_columns]
+        separator = quote_literal(plan.separator)
+        if plan.null_policy == "empty":
+            arguments = [f"coalesce({column}, '')" for column in columns]
+            return duckdb.SQLExpression(f"concat_ws({separator}, {', '.join(arguments)})")
+        nulls = " OR ".join(f"{column} IS NULL" for column in columns)
+        joined = f"concat_ws({separator}, {', '.join(columns)})"
+        return duckdb.SQLExpression(f"CASE WHEN {nulls} THEN NULL ELSE {joined} END")
+
+    def _compile_embedding(self, plan: EmbeddingPlan) -> CompiledFrame:
+        compiled = self._compile(plan.input)
+        udf_name = self._session._embedding_document_udf(plan)
+        text = self._embedding_text_expression(plan, compiled.bindings)
+        embedding = duckdb.FunctionExpression(udf_name, text).alias(plan.output_column.label)
+        projections = [
+            *(
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
+                    column.label
+                )
+                for column in plan.input.metadata.columns
+            ),
+            embedding,
+        ]
+        relation = compiled.relation.project(*projections)
+        return CompiledFrame(
+            relation,
+            {
+                **compiled.bindings,
+                plan.output_column.id: plan.output_column.label,
+            },
+        )
+
+    def _compile_semantic_search(self, plan: SemanticSearchPlan) -> CompiledFrame:
+        compiled = self._compile(plan.input)
+        if plan.vector_column is None:
+            udf_name = self._session._embedding_document_udf(plan)
+            text = self._embedding_text_expression(plan, compiled.bindings)
+            document = duckdb.FunctionExpression(udf_name, text)
+        else:
+            document = duckdb.SQLExpression(quote_identifier(compiled.bindings[plan.vector_column]))
+            vector_column = next(
+                column for column in plan.input.metadata.columns if column.id == plan.vector_column
+            )
+            if vector_column.duckdb_type.endswith("[]"):
+                document = document.cast(f"FLOAT[{plan.model.dimension}]")
+        query_udf = self._session._embedding_query_udf(plan.model)
+        query = duckdb.FunctionExpression(
+            query_udf,
+            duckdb.ConstantExpression(plan.query_key),
+        )
+        function = {
+            VectorMetric.COSINE: "array_cosine_distance",
+            VectorMetric.L2: "array_distance",
+            VectorMetric.INNER_PRODUCT: "array_negative_inner_product",
+        }[plan.metric]
+        distance = duckdb.FunctionExpression(function, document, query)
+        document_norm = duckdb.FunctionExpression("array_inner_product", document, document)
+        invalid = (
+            document.isnull()
+            | document_norm.isnull()
+            | ~duckdb.FunctionExpression("isfinite", document_norm)
+            | distance.isnull()
+            | ~duckdb.FunctionExpression("isfinite", distance)
+        )
+        checked = duckdb.CaseExpression(
+            invalid,
+            duckdb.FunctionExpression(
+                "error",
+                duckdb.ConstantExpression(
+                    "Semantic search requires finite, non-null vectors of matching dimension"
+                ),
+            ),
+        ).otherwise(distance)
+        projections = [
+            *(
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
+                    column.label
+                )
+                for column in plan.input.metadata.columns
+            ),
+            checked.alias(plan.distance_column.label),
+        ]
+        relation = compiled.relation.project(*projections)
+        sort_keys = [duckdb.ColumnExpression(plan.distance_column.label).asc().nulls_last()]
+        if plan.tie_breaker is not None:
+            sort_keys.append(
+                duckdb.ColumnExpression(compiled.bindings[plan.tie_breaker]).asc().nulls_last()
+            )
+        relation = relation.sort(*sort_keys).limit(plan.k)
+        return CompiledFrame(
+            relation,
+            {
+                **compiled.bindings,
+                plan.distance_column.id: plan.distance_column.label,
+            },
+        )
 
     def _compile_vector_search(self, plan: VectorSearchPlan) -> CompiledFrame:
         if (

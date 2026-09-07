@@ -1,35 +1,67 @@
-"""Run exact vector retrieval as one lazy, composable DuckPD plan."""
+"""Search a real remote stock-news archive with streaming text embeddings."""
 
 from __future__ import annotations
 
+from pathlib import Path
+from time import perf_counter
+
 import duckpd as pd
+
+DATA_URL = "https://huggingface.co/datasets/AlphaDojo/dojo_stock_news/resolve/main/data.parquet"
+EMBEDDED_DATA = Path("nvidia-news-embedded.parquet")
+QUERY = "AI chip demand and revenue growth"
+MODEL = pd.embedding_model(
+    "BAAI/bge-small-en-v1.5",
+    revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    dimension=384,
+)
 
 
 def main() -> None:
     with pd.connect() as session:
-        documents = session.sql(
-            """
-            SELECT * FROM (VALUES
-                (1, 'earnings', [1.0, 0.0, 0.0]::FLOAT[3]),
-                (2, 'earnings', [0.8, 0.2, 0.0]::FLOAT[3]),
-                (3, 'macro', [0.0, 1.0, 0.0]::FLOAT[3]),
-                (4, 'macro', [-1.0, 0.0, 0.0]::FLOAT[3])
-            ) documents(document_id, topic, embedding)
-            """
-        )
-        eligible = documents[documents["topic"] == "earnings"]
-        matches = eligible.vector.search(
-            [1.0, 0.0, 0.0],
-            column="embedding",
-            metric="cosine",
-            k=2,
-            tie_breaker="document_id",
-        )
+        preparation_started = perf_counter()
+        prepared = session.prepare_embedding_model(MODEL)
+        preparation_seconds = perf_counter() - preparation_started
 
-        print(f"Executions after planning: {session.execution_count}")
-        print(matches.explain("logical"))
-        print(matches.collect().to_string(index=False))
-        print(f"Executions after collection: {session.execution_count}")
+        if EMBEDDED_DATA.exists():
+            embedded = session.read_parquet(EMBEDDED_DATA)
+            dataset_status = f"loaded {EMBEDDED_DATA}"
+        else:
+            build_started = perf_counter()
+            news = session.read_parquet(DATA_URL)
+            nvidia = news[news["symbol"] == "NVDA"]
+            embedded = nvidia.embed_text(
+                columns=["title", "description"],
+                into="embedding",
+                model=MODEL,
+                batch_size=64,
+                null_policy="empty"
+            )
+            embedded.write_parquet(EMBEDDED_DATA)
+            build_seconds = perf_counter() - build_started
+            dataset_status = (
+                f"created {EMBEDDED_DATA} from {DATA_URL} in {build_seconds:.3f} seconds"
+            )
+        query_started = perf_counter()
+        matches = embedded.vector.search_text(
+            QUERY,
+            column="embedding",
+            model=MODEL,
+            metric="cosine",
+            k=5,
+            tie_breaker="title",
+        )[["symbol", "title", "publisher", "publish_date", "_distance"]]
+        result = matches.collect()
+        query_seconds = perf_counter() - query_started
+
+        print(f"Embedding dataset: {dataset_status}")
+        print(f"Model: {MODEL.model}@{MODEL.revision}")
+        print(f"Backend: {prepared.backend} via {prepared.execution_providers}")
+        print(f"Model preparation: {preparation_seconds:.3f} seconds")
+        print(f"Query: {QUERY!r}")
+        print(result.to_string(index=False))
+        print(f"Query-to-response: {query_seconds:.3f} seconds")
+        print(f"Persisted model fingerprint: {MODEL.fingerprint}")
 
 
 if __name__ == "__main__":

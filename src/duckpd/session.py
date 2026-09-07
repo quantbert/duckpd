@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+from glob import glob
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -25,6 +29,9 @@ from duckpd._logical import (
     Column,
     ColumnRef,
     CsvSource,
+    EmbeddingPlan,
+    FrameMetadata,
+    LogicalPlan,
     NullPlacement,
     OrderColumn,
     OrderSpec,
@@ -33,6 +40,7 @@ from duckpd._logical import (
     RemoteTableSource,
     RowIdentity,
     ScanPlan,
+    SemanticSearchPlan,
     SortDirection,
     SortKey,
     SortPlan,
@@ -47,6 +55,16 @@ from duckpd._logical import (
 from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
 from duckpd._quoting import quote_identifier, quote_literal
 from duckpd._typing import ScalarValue
+from duckpd.embeddings import (
+    EmbeddedQuery,
+    EmbeddingColumnSpec,
+    EmbeddingModelSpec,
+    FastEmbedProvider,
+    PreparedModelInfo,
+    TextEmbeddingProvider,
+    _make_fixed_array,
+    _validate_embedding_array,
+)
 from duckpd.errors import (
     RemoteAttachmentError,
     SessionClosedError,
@@ -56,12 +74,11 @@ from duckpd.errors import (
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
 
-    ArrowUDF = Callable[
-        ...,
-        pa.Table | pa.Array[Any] | pa.ChunkedArray[Any],
-    ]
+    ArrowUDFResult = pa.Table | pa.Array[Any] | pa.ChunkedArray[Any]
+    ArrowUDF = Callable[..., ArrowUDFResult]
 else:
-    ArrowUDF = Callable[..., object]
+    ArrowUDFResult = object
+    ArrowUDF = Callable[..., ArrowUDFResult]
 
 
 @dataclass(frozen=True)
@@ -220,6 +237,14 @@ class Session:
         self._attachments: dict[str, _RemoteAttachmentState] = {}
         self._object_store_secrets: dict[str, _ObjectStoreSecretState] = {}
         self._vector_indexes: dict[str, VectorIndexInfo] = {}
+        self._embedding_providers: dict[str, TextEmbeddingProvider] = {}
+        self._embedding_metrics: dict[str, int | float] = {}
+        self._embedding_progress_callbacks: dict[str, Callable[[int], object]] = {}
+        self._prepared_embedding_models: dict[str, PreparedModelInfo] = {}
+        self._embedding_udfs: dict[str, str] = {}
+        self._embedding_queries: dict[str, tuple[str, str]] = {}
+        self._embedded_queries: dict[str, EmbeddedQuery] = {}
+        self._table_embedding_specs: dict[tuple[str, str], object] = {}
         self._last_materialization_report: MaterializationReport | None = None
         self._closed = False
         self._execution_count = 0
@@ -245,6 +270,189 @@ class Session:
     def last_materialization_report(self) -> MaterializationReport | None:
         """Metrics for the latest explicit bounded materialization."""
         return self._last_materialization_report
+
+    def register_embedding_provider(
+        self,
+        model: EmbeddingModelSpec,
+        provider: TextEmbeddingProvider,
+    ) -> None:
+        """Register a session-owned provider without preparing or running it."""
+        self._ensure_open()
+        if provider.specification != model:
+            raise ValueError("provider specification does not match the requested model")
+        self._embedding_providers[model.fingerprint] = provider
+
+    def prepare_embedding_model(
+        self,
+        model: EmbeddingModelSpec,
+        *,
+        cache_dir: str | Path | None = None,
+    ) -> PreparedModelInfo:
+        """Eagerly prepare and verify one local embedding model."""
+        self._ensure_open()
+        provider = self._embedding_providers.get(model.fingerprint)
+        if provider is None:
+            if model.backend != "fastembed":
+                raise UnsupportedOperationError(
+                    "Custom embedding models require register_embedding_provider()"
+                )
+            provider = FastEmbedProvider(model, cache_dir=cache_dir)
+            self._embedding_providers[model.fingerprint] = provider
+        self._begin_execution()
+        started = perf_counter()
+        info = provider.prepare()
+        elapsed = perf_counter() - started
+        info = replace(info, preparation_seconds=elapsed)
+        self._embedding_metrics["preparation_seconds"] = elapsed
+        if info.model_fingerprint != model.fingerprint:
+            raise UnsupportedOperationError("Prepared provider returned a mismatched fingerprint")
+        self._prepared_embedding_models[model.fingerprint] = info
+        return info
+
+    def inspect_prepared_embedding_models(self) -> tuple[PreparedModelInfo, ...]:
+        """Return verified embedding models available to this session."""
+        self._ensure_open()
+        return tuple(
+            self._prepared_embedding_models[key] for key in sorted(self._prepared_embedding_models)
+        )
+
+    def embed_query(
+        self,
+        text: str,
+        *,
+        model: EmbeddingModelSpec,
+    ) -> EmbeddedQuery:
+        """Eagerly embed one query with a prepared, fingerprinted model."""
+        self._ensure_open()
+        if not text:
+            raise ValueError("text must be a non-empty string")
+        provider = self._embedding_provider(model)
+        self._begin_execution()
+        started = perf_counter()
+        embedded = provider.embed_query(text)
+        self._embedding_metrics["query_inference_seconds"] = perf_counter() - started
+        if embedded.model_fingerprint != model.fingerprint:
+            raise ValueError("Embedding provider returned a mismatched query fingerprint")
+        _validate_embedding_array(
+            _make_fixed_array([embedded.values], model.dimension),
+            model,
+            expected_rows=1,
+        )
+        return embedded
+
+    def _embedding_provider(self, model: EmbeddingModelSpec) -> TextEmbeddingProvider:
+        provider = self._embedding_providers.get(model.fingerprint)
+        if provider is None or model.fingerprint not in self._prepared_embedding_models:
+            raise UnsupportedOperationError(
+                "Embedding model is not prepared; call session.prepare_embedding_model(model)"
+            )
+        return provider
+
+    def _register_embedding_query(self, model: EmbeddingModelSpec, query: str) -> str:
+        if not query:
+            raise ValueError("query must be a non-empty string")
+        key = uuid4().hex
+        self._embedding_queries[key] = (model.fingerprint, query)
+        return key
+
+    def _write_embedding_manifest(self, plan: LogicalPlan, path: str) -> None:
+        specs = {
+            column.label: asdict(column.embedding.model)
+            for column in plan.metadata.visible_columns
+            if column.embedding is not None
+        }
+        manifest = Path(f"{path}.duckpd-embeddings.json")
+        if not specs:
+            manifest.unlink(missing_ok=True)
+            return
+        staging = manifest.with_suffix(f"{manifest.suffix}.tmp-{uuid4().hex}")
+        staging.write_text(json.dumps({"version": 1, "columns": specs}, sort_keys=True))
+        os.replace(staging, manifest)
+
+    def _restore_parquet_embedding_metadata(
+        self,
+        plan: LogicalPlan,
+        paths: tuple[str, ...],
+    ) -> LogicalPlan:
+        local_paths: list[str] = []
+        for path in paths:
+            if "://" in path:
+                return plan
+            matches = sorted(glob(path, recursive=True))
+            local_paths.extend(matches or [path])
+        manifests = [Path(f"{path}.duckpd-embeddings.json") for path in local_paths]
+        if not manifests or any(not manifest.is_file() for manifest in manifests):
+            return plan
+        try:
+            manifest_columns = [
+                cast(
+                    "dict[str, dict[str, object]]",
+                    cast("dict[str, object]", json.loads(manifest.read_text()))["columns"],
+                )
+                for manifest in manifests
+            ]
+            raw_columns = manifest_columns[0]
+            if any(columns != raw_columns for columns in manifest_columns[1:]):
+                raise ValueError("embedding manifests disagree")
+            columns = tuple(
+                replace(
+                    column,
+                    embedding=EmbeddingColumnSpec(
+                        EmbeddingModelSpec(**raw_columns[column.label])  # type: ignore[arg-type]
+                    ),
+                )
+                if column.label in raw_columns
+                else column
+                for column in plan.metadata.columns
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise UnsupportedOperationError(
+                "Invalid or inconsistent DuckPD embedding metadata manifests"
+            ) from None
+        return replace(plan, metadata=replace(plan.metadata, columns=columns))
+
+    def _register_table_embeddings(
+        self,
+        name: str,
+        metadata: FrameMetadata,
+        *,
+        mode: Literal["error", "overwrite", "append"] = "overwrite",
+    ) -> None:
+        incoming = {
+            column.label: column.embedding
+            for column in metadata.visible_columns
+            if column.embedding is not None
+        }
+        existing = {
+            label: spec
+            for (table, label), spec in self._table_embedding_specs.items()
+            if table == name
+        }
+        if mode == "append" and existing != incoming:
+            raise ValueError("Appended embedding columns must have matching model metadata")
+        if mode != "append":
+            for key in tuple(self._table_embedding_specs):
+                if key[0] == name:
+                    del self._table_embedding_specs[key]
+        for label, spec in incoming.items():
+            self._table_embedding_specs[(name, label)] = spec
+
+    def _restore_table_embedding_metadata(
+        self,
+        name: str,
+        plan: LogicalPlan,
+    ) -> LogicalPlan:
+        columns = tuple(
+            replace(
+                column,
+                embedding=cast(
+                    "EmbeddingColumnSpec | None",
+                    self._table_embedding_specs.get((name, column.label)),
+                ),
+            )
+            for column in plan.metadata.columns
+        )
+        return replace(plan, metadata=replace(plan.metadata, columns=columns))
 
     def create_vector_index(
         self,
@@ -445,6 +653,126 @@ class Session:
             return self._arrow_udfs[name.casefold()]
         except KeyError:
             raise KeyError(f"Arrow UDF {name!r} is not registered in this session") from None
+
+    def _embedding_document_udf(
+        self,
+        plan: EmbeddingPlan | SemanticSearchPlan,
+    ) -> str:
+        key = self._embedding_document_key(plan)
+        existing = self._embedding_udfs.get(key)
+        if existing is not None:
+            return existing
+        provider = self._embedding_provider(plan.model)
+        name = f"__duckpd_embed_documents_{key}"
+
+        def run(array: object) -> ArrowUDFResult:
+            chunk = cast("pa.ChunkedArray[Any]", array)
+            values = cast("list[str | None]", chunk.to_pylist())
+            texts: list[str] = []
+            for value in values:
+                if value is None:
+                    if plan.null_policy == "error":
+                        raise ValueError("Text embedding encountered a null input value")
+                    texts.append("")
+                else:
+                    texts.append(value)
+            row_count = len(texts)
+            chunks: list[pa.Array[Any]] = []
+            for offset in range(0, row_count, plan.batch_size):
+                batch_texts = texts[offset : offset + plan.batch_size]
+                started = perf_counter()
+                output = provider.embed_documents(batch_texts)
+                elapsed = perf_counter() - started
+                validated = _validate_embedding_array(
+                    output,
+                    plan.model,
+                    expected_rows=len(batch_texts),
+                )
+                chunks.append(validated)
+                callback = self._embedding_progress_callbacks.get(key)
+                if callback is not None:
+                    callback(len(batch_texts))
+                self._embedding_metrics["document_batches"] = (
+                    int(self._embedding_metrics.get("document_batches", 0)) + 1
+                )
+                self._embedding_metrics["document_rows"] = int(
+                    self._embedding_metrics.get("document_rows", 0)
+                ) + len(batch_texts)
+                self._embedding_metrics["text_bytes"] = int(
+                    self._embedding_metrics.get("text_bytes", 0)
+                ) + sum(len(text.encode()) for text in batch_texts)
+                self._embedding_metrics["inference_seconds"] = (
+                    float(self._embedding_metrics.get("inference_seconds", 0.0)) + elapsed
+                )
+            if not chunks:
+                return _make_fixed_array([], plan.model.dimension)
+            return pa.concat_arrays(chunks)
+
+        self.register_arrow_udf(
+            name,
+            run,
+            ["VARCHAR"],
+            f"FLOAT[{plan.model.dimension}]",
+            null_handling="special",
+        )
+        self._embedding_udfs[key] = name
+        return name
+
+    @staticmethod
+    def _embedding_document_key(plan: EmbeddingPlan | SemanticSearchPlan) -> str:
+        operation = (
+            str(plan.output_column.id.value) if isinstance(plan, EmbeddingPlan) else plan.query_key
+        )
+        config = f"{operation}:{plan.model.fingerprint}:{plan.separator}:{plan.null_policy}"
+        return hashlib.sha256(config.encode()).hexdigest()[:24]
+
+    def _embedding_query_udf(self, model: EmbeddingModelSpec) -> str:
+        key = f"query:{model.fingerprint}"
+        existing = self._embedding_udfs.get(key)
+        if existing is not None:
+            return existing
+        provider = self._embedding_provider(model)
+        name = f"__duckpd_embed_query_{model.fingerprint[:24]}"
+
+        def run(keys: object) -> ArrowUDFResult:
+            key_array = cast("pa.ChunkedArray[Any]", keys)
+            rows: list[list[float]] = []
+            for raw_key in cast("list[str | None]", key_array.to_pylist()):
+                if raw_key is None:
+                    raise ValueError("Embedding query key must not be null")
+                try:
+                    fingerprint, text = self._embedding_queries[raw_key]
+                except KeyError:
+                    raise ValueError("Embedding query is not registered in this session") from None
+                if fingerprint != model.fingerprint:
+                    raise ValueError("Embedding query model fingerprint mismatch")
+                embedded = self._embedded_queries.get(raw_key)
+                if embedded is None:
+                    started = perf_counter()
+                    embedded = provider.embed_query(text)
+                    self._embedding_metrics["query_inference_seconds"] = (
+                        float(self._embedding_metrics.get("query_inference_seconds", 0.0))
+                        + perf_counter()
+                        - started
+                    )
+                    if embedded.model_fingerprint != model.fingerprint:
+                        raise ValueError(
+                            "Embedding provider returned a mismatched query fingerprint"
+                        )
+                    self._embedded_queries[raw_key] = embedded
+                rows.append(list(embedded.values))
+            output = _make_fixed_array(rows, model.dimension)
+            return _validate_embedding_array(output, model, expected_rows=len(rows))
+
+        self.register_arrow_udf(
+            name,
+            run,
+            ["VARCHAR"],
+            f"FLOAT[{model.dimension}]",
+            null_handling="special",
+        )
+        self._embedding_udfs[key] = name
+        return name
 
     def from_pandas(
         self,
@@ -702,6 +1030,7 @@ class Session:
             raise RemoteAttachmentError(
                 f"Failed to inspect remote Parquet source ({type(error).__name__})"
             ) from None
+        plan = self._restore_parquet_embedding_metadata(plan, paths)
         return DataFrame(self, plan)
 
     def read_csv(
@@ -1083,6 +1412,7 @@ class Session:
             raise ValueError("unbounded_scan applies only to attached remote tables")
         source = TableSource(name)
         plan = self._source_plan(source, index=index, order_by=order_by)
+        plan = self._restore_table_embedding_metadata(name, plan)
         return DataFrame(self, plan)
 
     def sql(

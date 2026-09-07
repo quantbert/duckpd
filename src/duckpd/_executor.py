@@ -9,7 +9,8 @@ import shutil
 import sys
 import tempfile
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from functools import wraps
@@ -23,6 +24,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from tqdm.auto import tqdm
 
 from duckpd._logical import (
     NON_SPILLABLE_AGGREGATE_NAMES,
@@ -33,6 +35,7 @@ from duckpd._logical import (
     CastExpression,
     ColumnId,
     ColumnRef,
+    EmbeddingPlan,
     Expression,
     FeatureParquetSource,
     FilterPlan,
@@ -48,6 +51,7 @@ from duckpd._logical import (
     RemoteTableSource,
     SamplePlan,
     ScanPlan,
+    SemanticSearchPlan,
     SortKey,
     SortPlan,
     SourceCapabilities,
@@ -164,6 +168,8 @@ class ProfileResult:
     optimization: dict[str, Any] | None = None
     fallback_boundaries: tuple[dict[str, object], ...] = ()
     materialization_boundaries: tuple[dict[str, object], ...] = ()
+    embedding_metrics: dict[str, int | float] | None = None
+    embedding_operations: tuple[dict[str, object], ...] = ()
     vector_operations: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -182,6 +188,8 @@ class ProfileResult:
                 "fallback_policy": "error",
                 "fallback_boundaries": list(self.fallback_boundaries),
                 "materialization_boundaries": list(self.materialization_boundaries),
+                "embedding_metrics": self.embedding_metrics,
+                "embedding_operations": list(self.embedding_operations),
                 "vector_operations": list(self.vector_operations),
             },
         }
@@ -268,8 +276,24 @@ def _execution_context(
             *args: _P.args,
             **kwargs: _P.kwargs,
         ) -> _R:
+            progress = (
+                self._show_embedding_progress(plan)
+                if operation
+                in {
+                    "collect",
+                    "to_arrow",
+                    "write_parquet",
+                    "write_csv",
+                    "persist",
+                    "save_as_table",
+                    "commit",
+                    "profile",
+                }
+                else nullcontext()
+            )
             try:
-                return function(self, plan, *args, **kwargs)
+                with progress:
+                    return function(self, plan, *args, **kwargs)
             except duckdb.Error:
                 provenance = plan.metadata.provenance
                 locations = tuple(
@@ -309,7 +333,9 @@ def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
             AggregatePlan,
             SamplePlan,
             LocIndexPlan,
+            EmbeddingPlan,
             VectorSearchPlan,
+            SemanticSearchPlan,
         ),
     ):
         yield from _plan_nodes(plan.input)
@@ -399,10 +425,67 @@ def _vector_operations(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
     return tuple(operations)
 
 
+def _embedding_operations(
+    plan: LogicalPlan,
+    prepared_models: frozenset[str] = frozenset(),
+) -> tuple[dict[str, object], ...]:
+    operations: list[dict[str, object]] = []
+    for node in _plan_nodes(plan):
+        if isinstance(node, EmbeddingPlan):
+            operations.append(
+                {
+                    "operation": "embed_text",
+                    "backend": node.model.backend,
+                    "model_fingerprint": node.model.fingerprint,
+                    "dimension": node.model.dimension,
+                    "normalize": node.model.normalize,
+                    "model_prepared": node.model.fingerprint in prepared_models,
+                    "batch_size": node.batch_size,
+                    "null_policy": node.null_policy,
+                    "text_columns": [
+                        column.label
+                        for column in node.input.metadata.columns
+                        if column.id in node.text_columns
+                    ],
+                    "boundary": "arrow_embedding_provider",
+                    "persistence": "lazy",
+                }
+            )
+        elif isinstance(node, SemanticSearchPlan):
+            operations.append(
+                {
+                    "operation": "search_text"
+                    if node.vector_column is not None
+                    else "semantic_search",
+                    "backend": node.model.backend,
+                    "model_fingerprint": node.model.fingerprint,
+                    "dimension": node.model.dimension,
+                    "normalize": node.model.normalize,
+                    "model_prepared": node.model.fingerprint in prepared_models,
+                    "batch_size": node.batch_size,
+                    "null_policy": node.null_policy,
+                    "filter_placement": (
+                        "before_search" if isinstance(node.input, FilterPlan) else "none"
+                    ),
+                    "strategy": "persisted_exact"
+                    if node.vector_column is not None
+                    else "transient_streaming_exact",
+                    "k": node.k,
+                    "repeated_document_inference": node.vector_column is None,
+                    "query": "<redacted>",
+                    "boundary": "arrow_embedding_provider",
+                }
+            )
+    return tuple(operations)
+
+
 def _redact_plan_text(text: str, plan: LogicalPlan) -> str:
     """Remove credentials and query parameters from engine plan text."""
     for location in plan.metadata.provenance.locations:
         text = text.replace(location, sanitize_source_location(location))
+    for node in _plan_nodes(plan):
+        if isinstance(node, SemanticSearchPlan):
+            text = text.replace(node.query_key, "<redacted-query>")
     return text
 
 
@@ -453,12 +536,12 @@ def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
                     return None
                 total_rows += pq.ParquetFile(path).metadata.num_rows
             return total_rows
-        if isinstance(node, (FilterPlan, ProjectPlan, SortPlan)):
+        if isinstance(node, (FilterPlan, ProjectPlan, SortPlan, EmbeddingPlan)):
             return row_upper_bound(node.input)
         if isinstance(node, (LimitPlan, TopKPlan)):
             input_rows = row_upper_bound(node.input)
             return None if input_rows is None else min(input_rows, node.count)
-        if isinstance(node, VectorSearchPlan):
+        if isinstance(node, (VectorSearchPlan, SemanticSearchPlan)):
             input_rows = row_upper_bound(node.input)
             return None if input_rows is None else min(input_rows, node.k)
         if isinstance(node, AggregatePlan):
@@ -603,7 +686,10 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
             operations.add(SourceOperation.LIMIT)
         elif isinstance(node, TopKPlan):
             operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
-        elif isinstance(node, VectorSearchPlan):
+        elif isinstance(node, EmbeddingPlan):
+            operations.add(SourceOperation.PROJECTION)
+            blocked_operations.add(SourceOperation.PROJECTION)
+        elif isinstance(node, (VectorSearchPlan, SemanticSearchPlan)):
             operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
             blocked_operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
         elif isinstance(node, SortPlan):
@@ -738,6 +824,38 @@ class Executor:
     def __init__(self, session: Session, compiler: DuckDBCompiler) -> None:
         self._session = session
         self._compiler = compiler
+
+    @contextmanager
+    def _show_embedding_progress(self, plan: LogicalPlan) -> Generator[None, None, None]:
+        embedding_plans = [node for node in _plan_nodes(plan) if isinstance(node, EmbeddingPlan)]
+        if not embedding_plans:
+            yield
+            return
+
+        previous_callbacks = self._session._embedding_progress_callbacks
+        callbacks = dict(previous_callbacks)
+        bars: list[Any] = []
+        try:
+            for embedding_plan in embedding_plans:
+                compiled_input = self._compiler.compile(embedding_plan.input)
+                count_row = compiled_input.relation.count("*").fetchone()
+                if count_row is None:
+                    raise MaterializationError("Failed to count text embedding input")
+                bar = tqdm(
+                    total=int(cast("int", count_row[0])),
+                    desc="Embedding text",
+                    unit="documents",
+                    dynamic_ncols=True,
+                )
+                bars.append(bar)
+                key = self._session._embedding_document_key(embedding_plan)
+                callbacks[key] = bar.update
+            self._session._embedding_progress_callbacks = callbacks
+            yield
+        finally:
+            self._session._embedding_progress_callbacks = previous_callbacks
+            for bar in reversed(bars):
+                bar.close()
 
     @_execution_context("collect")
     def collect(self, plan: LogicalPlan) -> pd.DataFrame:
@@ -957,11 +1075,21 @@ class Executor:
         self._validate_execution(plan)
         compiled = self._compiler.compile(plan)
         self._session._begin_execution()
-        self._compiler.project_visible(compiled, plan).relation.write_parquet(
-            path,
-            compression=compression,
-            overwrite=overwrite,
-        )
+        target = Path(path)
+        if target.exists() and not overwrite:
+            raise FileExistsError(f"Parquet destination already exists: {path}")
+        staging = target.with_name(f".duckpd_staging_{target.name}_{uuid4().hex}")
+        try:
+            self._compiler.project_visible(compiled, plan).relation.write_parquet(
+                str(staging),
+                compression=compression,
+                overwrite=False,
+            )
+            os.replace(staging, target)
+        except BaseException:
+            staging.unlink(missing_ok=True)
+            raise
+        self._session._write_embedding_manifest(plan, path)
 
     @_execution_context("write_csv")
     def write_csv(
@@ -1114,6 +1242,8 @@ class Executor:
                     LimitPlan,
                     TopKPlan,
                     VectorSearchPlan,
+                    EmbeddingPlan,
+                    SemanticSearchPlan,
                     AggregatePlan,
                     SamplePlan,
                     LocIndexPlan,
@@ -1339,6 +1469,10 @@ class Executor:
         )
         movement_plans = _movement_plans(optimization.plan)
         vector_operations = _vector_operations(plan)
+        embedding_operations = _embedding_operations(
+            plan,
+            frozenset(self._session._prepared_embedding_models),
+        )
         resource_policy = {
             "non_spillable_aggregate_states": "error",
             "rejected": sorted(NON_SPILLABLE_AGGREGATE_NAMES),
@@ -1350,7 +1484,8 @@ class Executor:
             f"Source fragments: {json.dumps(source_fragments, sort_keys=True)}\n"
             f"Cross-source movement: {json.dumps(movement_plans, sort_keys=True)}\n"
             f"Resource policy: {json.dumps(resource_policy, sort_keys=True)}\n"
-            f"Vector operations: {json.dumps(vector_operations, sort_keys=True)}"
+            f"Vector operations: {json.dumps(vector_operations, sort_keys=True)}\n"
+            f"Embedding operations: {json.dumps(embedding_operations, sort_keys=True)}"
         )
         if mode == "logical":
             return f"{boundaries}\nDuckPD logical plan:\n{logical}"
@@ -1371,6 +1506,10 @@ class Executor:
                 cast("dict[str, object]", payload["execution_boundaries"])["vector_operations"] = (
                     list(vector_operations)
                 )
+            if embedding_operations:
+                cast("dict[str, object]", payload["execution_boundaries"])[
+                    "embedding_operations"
+                ] = list(embedding_operations)
             return json.dumps(payload, indent=2)
         if mode == "analyze":
             self._validate_execution(optimization.plan)
@@ -1431,6 +1570,8 @@ class Executor:
             AsOfJoinPlan,
             LocIndexPlan,
             VectorSearchPlan,
+            EmbeddingPlan,
+            SemanticSearchPlan,
         )
         blocking = tuple(
             dict.fromkeys(type(node).__name__ for node in nodes if isinstance(node, blocking_types))
@@ -1470,6 +1611,25 @@ class Executor:
     @_execution_context("profile")
     def profile(self, plan: LogicalPlan) -> ProfileResult:
         """Execute plan and separate planning from engine execution time."""
+        self._session._embedding_metrics = {}
+        embedding_models = {
+            node.model.fingerprint
+            for node in _plan_nodes(plan)
+            if isinstance(node, (EmbeddingPlan, SemanticSearchPlan))
+        }
+        prepared = [
+            self._session._prepared_embedding_models[fingerprint]
+            for fingerprint in embedding_models
+            if fingerprint in self._session._prepared_embedding_models
+        ]
+        if prepared:
+            self._session._embedding_metrics.update(
+                {
+                    "prepared_models": len(prepared),
+                    "preparation_seconds": sum(model.preparation_seconds for model in prepared),
+                    "provider_retries": 0,
+                }
+            )
         self._validate_execution(plan)
         con = self._session._connection
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
@@ -1499,6 +1659,15 @@ class Executor:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
 
+        embedding_metrics = dict(self._session._embedding_metrics)
+        inference_seconds = float(embedding_metrics.get("inference_seconds", 0.0))
+        if inference_seconds > 0:
+            embedding_metrics["document_rows_per_second"] = (
+                int(embedding_metrics.get("document_rows", 0)) / inference_seconds
+            )
+        if "document_rows" in embedding_metrics:
+            embedding_metrics["source_rows"] = int(embedding_metrics["document_rows"])
+
         return ProfileResult(
             latency=float(raw_data.get("latency") or 0.0),
             cpu_time=float(raw_data.get("cpu_time") or 0.0),
@@ -1520,6 +1689,11 @@ class Executor:
             movement_plans=_movement_plans(optimization.plan),
             measured_transfer_bytes=None,
             vector_operations=_vector_operations(plan),
+            embedding_metrics=embedding_metrics or None,
+            embedding_operations=_embedding_operations(
+                plan,
+                frozenset(self._session._prepared_embedding_models),
+            ),
         )
 
     def reduce_scalar(self, plan: LogicalPlan) -> object:
@@ -1659,6 +1833,8 @@ class Executor:
                 SortPlan,
                 TopKPlan,
                 VectorSearchPlan,
+                EmbeddingPlan,
+                SemanticSearchPlan,
                 LimitPlan,
                 AggregatePlan,
             ),

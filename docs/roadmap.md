@@ -811,6 +811,84 @@ Exit gate:
       indexed physical plan, and its recall, memory, persistence, and
       reproducibility limits are documented with benchmark evidence.
 
+### Phase 14: text embeddings and semantic search
+
+Goal: make text-to-vector generation a typed DuckPD operation with bounded
+Arrow-batch execution, reusable persisted embeddings, and an explicit
+transient-search path, while keeping model runtimes optional.
+
+- [x] Define immutable `EmbeddingModelSpec`, `EmbeddedQuery`, prepared-model
+      metadata, and `TextEmbeddingProvider` contracts with stable fingerprints.
+- [x] Require model revisions or artifact digests, declared dimensions,
+      normalization, pooling, and query/document prefixes without planning-time
+      model downloads or inference.
+- [x] Qualify one pinned local ONNX embedding backend behind an optional
+      `duckpd[embeddings]` extra; prove the core installation gains no required
+      model-runtime dependency.
+- [x] Add explicit eager model preparation with verified artifacts, atomic cache
+      promotion, cache inspection, and actionable missing-backend failures
+      before source execution.
+- [x] Associate embedding specifications with vector `ColumnId` metadata and
+      define preservation or invalidation through projection, rename,
+      replacement, arithmetic, joins, and concatenation.
+- [x] Add a typed, row-preserving `EmbeddingPlan` carrying text columns, output
+      column, model fingerprint, batch size, separator, and null policy.
+- [x] Add lazy `DataFrame.embed_text(...)` producing a non-nullable
+      `FLOAT[dimension]` column without pandas materialization.
+- [x] Execute corpus embedding as a bounded Arrow pipeline with backpressure,
+      cancellation, final-partial-batch handling, and per-batch validation of
+      row count, type, dimension, finiteness, normalization, and cosine norms.
+- [x] Preserve input order and row identity across embedding, reject row-dropping
+      null policies, and cover empty text, null components, empty inputs, and
+      provider failures explicitly.
+- [x] Stream embedded output directly to atomic Parquet and DuckDB-table sinks,
+      persisting recoverable model metadata for single-file, multi-file, and
+      table round trips.
+- [x] Add eager single-query embedding and lazy
+      `DataFrame.vector.search_text(...)`, rejecting missing or mismatched
+      embedding fingerprints before vector retrieval.
+- [x] Add a typed `SemanticSearchPlan` and lazy
+      `DataFrame.semantic.search(...)` that embeds the query once, streams
+      eligible documents, and retains an exact bounded top-k without persisting
+      the corpus.
+- [x] Make transient semantic search exact-only, preserve filter-before-top-k
+      semantics, deterministic tie-breaking, and ordinary downstream DataFrame
+      composition.
+- [x] Extend `explain()` with the embedding boundary, backend fingerprint,
+      dimension, normalization, batch size, null policy, filter placement,
+      persistence state, and repeated-inference warning.
+- [x] Extend `profile()` with source rows and text bytes, inference batches,
+      tokens when cheaply available, preparation and inference time, throughput,
+      peak RSS/device memory, sink bytes, and provider retries.
+- [x] Redact document text, query text, credentials, hosted endpoints, cache
+      secrets, and mutable model locations from plans, profiles, and errors.
+- [x] Differential-test transient top-k against persisted embeddings plus exact
+      `vector.search()` for supported metrics, filters, ties, empty inputs, and
+      deterministic ordering.
+- [x] Prove lazy embedding and semantic search compose with projection, joins,
+      grouping, Arrow streaming, Parquet scans, DuckDB tables, and direct sinks
+      across cancellation and atomic-failure cleanup.
+- [x] Benchmark the pinned local backend across text-length distributions,
+      batch sizes, and candidate counts, recording rows/tokens per second, wall
+      time, peak RSS, output size, direct-provider parity, and repeated-query
+      cost before selecting defaults.
+- [x] Replace the stock-news demo's hand-built keyword vectors with the public
+      embedding API and document the persistent and transient workflows.
+- [x] Update API documentation, compatibility data, changelog, and optional
+      dependency installation guidance.
+- [x] Defer hosted providers, GPU qualification, automatic caches and refresh,
+      hybrid retrieval, reranking, quantization, sparse embeddings, and
+      distributed inference until the local exact contracts are stable.
+
+Exit gate:
+
+- [x] A remote Parquet corpus can be embedded through a bounded, lazy pipeline
+      into a reusable `FLOAT[n]` dataset whose model identity survives reload;
+      planning performs no download, inference, or source execution.
+- [x] Persisted `search_text()` and transient `semantic.search()` match the exact
+      vector oracle, preserve prefilter semantics, expose inference cost and
+      boundaries, fail safely, and add no required dependency to core DuckPD.
+
 ### Beta exit portability gate
 
 Windows-specific release validation is intentionally deferred until DuckPD is
@@ -901,6 +979,8 @@ decomposed into independently testable milestones below.
         execution and expose the strict policy in explain output.
 27. [x] Add native vector search and analytical retrieval through the
       dependency-lean exact-first milestones in Phase 13.
+28. [x] Add optional, streaming text embeddings and exact semantic search
+        through the model-safe milestones in Phase 14.
 
 ### Completed Linux-beta workstreams
 

@@ -245,6 +245,42 @@
       "since": "0.1.5",
       "status": "subset",
       "notes": "Exact search is dependency-free and lazy. Approximate search requires a session-owned in-memory HNSW index and a verified HNSW_INDEX_SCAN."
+    },
+    {
+      "method": "DuckPD DataFrame.embed_text",
+      "arguments": "text columns, output label, immutable model, batch size, separator, null policy",
+      "dtypes": "VARCHAR inputs to non-nullable FLOAT[n]",
+      "ordering": "preserved",
+      "since": "0.1.5",
+      "status": "supported",
+      "notes": "DuckPD-native optional Arrow-batched inference with automatic materialization progress; not exposed through the Narwhals protocol."
+    },
+    {
+      "method": "DuckPD DataFrame.vector.search_text",
+      "arguments": "query text, embedding column, matching model, metric, positive k, tie_breaker",
+      "dtypes": "metadata-verified FLOAT[n]",
+      "ordering": "distance ascending; optional tie-breaker ascending",
+      "since": "0.1.5",
+      "status": "supported",
+      "notes": "Embeds one query eagerly within lazy execution and runs exact retrieval; not exposed through the Narwhals protocol."
+    },
+    {
+      "method": "DuckPD DataFrame.semantic.search",
+      "arguments": "query text, text columns, model, metric, positive k, batch size, null policy, tie_breaker",
+      "dtypes": "VARCHAR inputs with transient FLOAT[n] inference",
+      "ordering": "distance ascending; optional tie-breaker ascending",
+      "since": "0.1.5",
+      "status": "supported",
+      "notes": "Exact transient retrieval recomputes candidate embeddings on every execution; not exposed through the Narwhals protocol."
+    },
+    {
+      "method": "DuckPD Session.prepare_embedding_model / embed_query",
+      "arguments": "immutable model specification and optional cache directory; query text",
+      "dtypes": "EmbeddedQuery carries FLOAT[n] values and model fingerprint",
+      "ordering": "not applicable",
+      "since": "0.1.5",
+      "status": "supported",
+      "notes": "Explicit eager preparation/query inference behind the optional embeddings extra; core DuckPD has no model-runtime dependency."
     }
   ]
 }

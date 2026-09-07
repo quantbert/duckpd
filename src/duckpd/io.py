@@ -328,6 +328,13 @@ def concat(
             and all(column.timezone == first_timezone for column in source_columns)
             else None
         )
+        first_embedding = source_columns[0].embedding
+        embedding = (
+            first_embedding
+            if first_embedding is not None
+            and all(column.embedding == first_embedding for column in source_columns)
+            else None
+        )
         output_columns.append(
             Column(
                 ColumnId.create(),
@@ -336,6 +343,7 @@ def concat(
                 hidden=False,
                 categorical=categorical,
                 timezone=timezone,
+                embedding=embedding,
             )
         )
     output_columns.extend(hidden_index_cols)

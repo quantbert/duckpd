@@ -41,6 +41,16 @@ the [release policy](RELEASES.md).
   `HNSW_INDEX_SCAN` plus the expected index name before execution.
 - Reproducible exhaustive/direct-DuckDB and optional HNSW benchmark tracks, plus
   a runnable exact vector-search example.
+- Immutable embedding model/provider/query contracts, explicit verified local
+  model preparation, and an optional `duckpd[embeddings]` FastEmbed/ONNX CPU
+  backend with no new core runtime dependency.
+- Lazy Arrow-batched `DataFrame.embed_text()`, eager `Session.embed_query()`,
+  metadata-verified `DataFrame.vector.search_text()`, and exact transient
+  `DataFrame.semantic.search()` with null, shape, finiteness, normalization,
+  filter-placement, and deterministic tie-break contracts.
+- Recoverable embedding metadata for atomic Parquet and DuckDB-table sinks,
+  embedding explain/profile metrics with query redaction, a local-backend
+  benchmark track, and an end-to-end remote stock-news semantic search demo.
 
 ### Changed
 
@@ -52,6 +62,9 @@ the [release policy](RELEASES.md).
   external-project comparisons.
 - Pandas and Arrow snapshots are registered as session-owned DuckDB views so
   composed native ASOF SQL remains parseable without materializing input rows.
+- Text embedding materialization now displays progress automatically;
+  applications no longer manage `tqdm`, row counts, provider decorators, or
+  provider replacement lifecycles.
 
 ## 0.1.4 - 2026-09-06
 

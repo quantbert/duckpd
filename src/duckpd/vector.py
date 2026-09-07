@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, Literal, cast
 from duckpd._logical import (
     Column,
     ColumnId,
+    FrameMetadata,
     Nullability,
+    SemanticSearchPlan,
     VectorDistanceExpression,
     VectorExecutionMode,
     VectorMetric,
@@ -23,6 +25,7 @@ from duckpd._reductions import expression_type
 from duckpd.errors import UnsupportedOperationError
 
 if TYPE_CHECKING:
+    from duckpd.embeddings import EmbeddingModelSpec
     from duckpd.frame import DataFrame
     from duckpd.series import Series
 
@@ -156,11 +159,109 @@ class VectorMethods:
         )
 
 
+def _search_metadata(
+    frame: DataFrame,
+    *,
+    metric: str,
+    k: int,
+    distance_column: str,
+    tie_breaker: str | None,
+    distance_type: str = "FLOAT",
+) -> tuple[VectorMetric, Column, Column | None, FrameMetadata]:
+    if type(k) is not int or k <= 0:
+        raise ValueError("k must be a positive integer")
+    if not distance_column:
+        raise ValueError("distance_column must be a non-empty string label")
+    if distance_column in frame.columns:
+        raise ValueError(f"distance column {distance_column!r} already exists")
+    vector_metric = _metric(metric)
+    tie_column = None
+    if tie_breaker is not None:
+        tie_column = find_column(frame._plan.metadata, tie_breaker)
+        tie_type = tie_column.duckdb_type.upper()
+        if "[" in tie_type or not tie_type.startswith(_ORDERABLE_PREFIXES):
+            raise UnsupportedOperationError(
+                f"tie_breaker column {tie_breaker!r} is not orderable: {tie_column.duckdb_type}"
+            )
+    distance = Column(
+        ColumnId.create(),
+        distance_column,
+        distance_type,
+        nullable=Nullability.NON_NULL,
+    )
+    metadata = after_vector_search(frame._plan.metadata, distance, tie_breaker=tie_column)
+    return vector_metric, distance, tie_column, metadata
+
+
 class VectorFrameMethods:
     """Lazy nearest-neighbor retrieval for a DataFrame."""
 
     def __init__(self, frame: DataFrame) -> None:
         self._frame = frame
+
+    def search_text(
+        self,
+        query: str,
+        *,
+        column: str,
+        model: EmbeddingModelSpec,
+        metric: VectorMetricName = "cosine",
+        k: int = 10,
+        batch_size: int = 256,
+        distance_column: str = "_distance",
+        tie_breaker: str | None = None,
+    ) -> DataFrame:
+        """Lazily embed one text query against a verified embedding column."""
+        from duckpd.embeddings import _embedding_settings
+        from duckpd.frame import DataFrame
+
+        if not query:
+            raise ValueError("query must be a non-empty string")
+        vector_column = find_column(self._frame._plan.metadata, column)
+        _, dimension = _vector_type(vector_column.duckdb_type)
+        if dimension is not None and dimension != model.dimension:
+            raise ValueError(
+                f"model dimension {model.dimension} does not match column dimension {dimension}"
+            )
+        if (
+            vector_column.embedding is None
+            or vector_column.embedding.fingerprint != model.fingerprint
+        ):
+            raise UnsupportedOperationError(
+                "search_text requires embedding metadata matching the requested model"
+            )
+        settings = _embedding_settings(
+            self._frame,
+            model=model,
+            batch_size=batch_size,
+            separator="",
+            null_policy="error",
+            output_label=None,
+        )
+        query_key = self._frame._session._register_embedding_query(model, query)
+        vector_metric, distance, tie_column, metadata = _search_metadata(
+            self._frame,
+            metric=metric,
+            k=k,
+            distance_column=distance_column,
+            tie_breaker=tie_breaker,
+        )
+        plan = SemanticSearchPlan(
+            self._frame._plan,
+            (),
+            vector_column.id,
+            query_key,
+            model,
+            settings.batch_size,
+            settings.separator,
+            settings.null_policy,
+            vector_metric,
+            k,
+            distance,
+            tie_column.id if tie_column is not None else None,
+            metadata,
+        )
+        return DataFrame(self._frame._session, plan)
 
     def search(
         self,

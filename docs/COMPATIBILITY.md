@@ -268,9 +268,36 @@ indexes, and `mode=\"auto\"`. DuckDB documents HNSW memory as outside
 `memory_limit`; DuckPD makes no spill, recall, or cross-version reproducibility
 guarantee for this experimental path.
 
+## 10. Native Text Embeddings
+
+Text embedding is DuckPD-native and optional; it is not part of the pandas or
+Narwhals protocol. The core package does not depend on a model runtime.
+
+| Method | Classification | Parameters | Execution | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `embedding_model()` | **`[DuckPD Native]`** | immutable revision, dimension, backend, normalization, pooling, prefixes | Planning only | Produces a stable model fingerprint without downloading metadata. |
+| `Session.prepare_embedding_model()` | **`[DuckPD Native]`** | model and optional cache directory | Eager | Downloads only when explicitly called; verifies the local artifact digest and reports the CPU execution provider. |
+| `Session.embed_query()` | **`[DuckPD Native]`** | text and prepared model | Eager | Returns an immutable `EmbeddedQuery` carrying its model fingerprint. |
+| `DataFrame.embed_text()` | **`[DuckPD Native]`** | text columns, output label, model, batch size, separator, null policy | Lazy | Row-preserving Arrow-batched inference with automatic materialization progress; appends non-nullable `FLOAT[n]` and supports direct Parquet/table sinks. |
+| `DataFrame.vector.search_text()` | **`[DuckPD Native]`** | text, persisted embedding column, matching model, metric, `k`, tie-breaker | Lazy | Exact search; rejects missing or mismatched embedding metadata before execution. |
+| `DataFrame.semantic.search()` | **`[DuckPD Native]`** | text, source text columns, model, metric, `k`, batch size, null policy, tie-breaker | Lazy | Exact transient top-k. Every execution recomputes candidate document embeddings. |
+
+Embedding metadata survives supported projection, rename, row-wise concatenation,
+single-file Parquet manifests, and session-owned DuckDB table round trips.
+Replacing or calculating an embedding column clears its model identity.
+`null_policy="error"` aborts on null components; `"empty"` substitutes empty
+strings without dropping rows. Provider row count, fixed dimension, float32
+type, finiteness, and requested normalization are checked per batch.
+
+Install the qualified local FastEmbed/ONNX CPU backend with
+`uv add "duckpd[embeddings]"`. Hosted providers, GPU execution, hybrid
+retrieval, reranking, quantized/sparse vectors, automatic refresh, and
+distributed inference remain deferred.
+
 ---
 
-## 10. Narwhals Interoperability
+
+## 11. Narwhals Interoperability
 
 DuckPD ships an experimental
 [Narwhals plugin](https://narwhals-dev.github.io/narwhals/extending/).

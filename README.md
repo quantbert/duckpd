@@ -25,6 +25,7 @@ DuckPD is a lazy, out-of-core DataFrame library with a familiar pandas-shaped AP
 * **🛡️ Zero Silent Fallbacks:** If an operation is unsupported or ordering is ambiguous, DuckPD fails explicitly before query execution. Your dataset will never be silently materialized into in-memory pandas.
 * **🔌 Native Narwhals Lazy Backend:** Drop DuckPD directly into modern visualization and machine learning libraries (Plotly, Altair, etc.) via `nw.from_native(df)` for zero-copy, lazy DuckDB execution.
 * **🔍 Deep Observability:** Inspect physical plans, optimizer pushdown, operator timings, peak RSS, and DuckDB spill metrics with `df.explain()`, `df.explain_write()`, and `df.profile()`.
+* **Typed Semantic Retrieval:** Stream text through an optional pinned local ONNX model, persist verified `FLOAT[n]` embeddings, or run exact transient semantic top-k without pandas materialization.
 
 ---
 
@@ -191,7 +192,48 @@ See the
 Benchmark cold remote fetching against warm local-cache execution with
 `uv run python -m benchmark.featurestore --help`.
 
+## Text Embeddings and Semantic Search
+
+Install the optional local CPU backend, prepare a pinned model explicitly, then
+choose reusable corpus embeddings or transient exact search:
+
+```bash
+uv add "duckpd[embeddings]"
+```
+
+```python
+model = pd.embedding_model(
+    "BAAI/bge-small-en-v1.5",
+    revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    dimension=384,
+)
+
+with pd.connect() as session:
+    session.prepare_embedding_model(model)
+    news = session.read_parquet("https://example.com/news.parquet")
+
+    embedded = news.embed_text(
+        columns=["title", "description"],
+        into="embedding",
+        model=model,
+    )
+    embedded.write_parquet("news-embedded.parquet")
+
+    matches = news.semantic.search(
+        "AI chip demand and revenue growth",
+        columns=["title", "description"],
+        model=model,
+        k=10,
+    )
+```
+
+Planning remains side-effect free. Model preparation is eager and cache-verified;
+execution validates every Arrow batch against the declared dimension,
+normalization, and model fingerprint. See
+[`docs/design/text-embeddings.md`](docs/design/text-embeddings.md).
+
 ---
+
 
 ## 🌐 One Lazy DataFrame, Many Sources
 
