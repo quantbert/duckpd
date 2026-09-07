@@ -1,0 +1,1 @@
+{"columns": {"embedding": {"backend": "fastembed", "dimension": 384, "document_prefix": "", "model": "BAAI/bge-small-en-v1.5", "normalize": true, "pooling": "model-default", "query_prefix": "", "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"}}, "version": 1}
