@@ -747,7 +747,7 @@ product contract must remain explicitly unsupported and fail before execution.
 
 Exit gate:
 
-- [ ] The documented Linux-beta matrix is fully tested, examples run in CI,
+- [x] The documented Linux-beta matrix is fully tested, examples run in CI,
       package artifacts install cleanly on supported Linux/Python combinations,
       and unsupported behavior is explicit.
 

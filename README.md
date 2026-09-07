@@ -43,17 +43,14 @@ prices = pd.read_parquet(
     order_by=["date", "ticker"],
 )
 
-# Fixed-duration windows use the ordered timestamp column directly
-weekly_price_means = prices.rolling("7D", on="date").mean(numeric_only=True)
-
-# 1. Grouped rolling indicators computed per ticker (aligned to source rows)
+# Add grouped rolling indicators per ticker
 features = prices.assign(
     return_pct=lambda df: df.groupby("ticker")["close"].pct_change(),
     fast_ma=lambda df: df.groupby("ticker")["close"].rolling(20).mean(),
     slow_ma=lambda df: df.groupby("ticker")["close"].rolling(50).mean(),
 ).assign(ma_cross=lambda df: df["fast_ma"] > df["slow_ma"])
 
-# 2. Groupby aggregations per ticker
+# Aggregate the resulting features per ticker
 ticker_summary = (
     features.groupby("ticker", as_index=False)
     .agg(
