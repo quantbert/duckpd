@@ -35,6 +35,7 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
   covering hidden row identity, honest ordering guarantees, lazy `.loc`, and session isolation.
 - [Project directives and relational architecture](decisions/0003-directives-and-architecture.md) — foundational
   engineering principles, execution invariants, and compiler layer boundaries.
+- [Native DuckDB compiler decision](decisions/0004-retain-native-duckdb-compiler.md) — bounded Ibis substrate comparison and the decision to retain one DuckPD-owned IR and compiler.
 - [Feature Store architecture](design/featurestore-architecture.md) — implemented
   catalog, point-in-time alignment, and partition-cache design.
 

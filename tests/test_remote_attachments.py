@@ -56,6 +56,7 @@ class _FakeConnection:
         self.queries: list[tuple[str, tuple[object, ...]]] = []
         self.installed: list[str] = []
         self.loaded: list[str] = []
+        self.registered: dict[str, object] = {}
         self.closed = False
         self._fail_attach = fail_attach
         self._fail_inspect = fail_inspect
@@ -98,6 +99,13 @@ class _FakeConnection:
             [str(column) for column in value.columns],
             ["BIGINT"] * len(value.columns),
         )
+
+    def register(self, name: str, value: object) -> None:
+        self.registered[name] = value
+
+    def table(self, name: str) -> _FakeRelation:
+        value = self.registered[name]
+        return self.from_df(value) if isinstance(value, pd.DataFrame) else _FakeRelation()
 
     def create_function(self, *_args: object, **_kwargs: object) -> None:
         return None

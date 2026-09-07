@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, cast
 
 import duckdb
 import pandas as pd
-import pyarrow as pa
 
 from duckpd._logical import (
     AggregateExpression,
@@ -603,18 +602,9 @@ class DuckDBCompiler:
         include_native_order: bool = False,
     ) -> duckdb.DuckDBPyRelation:
         self._session._ensure_open()
-        if isinstance(source, PandasSource):
-            value = self._session._get_registered_source(source.key)
-            if not isinstance(value, pd.DataFrame):
-                msg = f"Registered source {source.key!r} is not a pandas DataFrame"
-                raise TypeError(msg)
-            return self._session._connection.from_df(value)
-        if isinstance(source, ArrowSource):
-            value = self._session._get_registered_source(source.key)
-            if not isinstance(value, (pa.Table, pa.RecordBatch)):
-                msg = f"Registered source {source.key!r} is not an Arrow table or batch"
-                raise TypeError(msg)
-            return self._session._connection.from_arrow(value)
+        if isinstance(source, (PandasSource, ArrowSource)):
+            self._session._get_registered_source(source.key)
+            return self._session._connection.table(f"__duckpd_source_{source.key}")
         if isinstance(source, RemoteTableSource):
             parts = [source.attachment]
             if source.schema is not None:
@@ -882,15 +872,16 @@ class DuckDBCompiler:
         right_relation = right_compiled.relation.project(*right_projection)
         conditions = [
             (
-                f"lhs.{quote_identifier(left_bindings[left_id])} = "
+                f"lhs.{quote_identifier(left_bindings[left_id])} IS NOT DISTINCT FROM "
                 f"rhs.{quote_identifier(right_bindings[right_id])}"
             )
             for left_id, right_id in zip(plan.left_keys, plan.right_keys, strict=True)
         ]
+        comparison = ">=" if plan.allow_exact_matches else ">"
         conditions.append(
-            f"lhs.{quote_identifier(left_bindings[plan.left_time])} >= "
+            f"lhs.{quote_identifier(left_bindings[plan.left_time])} {comparison} "
             f"rhs.{quote_identifier(right_bindings[plan.right_time])} "
-            f"+ INTERVAL {plan.delay_microseconds} MICROSECOND"
+            f"+ INTERVAL {plan.right_time_offset_microseconds} MICROSECOND"
         )
         joined = self._session._connection.sql(
             f"SELECT * FROM ({left_relation.sql_query()}) AS lhs "

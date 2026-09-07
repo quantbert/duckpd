@@ -102,6 +102,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `duckpd.from_pandas(df, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a snapshot into a session, tracking hidden source row identity. |
 | `duckpd.from_arrow(table, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with an appended hidden stable row identity column. |
 | `duckpd.concat(objs, ...)` | **`[Intentional Deviation]`** | `objs`, `axis=0\|1`, `join='outer'\|'inner'`, `ignore_index=False`, `sort=False` | Supports `axis=0` (row-wise union) and `axis=1` (column-wise concatenation). Axis 0 preserves matching categorical universes/order and timezone metadata. Axis 1 optimizes same-plan Series into a single projection and aligns multi-frame inputs via explicit index joins. Rejects duplicate column labels when `ignore_index=False`. |
+| `duckpd.merge_asof(left, right, ...)` | **`[Pandas-API Subset]`** | `on` or `left_on`/`right_on`; `by` or `left_by`/`right_by`; `suffixes`; `allow_exact_matches`; `direction='backward'` | `DataFrame` | Builds a typed lazy backward ASOF left join. Both timestamp keys must have identical dtypes/timezones and both frames must be ordered ascending by their timestamp key. Null timestamp keys fail at execution. `tolerance`, `forward`, and `nearest` are rejected before execution. |
 
 ---
 
@@ -293,11 +294,12 @@ Narwhals is an interoperability layer, not a new execution engine. It does not
 increase pandas compatibility, make unsupported DuckPD operations available,
 or guarantee that every Narwhals consumer works with the current adapter.
 The adapter supports only operations marked supported in the generated table,
-including the documented expression, relational, equi/cross join, schema,
-collection, and sink subsets. As-of/semi/anti joins, reshape operations, nested
-types, arbitrary Python `map_batches`, and public `backend="duckpd"` scans are
-explicit exclusions. For the scan workaround, use a DuckPD reader and pass the
-result to `narwhals.from_native()`; this remains lazy.
+including the documented expression, relational, equi/cross join, backward
+as-of join, schema, collection, and sink subsets. Forward/nearest as-of joins,
+semi/anti joins, reshape operations, nested types, arbitrary Python
+`map_batches`, and public `backend="duckpd"` scans are explicit exclusions. For
+the scan workaround, use a DuckPD reader and pass the result to
+`narwhals.from_native()`; this remains lazy.
 
 
 ---
@@ -308,6 +310,8 @@ result to `narwhals.from_native()`; this remains lazy.
 * **Deterministic Tie-Breaking**: User sorts append row identity only as a final tie-breaker. SQL and table scans remain unordered unless callers establish an order.
 * **Stable Identity Operations**: `drop_duplicates`, `rank(method="first")`, top-N ties, `groupby(sort=False)`, and grouped rolling alignment use stable row identity where available.
 * **Join Ordering Destruction**: Joins do not claim a total order, including with `sort=True`, because duplicate merge keys lack a stable tie-breaker. Ordering-sensitive follow-up operations must explicitly sort by enough columns to break ties.
+* **ASOF Join Ordering**: Backward as-of joins preserve the left frame's index, ordering, and row identity because each left row produces exactly one result. Both inputs must already be sorted ascending by their timestamp keys.
+* **Non-Spillable Aggregates**: `list` and `string_agg` are rejected before execution because their aggregate states can grow with result cardinality instead of remaining bounded or spillable. Logical, JSON, and write explanations expose this strict resource policy.
 * **Explicit Session Isolation**: Module-level helpers share a weak context-local implicit session. Explicit sessions created via `duckpd.connect(...)` remain isolated, configurable, and authoritative for resource management and cleanup.
 
 ---

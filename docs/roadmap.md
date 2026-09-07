@@ -396,9 +396,9 @@ Goal: support the most valuable analytical workflow with pandas semantics.
 - [x] Support categorical grouping with tested `observed=True/False` behavior;
       unused-category expansion currently covers one key with `sort=True` and
       `dropna=True`.
-- [ ] Before expanding the compiler manually, run the bounded Ibis substrate
-      spike defined in the competitive landscape guide and record an ADR with
-      generated SQL, semantic gaps, compile cost, and dependency tradeoffs.
+- [x] Run the bounded Ibis substrate spike defined in the competitive landscape
+      guide and record the decision to retain the native DuckDB compiler in ADR
+      0004, including SQL, semantic gaps, compile cost, and dependency tradeoffs.
 - [ ] Defer arbitrary `GroupBy.apply`.
 
 Exit gate:
@@ -520,10 +520,10 @@ Goal: make execution boundaries safe and explainable.
       separately reports optimizer and execution costs.
 - [x] Add `explain_write()` with strategy, estimated scan, blocking operators,
       ordering guarantees, spill configuration, and expected extra disk use.
-- [ ] Mark estimates as estimates and avoid executing full counts merely to
+- [x] Mark estimates as estimates and avoid executing full counts merely to
       populate an explanation.
-- [ ] Detect known non-spillable operations such as large `list` or
-      `string_agg` states and warn or reject under strict resource policy.
+- [x] Detect known non-spillable operations such as large `list` or
+      `string_agg` states and reject them under the strict resource policy.
 - [ ] Consider persisted stages when a plan contains several large blocking
       operators; require benchmark evidence before adding automatic staging.
 - [ ] Ensure errors include the DuckPD operation and plan context without
@@ -706,8 +706,8 @@ product contract must remain explicitly unsupported and fail before execution.
       type semantics are defined.
 - [x] Add compliant lazy group-by objects and aggregation dispatch, preserving
       DuckPD's explicit ordering and `drop_null_keys` behavior.
-- [x] Map supported equi-joins and cross joins; reject as-of, semi, anti, other
-      unsupported strategies, and ambiguous ordering before query execution.
+- [x] Map supported equi-joins, cross joins, and backward as-of joins; reject
+      forward/nearest as-of, semi, anti, and ambiguous ordering before execution.
 - [x] Return precise Narwhals schemas for decimal, timestamp/time-zone, duration,
       and common scalar DuckDB types; report intentionally unsupported nested
       list, array, struct, map, union, and enum types as `Unknown`.
@@ -827,6 +827,12 @@ decomposed into independently testable milestones below.
         backend-neutral source fragments, and explicit cross-source movement.
 23. [x] Harden documentation, benchmark I/O metrics, and immutable release
         metadata checks.
+24. [x] Run the bounded Ibis substrate spike and retain the native DuckDB
+        compiler based on measured semantic, latency, and dependency tradeoffs.
+25. [x] Expose typed backward `duckpd.merge_asof()` and Narwhals
+        `LazyFrame.join_asof()` without hidden collection.
+26. [x] Reject non-spillable `list` and `string_agg` aggregate states before
+        execution and expose the strict policy in explain output.
 
 ### Completed Linux-beta workstreams
 

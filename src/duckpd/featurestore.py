@@ -658,7 +658,8 @@ class FeatureStore:
                 right_time=right_columns[time_column].id,
                 left_keys=tuple(left_columns[key].id for key in series_keys),
                 right_keys=tuple(right_columns[key].id for key in series_keys),
-                delay_microseconds=delay_microseconds,
+                right_time_offset_microseconds=delay_microseconds,
+                allow_exact_matches=True,
                 metadata=metadata,
             )
             from duckpd.frame import DataFrame

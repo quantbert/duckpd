@@ -107,6 +107,10 @@ def test_explain_json_exports_rewrites_and_optimized_plan() -> None:
         "remote": [],
         "source_fragments": [],
         "movement": [],
+        "resource_policy": {
+            "non_spillable_aggregate_states": "error",
+            "rejected": ["list", "string_agg"],
+        },
     }
     assert [snapshot["name"] for snapshot in data["snapshots"]] == [
         "predicate_pushdown",

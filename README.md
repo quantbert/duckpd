@@ -283,6 +283,7 @@ DuckPD's core design philosophy is rooted in **correctness, transparency, and re
 
 For in-depth architectural specifications and design decisions:
 * [Core Project Directives & Relational Architecture](docs/decisions/0003-directives-and-architecture.md)
+* [Native DuckDB Compiler Decision](docs/decisions/0004-retain-native-duckdb-compiler.md)
 * [Ordering, Indexing & Session Contracts](docs/decisions/0002-order-index-session-contract.md)
 * [API Compatibility & Semantic Guide](docs/COMPATIBILITY.md)
 * [Narwhals Lazy-Frame Compliance Matrix](docs/NARWHALS_COMPATIBILITY.md)

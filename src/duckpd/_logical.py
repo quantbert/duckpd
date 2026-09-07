@@ -248,6 +248,9 @@ class AggregateOperator(Enum):
     ALL = "all"
 
 
+NON_SPILLABLE_AGGREGATE_NAMES = frozenset({"list", "string_agg"})
+
+
 @dataclass(frozen=True)
 class ColumnRef:
     """Reference a logical column by identity."""
@@ -716,7 +719,7 @@ class JoinPlan(LogicalPlanBase):
 
 @dataclass(frozen=True)
 class AsOfJoinPlan(LogicalPlanBase):
-    """Backward ASOF left join with an availability-delay predicate."""
+    """Backward ASOF left join with optional right-time availability offset."""
 
     left: LogicalPlan
     right: LogicalPlan
@@ -724,7 +727,8 @@ class AsOfJoinPlan(LogicalPlanBase):
     right_time: ColumnId
     left_keys: tuple[ColumnId, ...]
     right_keys: tuple[ColumnId, ...]
-    delay_microseconds: int
+    right_time_offset_microseconds: int
+    allow_exact_matches: bool
     metadata: FrameMetadata
 
 

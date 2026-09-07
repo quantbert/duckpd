@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 import pandas as pd
 
 from duckpd._logical import (
+    NON_SPILLABLE_AGGREGATE_NAMES,
     AggregateExpression,
     AggregateOperator,
     AggregatePlan,
@@ -285,7 +286,7 @@ class DataFrameGroupBy:
                 )
 
             func_lower = func_name.lower()
-            if func_lower in {"list", "string_agg"}:
+            if func_lower in NON_SPILLABLE_AGGREGATE_NAMES:
                 raise UnsupportedOperationError(
                     f"Aggregate {func_name!r} has an unbounded, non-spillable "
                     "state and is rejected by DuckPD's resource policy"

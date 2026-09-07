@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
 import duckpd
-from duckpd.errors import AlignmentError, MergeError, UnorderedOperationError
+from duckpd.errors import (
+    AlignmentError,
+    MergeError,
+    UnorderedOperationError,
+    UnsupportedOperationError,
+)
 
 MergeHow = Literal["left", "right", "outer", "inner", "cross"]
 
@@ -457,3 +462,133 @@ def test_nested_validation_reports_upstream_loc_error_first() -> None:
 
     with pytest.raises(KeyError, match="not in index"):
         merged.collect()
+
+
+def test_merge_asof_backward_matches_pandas_with_groups_and_duplicate_right_times() -> None:
+    left_pd = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]),
+            "group": ["a", "b", "a", "b"],
+            "left_value": [1, 2, 3, 4],
+        }
+    )
+    right_pd = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-04"]),
+            "group": ["a", "a", "b", "b"],
+            "right_value": [10, 11, 20, 40],
+        }
+    )
+    session = duckpd.connect()
+    left = session.from_pandas(left_pd, order_by="time")
+    right = session.from_pandas(right_pd, order_by="time")
+
+    result = duckpd.merge_asof(left, right, on="time", by="group")
+
+    assert session.execution_count == 0
+    assert result.ordering[0] == "time"
+    assert_frame_equal(
+        result.collect(),
+        pd.merge_asof(left_pd, right_pd, on="time", by="group"),
+    )
+
+
+def test_merge_asof_different_keys_suffixes_and_exact_match_policy() -> None:
+    left_pd = pd.DataFrame(
+        {
+            "left_time": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "left_group": ["a", "a"],
+            "value": [1, 2],
+        }
+    )
+    right_pd = pd.DataFrame(
+        {
+            "right_time": pd.to_datetime(["2024-01-01", "2024-01-03"]),
+            "right_group": ["a", "a"],
+            "value": [10, 30],
+        }
+    )
+    session = duckpd.connect()
+    result = duckpd.merge_asof(
+        session.from_pandas(left_pd, order_by="left_time"),
+        session.from_pandas(right_pd, order_by="right_time"),
+        left_on="left_time",
+        right_on="right_time",
+        left_by="left_group",
+        right_by="right_group",
+        suffixes=("_left", "_right"),
+        allow_exact_matches=False,
+    )
+
+    expected = pd.merge_asof(
+        left_pd,
+        right_pd,
+        left_on="left_time",
+        right_on="right_time",
+        left_by="left_group",
+        right_by="right_group",
+        suffixes=("_left", "_right"),
+        allow_exact_matches=False,
+    )
+    assert_frame_equal(result.collect(), expected)
+
+
+def test_merge_asof_rejects_unsupported_or_ambiguous_plans_before_execution() -> None:
+    values = pd.DataFrame({"time": pd.to_datetime(["2024-01-01"]), "value": [1]})
+    session = duckpd.connect()
+    ordered = session.from_pandas(values, order_by="time")
+    unordered = session.sql("SELECT TIMESTAMP '2024-01-01' AS time, 1 AS value")
+
+    with pytest.raises(UnsupportedOperationError, match="direction='backward'"):
+        duckpd.merge_asof(ordered, ordered, on="time", direction="nearest")
+    with pytest.raises(UnsupportedOperationError, match="tolerance"):
+        duckpd.merge_asof(ordered, ordered, on="time", tolerance="1D")
+    with pytest.raises(UnsupportedOperationError, match="sorted ascending"):
+        duckpd.merge_asof(unordered, ordered, on="time")
+    with pytest.raises(ValueError, match="Cannot pass on"):
+        duckpd.merge_asof(ordered, ordered, on="time", left_on="time")
+    with pytest.raises(TypeError, match="allow_exact_matches"):
+        duckpd.merge_asof(
+            ordered,
+            ordered,
+            on="time",
+            allow_exact_matches=cast("Any", 1),
+        )
+    with pytest.raises(ValueError, match="Must pass on"):
+        duckpd.merge_asof(ordered, ordered)
+    with pytest.raises(ValueError, match="Must pass both left_by"):
+        duckpd.merge_asof(ordered, ordered, on="time", left_by="value")
+    with pytest.raises(ValueError, match="Cannot pass by"):
+        duckpd.merge_asof(ordered, ordered, on="time", by="value", left_by="value")
+    numeric = session.from_pandas(
+        pd.DataFrame({"time": [1], "value": [1]}),
+        order_by="time",
+    )
+    with pytest.raises(ValueError, match="timestamp dtypes"):
+        duckpd.merge_asof(numeric, numeric, on="time")
+    with duckpd.connect() as other_session:
+        other = other_session.from_pandas(values, order_by="time")
+        with pytest.raises(AlignmentError, match="different sessions"):
+            duckpd.merge_asof(ordered, other, on="time")
+    with pytest.raises(TypeError, match=r"two duckpd\.DataFrame"):
+        duckpd.merge_asof(cast("Any", object()), ordered, on="time")
+    assert session.execution_count == 0
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_merge_asof_rejects_null_time_keys_at_execution(side: str) -> None:
+    valid = pd.DataFrame(
+        {"time": pd.Series(pd.to_datetime(["2024-01-01"])).astype("datetime64[us]")}
+    )
+    invalid = pd.DataFrame({"time": pd.Series([pd.NaT], dtype="datetime64[us]")})
+    session = duckpd.connect()
+    left_pd = invalid if side == "left" else valid
+    right_pd = invalid if side == "right" else valid
+    result = duckpd.merge_asof(
+        session.from_pandas(left_pd, order_by="time"),
+        session.from_pandas(right_pd, order_by="time"),
+        on="time",
+    )
+
+    with pytest.raises(ValueError, match=f"null values on {side} side"):
+        result.collect()

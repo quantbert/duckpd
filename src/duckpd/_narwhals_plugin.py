@@ -1115,9 +1115,30 @@ class DuckPDLazyFrame:
         strategy: str,
         suffix: str,
     ) -> DuckPDLazyFrame:
-        from duckpd.errors import UnsupportedOperationError
+        import duckpd
 
-        raise UnsupportedOperationError("DuckPD Narwhals as-of joins are not supported")
+        if strategy != "backward":
+            from duckpd.errors import UnsupportedOperationError
+
+            raise UnsupportedOperationError(
+                "DuckPD Narwhals as-of joins currently support only strategy='backward'"
+            )
+        matching_by = (
+            by_left is not None and by_right is not None and tuple(by_left) == tuple(by_right)
+        )
+        return self._with_native(
+            duckpd.merge_asof(
+                self._native_frame,
+                other.native,
+                left_on=left_on,
+                right_on=right_on,
+                by=list(by_left or ()) if matching_by else None,
+                left_by=None if matching_by else by_left,
+                right_by=None if matching_by else by_right,
+                suffixes=("", suffix),
+                direction="backward",
+            )
+        )
 
     def explode(self, columns: Sequence[str]) -> DuckPDLazyFrame:
         from duckpd.errors import UnsupportedOperationError

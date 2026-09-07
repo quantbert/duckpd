@@ -3,6 +3,7 @@
 from importlib.metadata import version
 
 from duckpd._executor import CommitReport, MaterializationReport, ProfileResult
+from duckpd._merging import merge_asof
 from duckpd.errors import ConcurrentModificationError, MergeError
 from duckpd.featurestore import FeatureStore, SyncReport
 from duckpd.frame import DataFrame
@@ -40,6 +41,7 @@ __all__ = [
     "connect",
     "from_arrow",
     "from_pandas",
+    "merge_asof",
     "read_csv",
     "read_parquet",
 ]

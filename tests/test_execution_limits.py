@@ -157,6 +157,12 @@ def test_explain_modes() -> None:
     assert "DuckPD logical plan:" in logical
     assert "Fallback boundaries: none (policy=error)" in logical
     assert "Materialization boundaries: none" in logical
+    assert 'Resource policy: {"non_spillable_aggregate_states": "error"' in logical
+    explained_json = json.loads(frame.explain(mode="json"))
+    assert explained_json["execution_boundaries"]["resource_policy"] == {
+        "non_spillable_aggregate_states": "error",
+        "rejected": ["list", "string_agg"],
+    }
     assert "DuckDB SQL:" not in logical
 
     sql = frame.explain(mode="sql")

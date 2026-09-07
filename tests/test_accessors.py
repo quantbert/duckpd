@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -111,14 +112,14 @@ def test_datetime_properties_match_pandas() -> None:
 def test_fixed_temporal_rounding_matches_pandas_at_negative_and_tied_instants() -> None:
     source = pd.DataFrame(
         {
-            "ts": pd.to_datetime(
+            "ts": pd.Series(
                 [
-                    "1969-12-31 23:29:59.999999999",
-                    "1970-01-01 00:30:00",
-                    "1970-01-01 01:30:00",
-                    None,
+                    pd.Timestamp("1969-12-31 23:29:59.999999999"),
+                    pd.Timestamp("1970-01-01 00:30:00"),
+                    pd.Timestamp("1970-01-01 01:30:00"),
+                    pd.NaT,
                 ],
-                format="mixed",
+                dtype="datetime64[ns]",
             )
         }
     )
@@ -133,9 +134,14 @@ def test_fixed_temporal_rounding_matches_pandas_at_negative_and_tied_instants() 
 def test_timezone_conversion_localization_and_utc_rounding_match_pandas() -> None:
     source = pd.DataFrame(
         {
-            "ts": pd.to_datetime(
-                ["2024-03-10 06:30Z", "2024-03-10 07:30Z", None],
-            ).tz_convert("America/New_York")
+            "ts": pd.Series(
+                [
+                    pd.Timestamp("2024-03-10 06:30", tz="UTC"),
+                    pd.Timestamp("2024-03-10 07:30", tz="UTC"),
+                    pd.NaT,
+                ],
+                dtype="datetime64[us, UTC]",
+            ).dt.tz_convert("America/New_York")
         }
     )
     frame = duckpd.from_pandas(source)
@@ -155,7 +161,9 @@ def test_timezone_conversion_localization_and_utc_rounding_match_pandas() -> Non
         source["ts"].dt.tz_localize(None),
     )
 
-    naive = pd.DataFrame({"ts": pd.to_datetime(["2024-01-01", None])})
+    naive = pd.DataFrame(
+        {"ts": pd.Series([pd.Timestamp("2024-01-01"), pd.NaT], dtype="datetime64[us]")}
+    )
     naive_frame = duckpd.from_pandas(naive)
     assert_series_equal(
         naive_frame["ts"].dt.tz_localize("UTC").collect(),
@@ -167,12 +175,25 @@ def test_temporal_arithmetic_and_duration_comparisons_match_pandas() -> None:
     source = pd.DataFrame(
         {
             "start": pd.Series(
-                pd.to_datetime(["2024-01-01 00:00", "2024-01-02 12:00", None])
-            ).dt.as_unit("us"),
+                [
+                    pd.Timestamp("2024-01-01 00:00"),
+                    pd.Timestamp("2024-01-02 12:00"),
+                    pd.NaT,
+                ],
+                dtype="datetime64[us]",
+            ),
             "end": pd.Series(
-                pd.to_datetime(["2024-01-01 01:30", "2024-01-03 12:00", None])
-            ).dt.as_unit("us"),
-            "duration": pd.Series(pd.to_timedelta(["90min", "1D", None])).dt.as_unit("us"),
+                [
+                    pd.Timestamp("2024-01-01 01:30"),
+                    pd.Timestamp("2024-01-03 12:00"),
+                    pd.NaT,
+                ],
+                dtype="datetime64[us]",
+            ),
+            "duration": pd.Series(
+                [pd.Timedelta("90min"), pd.Timedelta("1D"), pd.NaT],
+                dtype="timedelta64[us]",
+            ),
         }
     )
     frame = duckpd.from_pandas(source)
@@ -194,10 +215,15 @@ def test_temporal_arithmetic_and_duration_comparisons_match_pandas() -> None:
 def test_temporal_ambiguities_reject_before_execution() -> None:
     session = duckpd.connect()
     aware = pd.DataFrame(
-        {"ts": pd.to_datetime(["2024-03-10 06:30Z"]).tz_convert("America/New_York")}
+        {
+            "ts": pd.Series(
+                [pd.Timestamp("2024-03-10 06:30", tz="UTC")],
+                dtype="datetime64[ns, UTC]",
+            ).dt.tz_convert("America/New_York")
+        }
     )
     aware_frame = session.from_pandas(aware)
-    naive_frame = session.from_pandas(pd.DataFrame({"ts": pd.to_datetime(["2024-01-01"])}))
+    naive_frame = session.from_pandas(pd.DataFrame({"ts": pd.Series([pd.Timestamp("2024-01-01")])}))
 
     with pytest.raises(UnsupportedOperationError, match="tz_convert\\('UTC'\\)"):
         aware_frame["ts"].dt.floor("1h")
@@ -206,15 +232,24 @@ def test_temporal_ambiguities_reject_before_execution() -> None:
     with pytest.raises(TypeError, match="tz-naive"):
         naive_frame["ts"].dt.tz_convert("UTC")
     with pytest.raises(UnsupportedOperationError, match="Unsupported temporal"):
-        naive_frame["ts"] + 1
+        _ = naive_frame["ts"] + 1
 
     assert session.execution_count == 0
 
 
 def test_temporal_validation_boundaries_reject_during_planning() -> None:
     session = duckpd.connect()
-    naive = session.from_pandas(pd.DataFrame({"ts": pd.to_datetime(["2024-01-01"])}))
-    aware = session.from_pandas(pd.DataFrame({"ts": pd.to_datetime(["2024-01-01"], utc=True)}))
+    naive = session.from_pandas(pd.DataFrame({"ts": pd.Series([pd.Timestamp("2024-01-01")])}))
+    aware = session.from_pandas(
+        pd.DataFrame(
+            {
+                "ts": pd.Series(
+                    [pd.Timestamp("2024-01-01", tz="UTC")],
+                    dtype="datetime64[ns, UTC]",
+                )
+            }
+        )
+    )
     plain = session.from_pandas(pd.DataFrame({"value": ["x"]}))
 
     with pytest.raises(AttributeError, match="datetimelike"):
@@ -321,7 +356,7 @@ def test_categorical_accessor_and_identity_transforms_preserve_metadata() -> Non
     ordered = frame["kind"].cat.as_ordered()
     assert_series_equal(
         (ordered < "high").collect(),
-        source["kind"].cat.as_ordered() < "high",
+        cast("Any", source["kind"].cat.as_ordered()) < "high",
     )
     with pytest.raises(TypeError, match="Unordered Categoricals"):
         _ = frame["kind"] < "high"
@@ -337,7 +372,7 @@ def test_categorical_accessor_and_identity_transforms_preserve_metadata() -> Non
     numeric = duckpd.from_pandas(numeric_source)
     assert_series_equal(
         (numeric["kind"].cat.as_ordered() < 3).collect(),
-        numeric_source["kind"].cat.as_ordered() < 3,
+        cast("Any", numeric_source["kind"].cat.as_ordered()) < 3,
     )
     unordered = ordered.cat.as_unordered().collect()
     assert unordered.dtype == source["kind"].dtype

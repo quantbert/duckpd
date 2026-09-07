@@ -596,10 +596,40 @@ def test_narwhals_intentional_relational_exclusions_fail_early() -> None:
             lazy.explode("x")
         with pytest.raises(UnsupportedOperationError, match="typed plan"):
             lazy.unpivot(on=["x"])
-        with pytest.raises(UnsupportedOperationError, match="as-of"):
-            lazy.join_asof(lazy, on="x")
+        with pytest.raises(UnsupportedOperationError, match="strategy='backward'"):
+            lazy.join_asof(lazy, on="x", strategy="nearest")
 
         assert session.execution_count == 0
+
+
+def test_narwhals_backward_asof_join_is_lazy() -> None:
+    left_pd = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2024-01-01", "2024-01-03"]),
+            "group": ["a", "a"],
+            "left": [1, 2],
+        }
+    )
+    right_pd = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+            "group": ["a", "a"],
+            "right": [10, 20],
+        }
+    )
+    with duckpd.connect() as session:
+        left = nw.from_native(session.from_pandas(left_pd, order_by="time"))
+        right = nw.from_native(session.from_pandas(right_pd, order_by="time"))
+
+        joined = left.join_asof(right, on="time", by="group", strategy="backward")
+        result = _collect_once(joined, session).to_pydict()
+
+    assert result == {
+        "time": pd.to_datetime(["2024-01-01", "2024-01-03"]).to_list(),
+        "group": ["a", "a"],
+        "left": [1, 2],
+        "right": [10, 20],
+    }
 
 
 def test_narwhals_scalar_schema_conversion() -> None:

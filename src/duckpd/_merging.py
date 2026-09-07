@@ -4,24 +4,36 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from duckpd._logical import (
+    AsOfJoinPlan,
     Column,
     ColumnId,
     IndexUniqueness,
     JoinPlan,
     JoinType,
     Nullability,
+    SortDirection,
 )
-from duckpd._metadata import after_join, find_column
-from duckpd.errors import AlignmentError
+from duckpd._metadata import after_asof_join, after_join, find_column
+from duckpd.errors import AlignmentError, UnsupportedOperationError
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
 
 
 MergeHow = Literal["left", "right", "outer", "inner", "cross"]
+
+
+def _validate_suffixes(
+    suffixes: tuple[str | None, str | None],
+) -> tuple[str | None, str | None]:
+    if len(suffixes) != 2 or any(
+        suffix is not None and type(suffix) is not str for suffix in suffixes
+    ):
+        raise ValueError("suffixes must contain two strings or None")
+    return suffixes
 
 
 def validate_explicit_index_alignment(
@@ -93,11 +105,7 @@ def plan_merge(
         "cross": JoinType.CROSS,
     }[how]
 
-    if len(suffixes) != 2 or any(
-        suffix is not None and type(suffix) is not str for suffix in suffixes
-    ):
-        raise ValueError("suffixes must contain two strings or None")
-    lsuffix, rsuffix = suffixes
+    lsuffix, rsuffix = _validate_suffixes(suffixes)
 
     _valid_validate_values = {
         "1:1",
@@ -296,3 +304,203 @@ def plan_merge(
         sort=sort,
         validate=validate,
     )
+
+
+def _as_labels(value: str | Sequence[str] | None, *, parameter: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    labels = (value,) if isinstance(value, str) else cast("tuple[object, ...]", tuple(value))
+    if not labels or any(type(label) is not str or not label for label in labels):
+        raise ValueError(f"{parameter} must contain non-empty column names")
+    return cast("tuple[str, ...]", labels)
+
+
+def _require_asof_order(frame: DataFrame, time_column: Column, *, side: str) -> None:
+    ordering = frame._plan.metadata.ordering.keys
+    if (
+        not ordering
+        or ordering[0].column_id != time_column.id
+        or ordering[0].direction is not SortDirection.ASCENDING
+    ):
+        raise UnsupportedOperationError(
+            f"merge_asof requires the {side} frame to be sorted ascending by "
+            f"{time_column.label!r}; use sort_values({time_column.label!r})"
+        )
+
+
+def _asof_output_columns(
+    left_frame: DataFrame,
+    right_frame: DataFrame,
+    coalesced_right_ids: set[ColumnId],
+    suffixes: tuple[str | None, str | None],
+) -> tuple[Column, ...]:
+    lsuffix, rsuffix = _validate_suffixes(suffixes)
+    left_columns = list(left_frame._plan.metadata.columns)
+    right_columns = [
+        column
+        for column in right_frame._plan.metadata.visible_columns
+        if column.id not in coalesced_right_ids
+    ]
+    left_labels = {column.label for column in left_columns if not column.hidden}
+    right_labels = {column.label for column in right_columns}
+    overlaps = left_labels & right_labels
+    if overlaps and not lsuffix and not rsuffix:
+        raise ValueError(f"columns overlap but no suffix is specified: {sorted(overlaps)!r}")
+
+    output = [
+        replace(column, label=f"{column.label}{lsuffix or ''}")
+        if not column.hidden and column.label in overlaps
+        else column
+        for column in left_columns
+    ]
+    output.extend(
+        replace(
+            column,
+            label=f"{column.label}{rsuffix or ''}" if column.label in overlaps else column.label,
+            nullable=Nullability.NULLABLE,
+        )
+        for column in right_columns
+    )
+    labels = [column.label for column in output if not column.hidden]
+    duplicates = sorted(label for label in set(labels) if labels.count(label) > 1)
+    if duplicates:
+        raise ValueError(f"suffixes produce duplicate columns: {duplicates!r}")
+    return tuple(output)
+
+
+def plan_merge_asof(
+    left_frame: DataFrame,
+    right_frame: DataFrame,
+    *,
+    on: str | None = None,
+    left_on: str | None = None,
+    right_on: str | None = None,
+    by: str | Sequence[str] | None = None,
+    left_by: str | Sequence[str] | None = None,
+    right_by: str | Sequence[str] | None = None,
+    suffixes: tuple[str | None, str | None] = ("_x", "_y"),
+    tolerance: object | None = None,
+    allow_exact_matches: bool = True,
+    direction: Literal["backward", "forward", "nearest"] = "backward",
+) -> AsOfJoinPlan:
+    """Build the supported pandas-compatible backward ASOF join plan."""
+    if left_frame._session is not right_frame._session:
+        raise AlignmentError("Cannot merge frames from different sessions")
+    if direction != "backward":
+        raise UnsupportedOperationError(
+            "DuckPD merge_asof currently supports only direction='backward'"
+        )
+    if type(allow_exact_matches) is not bool:
+        raise TypeError("allow_exact_matches must be a bool")
+    if tolerance is not None:
+        raise UnsupportedOperationError("DuckPD merge_asof does not yet support tolerance")
+
+    if on is not None:
+        if left_on is not None or right_on is not None:
+            raise ValueError("Cannot pass on with left_on or right_on")
+        left_time_label = right_time_label = on
+    else:
+        if left_on is None or right_on is None:
+            raise ValueError("Must pass on or both left_on and right_on")
+        left_time_label = left_on
+        right_time_label = right_on
+    if not left_time_label or not right_time_label:
+        raise ValueError("merge_asof time keys must be non-empty column names")
+
+    if by is not None:
+        if left_by is not None or right_by is not None:
+            raise ValueError("Cannot pass by with left_by or right_by")
+        left_by_labels = right_by_labels = _as_labels(by, parameter="by")
+    else:
+        left_by_labels = _as_labels(left_by, parameter="left_by")
+        right_by_labels = _as_labels(right_by, parameter="right_by")
+        if bool(left_by_labels) != bool(right_by_labels):
+            raise ValueError("Must pass both left_by and right_by")
+    if len(left_by_labels) != len(right_by_labels):
+        raise ValueError("left_by and right_by must contain the same number of keys")
+
+    left_time = find_column(left_frame._plan.metadata, left_time_label)
+    right_time = find_column(right_frame._plan.metadata, right_time_label)
+    left_type = left_time.duckdb_type.upper()
+    right_type = right_time.duckdb_type.upper()
+    if not left_type.startswith("TIMESTAMP") or not right_type.startswith("TIMESTAMP"):
+        raise ValueError("merge_asof keys must have timestamp dtypes")
+    if left_type != right_type or left_time.timezone != right_time.timezone:
+        raise ValueError("merge_asof time keys must have identical timestamp dtypes and timezones")
+
+    left_keys = tuple(find_column(left_frame._plan.metadata, label) for label in left_by_labels)
+    right_keys = tuple(find_column(right_frame._plan.metadata, label) for label in right_by_labels)
+    for left_key, right_key in zip(left_keys, right_keys, strict=True):
+        if left_key.duckdb_type != right_key.duckdb_type:
+            raise ValueError(
+                f"incompatible merge_asof by-key dtypes for {left_key.label!r} "
+                f"and {right_key.label!r}"
+            )
+
+    _require_asof_order(left_frame, left_time, side="left")
+    _require_asof_order(right_frame, right_time, side="right")
+
+    coalesced_right_ids = {
+        right_column.id
+        for left_column, right_column in (
+            (left_time, right_time),
+            *zip(left_keys, right_keys, strict=True),
+        )
+        if left_column.label == right_column.label
+    }
+    columns = _asof_output_columns(
+        left_frame,
+        right_frame,
+        coalesced_right_ids,
+        suffixes,
+    )
+    return AsOfJoinPlan(
+        left=left_frame._plan,
+        right=right_frame._plan,
+        left_time=left_time.id,
+        right_time=right_time.id,
+        left_keys=tuple(column.id for column in left_keys),
+        right_keys=tuple(column.id for column in right_keys),
+        right_time_offset_microseconds=0,
+        allow_exact_matches=allow_exact_matches,
+        metadata=after_asof_join(left_frame._plan.metadata, columns),
+    )
+
+
+def merge_asof(
+    left: DataFrame,
+    right: DataFrame,
+    *,
+    on: str | None = None,
+    left_on: str | None = None,
+    right_on: str | None = None,
+    by: str | Sequence[str] | None = None,
+    left_by: str | Sequence[str] | None = None,
+    right_by: str | Sequence[str] | None = None,
+    suffixes: tuple[str | None, str | None] = ("_x", "_y"),
+    tolerance: object | None = None,
+    allow_exact_matches: bool = True,
+    direction: Literal["backward", "forward", "nearest"] = "backward",
+) -> DataFrame:
+    """Merge ordered frames by the latest matching right timestamp."""
+    from duckpd.frame import DataFrame
+
+    if not isinstance(cast("object", left), DataFrame) or not isinstance(
+        cast("object", right), DataFrame
+    ):
+        raise TypeError("merge_asof requires two duckpd.DataFrame objects")
+    plan = plan_merge_asof(
+        left,
+        right,
+        on=on,
+        left_on=left_on,
+        right_on=right_on,
+        by=by,
+        left_by=left_by,
+        right_by=right_by,
+        suffixes=suffixes,
+        tolerance=tolerance,
+        allow_exact_matches=allow_exact_matches,
+        direction=direction,
+    )
+    return DataFrame(left._session, plan)

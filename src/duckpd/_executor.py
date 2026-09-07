@@ -25,6 +25,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from duckpd._logical import (
+    NON_SPILLABLE_AGGREGATE_NAMES,
     AggregatePlan,
     AsOfJoinPlan,
     BinaryExpression,
@@ -1281,12 +1282,17 @@ class Executor:
             _fragment_to_dict(fragment) for fragment in _source_fragments(optimization.plan)
         )
         movement_plans = _movement_plans(optimization.plan)
+        resource_policy = {
+            "non_spillable_aggregate_states": "error",
+            "rejected": sorted(NON_SPILLABLE_AGGREGATE_NAMES),
+        }
         boundaries = (
             f"Fallback boundaries: {fallback_text} (policy=error)\n"
             "Materialization boundaries: none in the logical plan\n"
             f"Remote source boundaries: {remote_text}\n"
             f"Source fragments: {json.dumps(source_fragments, sort_keys=True)}\n"
-            f"Cross-source movement: {json.dumps(movement_plans, sort_keys=True)}"
+            f"Cross-source movement: {json.dumps(movement_plans, sort_keys=True)}\n"
+            f"Resource policy: {json.dumps(resource_policy, sort_keys=True)}"
         )
         if mode == "logical":
             return f"{boundaries}\nDuckPD logical plan:\n{logical}"
@@ -1301,6 +1307,7 @@ class Executor:
                 "remote": list(remote_boundaries),
                 "source_fragments": list(source_fragments),
                 "movement": list(movement_plans),
+                "resource_policy": resource_policy,
             }
             return json.dumps(payload, indent=2)
         if mode == "analyze":
@@ -1392,7 +1399,7 @@ class Executor:
             "(estimate from local file metadata; no row count executed)\n"
             f"Blocking operators: {blocking or ('none',)}\n"
             "Known non-spillable aggregate states: none; "
-            "list/string_agg are rejected before execution\n"
+            f"{'/'.join(sorted(NON_SPILLABLE_AGGREGATE_NAMES))} are rejected before execution\n"
             f"Expected extra disk use: {extra_disk} (estimate)\n"
             f"DuckDB physical plan:\n{physical}"
         )
@@ -1510,6 +1517,17 @@ class Executor:
             "duplicate timestamp peers are not supported"
         )
 
+    def _validate_asof_join(self, plan: AsOfJoinPlan) -> None:
+        """Reject null ASOF keys with pandas-compatible side-specific errors."""
+        for side, input_plan, column_id in (
+            ("left", plan.left, plan.left_time),
+            ("right", plan.right, plan.right_time),
+        ):
+            compiled = self._compiler.compile(input_plan)
+            label = quote_identifier(compiled.bindings[column_id])
+            if compiled.relation.filter(f"{label} IS NULL").limit(1).fetchone() is not None:
+                raise ValueError(f"Merge keys contain null values on {side} side")
+
     def _validate_execution(self, plan: LogicalPlan) -> None:
         if isinstance(plan, ScanPlan) and isinstance(plan.source, RemoteTableSource):
             source = plan.source
@@ -1524,6 +1542,11 @@ class Executor:
                 )
             if source.unbounded_scan == "warn":
                 warnings.warn(message, RemoteScanWarning, stacklevel=3)
+            return
+        if isinstance(plan, AsOfJoinPlan):
+            self._validate_execution(plan.left)
+            self._validate_execution(plan.right)
+            self._validate_asof_join(plan)
             return
         if isinstance(plan, JoinPlan):
             self._validate_execution(plan.left)

@@ -217,6 +217,18 @@ def after_join(
     return result
 
 
+def after_asof_join(left: FrameMetadata, columns: tuple[Column, ...]) -> FrameMetadata:
+    """Preserve left-row metadata for a one-match-per-left-row ASOF join."""
+    result = FrameMetadata(
+        columns,
+        left.index,
+        left.ordering,
+        left.row_identity,
+    )
+    validate_metadata(result)
+    return result
+
+
 def after_union(
     columns: tuple[Column, ...],
     *,

@@ -323,6 +323,7 @@ class Session:
         snapshot = value.copy()
         snapshot[ordinal_label] = range(len(snapshot))
         self._registered_sources[key] = snapshot
+        self._connection.register(f"__duckpd_source_{key}", snapshot)
         source = PandasSource(key)
         plan = self._source_plan(
             source,
@@ -349,6 +350,7 @@ class Session:
             ordinal_label, pa.array(range(value.num_rows), type=pa.int64())
         )
         self._registered_sources[key] = ordered_value
+        self._connection.register(f"__duckpd_source_{key}", ordered_value)
         source = ArrowSource(key)
         plan = self._source_plan(
             source,

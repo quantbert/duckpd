@@ -22,6 +22,15 @@ the [release policy](RELEASES.md).
 - Pandas categorical metadata propagation, lazy `Series.cat` metadata/codes
   accessors, ordered comparisons, and unused-category expansion for supported
   `groupby(observed=False)` aggregations.
+- Public lazy `duckpd.merge_asof()` for timestamp-keyed backward joins with
+  optional equality groups, collision suffixes, exact-match control, preserved
+  left-row metadata, and fail-before-execution ordering/type validation.
+- Backward Narwhals `LazyFrame.join_asof()` mapped to DuckPD's typed
+  `AsOfJoinPlan` without hidden collection.
+- Strict non-spillable aggregate policy in logical and JSON explanations;
+  `list` and `string_agg` states are rejected before execution.
+- Architecture decision 0004 records the measured Ibis substrate spike and the
+  decision to retain DuckPD's native DuckDB compiler.
 
 ### Changed
 
@@ -31,6 +40,8 @@ the [release policy](RELEASES.md).
 - Replaced the stale feature-store implementation roadmap with an architecture
   description of the shipped native DuckPD implementation and removed obsolete
   external-project comparisons.
+- Pandas and Arrow snapshots are registered as session-owned DuckDB views so
+  composed native ASOF SQL remains parseable without materializing input rows.
 
 ## 0.1.4 - 2026-09-06
 
