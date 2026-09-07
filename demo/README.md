@@ -55,6 +55,10 @@ uv run python demo/market_data_demo.py smoke
   ceil, round, and timezone conversions, timestamp/duration arithmetic, lazy
   `.cat` metadata accessors, ordered comparisons, and `groupby(observed=False)`
   unused-category expansion.
+- `DuckPD_Vector_Search.ipynb` is an interactive tutorial demonstrating
+  quantized text embedding model preparation, lazy remote Parquet streaming,
+  in-engine batch embedding via `.embed_text()`, and exact cosine vector
+  similarity search via `.vector.search_text()`.
 
 Run market data benchmarks:
 
