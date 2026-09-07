@@ -11,6 +11,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 - [Getting started](GETTING_STARTED.md) — installation, execution boundaries,
   ordering, resource-bounded sessions, HTTP/S3/GCS Parquet, and read-only
   PostgreSQL/MySQL/SQLite attachments.
+- [Vector search and text embeddings](api/vector-search-and-embeddings.md) —
+  progressive examples, workflow selection, requirements, validation, and
+  exact and experimental approximate retrieval constraints.
 - [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
   supported arguments, intentional deviations, and unsupported behavior.
 

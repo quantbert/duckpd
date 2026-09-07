@@ -30,6 +30,7 @@ def main() -> None:
             build_started = perf_counter()
             news = session.read_parquet(DATA_URL)
             nvidia_news = news[news["symbol"] == "NVDA"]
+
             embedded = nvidia_news.embed_text(
                 columns=["title", "description"],
                 into="embedding",
@@ -37,6 +38,7 @@ def main() -> None:
                 batch_size=64,
                 null_policy="empty"
             )
+
             embedded.write_parquet(EMBEDDED_DATA)
             build_seconds = perf_counter() - build_started
             dataset_status = (
