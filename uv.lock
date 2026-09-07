@@ -243,6 +243,7 @@ featurestore = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "huggingface-hub" },
     { name = "hypothesis" },
     { name = "narwhals" },
     { name = "pandas-stubs" },
@@ -265,6 +266,7 @@ provides-extras = ["featurestore"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "huggingface-hub", specifier = ">=0.23.0" },
     { name = "hypothesis", specifier = ">=6.100" },
     { name = "narwhals", specifier = ">=2.17,<3" },
     { name = "pandas-stubs", specifier = ">=3.0" },
