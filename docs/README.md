@@ -38,6 +38,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 - [Native DuckDB compiler decision](decisions/0004-retain-native-duckdb-compiler.md) — bounded Ibis substrate comparison and the decision to retain one DuckPD-owned IR and compiler.
 - [Feature Store architecture](design/featurestore-architecture.md) — implemented
   catalog, point-in-time alignment, and partition-cache design.
+- [Vector search and analytical retrieval](design/vector-search.md) — exploratory
+  design for exact and indexed retrieval as composable lazy DataFrame operations.
 
 
 ## Research and references
