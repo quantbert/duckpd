@@ -62,6 +62,7 @@ from duckpd.embeddings import (
     FastEmbedProvider,
     PreparedModelInfo,
     TextEmbeddingProvider,
+    TransformersEmbeddingProvider,
     _make_fixed_array,
     _validate_embedding_array,
 )
@@ -292,11 +293,14 @@ class Session:
         self._ensure_open()
         provider = self._embedding_providers.get(model.fingerprint)
         if provider is None:
-            if model.backend != "fastembed":
+            if model.backend == "fastembed":
+                provider = FastEmbedProvider(model, cache_dir=cache_dir)
+            elif model.backend == "transformers":
+                provider = TransformersEmbeddingProvider(model, cache_dir=cache_dir)
+            else:
                 raise UnsupportedOperationError(
                     "Custom embedding models require register_embedding_provider()"
                 )
-            provider = FastEmbedProvider(model, cache_dir=cache_dir)
             self._embedding_providers[model.fingerprint] = provider
         self._begin_execution()
         started = perf_counter()

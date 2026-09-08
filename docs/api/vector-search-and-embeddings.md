@@ -12,17 +12,18 @@ same APIs as any other DuckPD frame.
 
 ## Install
 
-Vector search over existing vectors is part of the core package. Generating
-text embeddings with the built-in local backend requires the optional
-FastEmbed/ONNX dependency:
+Vector search over existing vectors is part of the core package. CPU embedding
+uses the optional FastEmbed/ONNX dependency:
 
 ```bash
 uv add "duckpd[embeddings]"
 ```
 
-The built-in backend runs locally on `CPUExecutionProvider`. Preparing a model
-may download model artifacts, but defining a model or building a lazy plan does
-not.
+`TransformersEmbeddingProvider` also supports explicit PyTorch CPU, NVIDIA CUDA,
+or AMD ROCm execution. Install `transformers` and a PyTorch build matching the
+accelerator separately; DuckPD does not choose or replace the system's PyTorch
+build. Defining a model or building a lazy plan never downloads artifacts.
+Preparation is the explicit download and device-initialization boundary.
 
 ## Five-minute example
 
@@ -180,6 +181,30 @@ prepared_models = session.inspect_prepared_embedding_models()
 
 Execution that needs an unprepared model fails with an instruction to call
 `prepare_embedding_model()`.
+
+For explicit PyTorch GPU inference, use a distinct backend and pooling identity,
+then register the device-specific provider before preparation:
+
+```python
+gpu_model = pd.embedding_model(
+    "BAAI/bge-small-en-v1.5",
+    revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    dimension=384,
+    backend="transformers",
+    pooling="cls",
+)
+provider = pd.TransformersEmbeddingProvider(
+    gpu_model,
+    device="cuda",  # PyTorch uses this name for NVIDIA CUDA and AMD ROCm.
+    batch_size=64,
+)
+session.register_embedding_provider(gpu_model, provider)
+session.prepare_embedding_model(gpu_model)
+```
+
+An explicitly requested GPU never falls back to CPU. Preparation fails if
+PyTorch cannot access the device. `PreparedModelInfo.execution_providers`
+reports `PyTorchROCm`, `PyTorchCUDA`, or `PyTorchCPU`.
 
 ## Create reusable corpus embeddings
 
@@ -460,12 +485,14 @@ provider retries where available.
 
 ## Current scope
 
-DuckPD currently supports local FastEmbed/ONNX CPU inference, custom providers,
-dense float32 embeddings, exact vector search, exact text search, and guarded
-in-memory HNSW search. It does not currently provide GPU execution, a qualified
-hosted provider, automatic model selection, corpus caching or refresh,
-reranking, hybrid lexical/vector retrieval, sparse or multi-vector embeddings,
-quantized storage, distributed inference, or batched per-row temporal queries.
+DuckPD supports local FastEmbed/ONNX CPU inference, explicit
+PyTorch/Transformers CPU, CUDA, and ROCm inference, custom providers, dense
+float32 embeddings, exact vector search, exact text search, and guarded
+in-memory HNSW search. It does not automatically install accelerator-specific
+PyTorch builds or provide a qualified hosted provider, automatic model
+selection, corpus caching or refresh, reranking, hybrid lexical/vector
+retrieval, sparse or multi-vector embeddings, quantized storage, distributed
+inference, or batched per-row temporal queries.
 
 For the implementation rationale and deeper execution contracts, see
 [Text Embeddings and Semantic Search](../design/text-embeddings.md) and

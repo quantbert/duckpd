@@ -53,6 +53,10 @@ Generation and run controls are Make variables with defaults:
 | `DRY_RUN` | Prevents the Hugging Face upload when set to `true`. |
 | `NEWS_SOURCE` | Local pinned AlphaDojo news Parquet source. |
 | `EMBEDDING_BATCH_SIZE` | Number of articles embedded per model call. |
+| `EMBEDDING_BACKEND` | `fastembed` for default CPU inference or `transformers` for PyTorch. |
+| `EMBEDDING_DEVICE` | PyTorch device; `cpu` by default and `cuda` for NVIDIA CUDA or AMD ROCm. |
+| `TRANSFORMER_BATCH_SIZE` | Internal PyTorch inference batch size; defaults to the qualified value 64. |
+| `NEWS_UV_RUN` | Override the `uv run` prefix when using a separately prepared accelerator environment. |
 
 Override settings on the command line. For example, this generates ten tickers and
 previews the upload without writing to the remote store:
@@ -86,6 +90,63 @@ operation can take a long time on CPU. Work is staged in bounded, restartable ch
 Catalog-driven model inference is part of the feature-store embedding design and must
 be implemented in the DuckPD runtime before `search_text()` can omit its explicit
 `model=` argument. Generation and raw-vector search do not depend on that inference.
+
+### AMD ROCm generation
+
+GPU generation is explicit. The normal `duckpd[embeddings]` installation and
+`make generate-news` remain CPU-only. DuckPD does not install or replace
+accelerator-specific PyTorch builds.
+
+The following isolated environment matches ROCm 7.2.4 and Python 3.12 on
+`gfx1150`. Create it from this directory:
+
+```bash
+uv venv --python 3.12 .venv-rocm
+uv pip install --python .venv-rocm/bin/python \
+  'https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.9.1%2Brocm7.2.4.lw.git39497456-cp312-cp312-linux_x86_64.whl' \
+  'https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/triton-3.5.1%2Brocm7.2.4.gita272dfa8-cp312-cp312-linux_x86_64.whl' \
+  'transformers>=4.50,<5' \
+  'exchange-calendars>=4.11,<5' \
+  'ipykernel>=7,<8' \
+  'ipywidgets>=8,<9' \
+  -e ../..
+```
+
+Register that interpreter as a Jupyter kernel:
+
+```bash
+.venv-rocm/bin/python -m ipykernel install --user \
+  --name duckpd-rocm \
+  --display-name "DuckPD ROCm 7.2.4"
+```
+
+In VS Code, open `DuckPD_Vector_Search.ipynb`, choose **Select Kernel** in the
+upper-right, and select **DuckPD ROCm 7.2.4**. Restart the notebook kernel after
+changing it. The repository's normal `.venv` does not contain the
+accelerator-specific PyTorch and Transformers packages.
+
+Verify that PyTorch sees the GPU before generation:
+
+```bash
+.venv-rocm/bin/python -c \
+  "import torch; print(torch.version.hip, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+Generate with the verified Transformers/ROCm path:
+
+```bash
+make generate-news \
+  NEWS_UV_RUN='UV_PROJECT_ENVIRONMENT=.venv-rocm uv run --no-sync' \
+  EMBEDDING_BACKEND=transformers \
+  EMBEDDING_DEVICE=cuda \
+  TRANSFORMER_BATCH_SIZE=64
+```
+
+The model backend is part of the embedding fingerprint and staging identity.
+CPU FastEmbed chunks and PyTorch Transformers chunks cannot be mixed or resumed
+into each other. Use a fresh output/staging directory when changing backends.
+An explicitly requested GPU fails preparation instead of silently falling back
+to CPU.
 
 News rows are assigned round-robin to synthetic tickers and spread over the same
 Nasdaq Stockholm trading-minute range as OHLCV. These ticker and timestamp

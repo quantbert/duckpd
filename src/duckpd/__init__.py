@@ -10,6 +10,7 @@ from duckpd.embeddings import (
     FastEmbedProvider,
     PreparedModelInfo,
     TextEmbeddingProvider,
+    TransformersEmbeddingProvider,
     embedding_model,
 )
 from duckpd.errors import ConcurrentModificationError, MergeError
@@ -50,6 +51,7 @@ __all__ = [
     "Session",
     "SyncReport",
     "TextEmbeddingProvider",
+    "TransformersEmbeddingProvider",
     "VectorIndexInfo",
     "__version__",
     "concat",

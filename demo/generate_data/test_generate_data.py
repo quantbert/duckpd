@@ -22,7 +22,7 @@ from gendata import (
     write_table_dataset,
 )
 from hfupload import parse_destination
-from news_config import NEWS_MODEL
+from news_config import NEWS_MODEL, NEWS_TRANSFORMERS_MODEL
 
 import duckpd as pd
 
@@ -126,7 +126,13 @@ class CatalogTests(unittest.TestCase):
                 news_partition / "data.parquet",
             )
             (data_root / "news" / "_SUCCESS.json").write_text(
-                json.dumps({"source_rows": 1}),
+                json.dumps(
+                    {
+                        "source_rows": 1,
+                        "embedding_backend": "transformers",
+                        "model_fingerprint": NEWS_TRANSFORMERS_MODEL.fingerprint,
+                    }
+                ),
                 encoding="utf-8",
             )
             write_table_dataset(
@@ -148,6 +154,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(
             catalog["features"]["news:embedding"]["embedding_model"],
             "bge-small-en-v1.5",
+        )
+        self.assertEqual(
+            catalog["embedding_models"]["bge-small-en-v1.5"]["backend"],
+            "transformers",
         )
 
     def test_rejects_wrong_news_embedding_dimension(self) -> None:
@@ -173,11 +183,7 @@ class CatalogTests(unittest.TestCase):
             path = Path(directory) / "data.parquet"
             pq.write_table(
                 pa.table(
-                    {
-                        "datetime": pa.array(
-                            [datetime.fromisoformat("2024-01-02T09:00:00+01:00")]
-                        )
-                    }
+                    {"datetime": pa.array([datetime.fromisoformat("2024-01-02T09:00:00+01:00")])}
                 ),
                 path,
             )
@@ -251,10 +257,7 @@ class GeneratedDatasetTests(unittest.TestCase):
         self.assertEqual(len(calls), first_call_count)
 
     def test_spreads_news_over_tickers_and_trading_minutes(self) -> None:
-        timestamps = [
-            datetime(2024, 1, 2, 8, minute, tzinfo=UTC)
-            for minute in range(5)
-        ]
+        timestamps = [datetime(2024, 1, 2, 8, minute, tzinfo=UTC) for minute in range(5)]
 
         tickers, assigned = assign_news_rows(8, ["000", "001"], timestamps)
 

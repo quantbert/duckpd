@@ -17,6 +17,7 @@ from news_config import (
     NEWS_SOURCE_REPOSITORY,
     NEWS_SOURCE_REVISION,
     embedding_models,
+    news_model,
 )
 
 CATALOG_VERSION = 1
@@ -197,9 +198,9 @@ def inspect_partition(
     maximums: list[Any] = []
     if datetime_index >= 0:
         for row_group_index in range(parquet_file.metadata.num_row_groups):
-            statistics = parquet_file.metadata.row_group(row_group_index).column(
-                datetime_index
-            ).statistics
+            statistics = (
+                parquet_file.metadata.row_group(row_group_index).column(datetime_index).statistics
+            )
             if statistics is not None and statistics.has_min_max:
                 minimums.append(statistics.min)
                 maximums.append(statistics.max)
@@ -273,9 +274,7 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
     for index, metadata in enumerate(dataset_metadata):
         dataset_name = metadata["dataset"]
         data_path = (
-            metadata["storage"]["path_template"]
-            .replace("{year}", "*")
-            .replace("{month:02d}", "*")
+            metadata["storage"]["path_template"].replace("{year}", "*").replace("{month:02d}", "*")
         )
         config_lines.extend(
             [
@@ -312,8 +311,7 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
                 else "No primary key is declared."
             )
             coverage = (
-                f"{row_count:,} rows ({human_size(byte_count)} compressed). "
-                f"{key_description}"
+                f"{row_count:,} rows ({human_size(byte_count)} compressed). {key_description}"
             )
         section_lines = [
             f"### {metadata['dataset']}",
@@ -353,9 +351,7 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
         "- tabular\n"
         "- parquet\n"
         "- duckdb\n"
-        "configs:\n"
-        + "\n".join(config_lines)
-        + "\n---\n\n"
+        "configs:\n" + "\n".join(config_lines) + "\n---\n\n"
         "# Hifinab Research Feature Store\n\n"
         "Private Parquet dataset storage for research and model-training data "
         "preparation. Instant timestamps are stored as timezone-aware UTC values.\n\n"
@@ -376,30 +372,30 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
         "import duckpd as pd\n"
         "\n"
         "features = pd.FeatureStore(\n"
-        f"    source=\"{source}\",\n"
-        "    cache=\"feature_cache\",\n"
-        "    token=getenv(\"HF_TOKEN\"),\n"
-        "    features={\"close\": \"ohlcv:close\", \"long_average\": \"sma:sma200\"},\n"
-        "    start=\"2024-01-01T00:00:00Z\",\n"
-        "    end=\"2025-01-01T00:00:00Z\",\n"
-        "    alignment=\"exact\",\n"
+        f'    source="{source}",\n'
+        '    cache="feature_cache",\n'
+        '    token=getenv("HF_TOKEN"),\n'
+        '    features={"close": "ohlcv:close", "long_average": "sma:sma200"},\n'
+        '    start="2024-01-01T00:00:00Z",\n'
+        '    end="2025-01-01T00:00:00Z",\n'
+        '    alignment="exact",\n'
         ")\n"
         "frame = features.features().collect()\n"
         "\n"
         "# Align each value to the first timestamp when it was safely available.\n"
         "training_data = pd.FeatureStore(\n"
-        f"    source=\"{source}\",\n"
-        "    cache=\"feature_cache\",\n"
-        "    token=getenv(\"HF_TOKEN\"),\n"
-        "    features=[\"ohlcv:close\", \"sma:sma200\"],\n"
-        "    start=\"2024-01-01T00:00:00Z\",\n"
-        "    end=\"2025-01-01T00:00:00Z\",\n"
-        "    alignment=\"point_in_time\",\n"
+        f'    source="{source}",\n'
+        '    cache="feature_cache",\n'
+        '    token=getenv("HF_TOKEN"),\n'
+        '    features=["ohlcv:close", "sma:sma200"],\n'
+        '    start="2024-01-01T00:00:00Z",\n'
+        '    end="2025-01-01T00:00:00Z",\n'
+        '    alignment="point_in_time",\n'
         ")\n"
         "training_frame = training_data.features()\n"
         "\n"
         "# Use a populated cache without network access.\n"
-        "offline_features = pd.FeatureStore(source=\"feature_cache\")\n"
+        'offline_features = pd.FeatureStore(source="feature_cache")\n'
         "```\n\n"
         "See `catalog.json` for dataset discovery and each dataset's `metadata.json` for "
         "semantic definitions, dependencies, storage layout, and partition statistics.\n\n"
@@ -417,6 +413,7 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
     dataset_metadata: list[dict[str, Any]] = []
     feature_index: dict[str, dict[str, Any]] = {}
 
+    catalog_embedding_model = NEWS_MODEL
     for dataset_name, definition in DATASETS.items():
         dataset_root = data_root / definition["directory"]
         if definition["kind"] == "timeseries":
@@ -430,8 +427,7 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
             paths = [data_root / definition["path_template"]]
             paths = [path for path in paths if path.is_file()]
         partitions = [
-            inspect_partition(path, data_root, definition.get("time_column"))
-            for path in paths
+            inspect_partition(path, data_root, definition.get("time_column")) for path in paths
         ]
         if not partitions:
             if definition.get("optional"):
@@ -447,6 +443,13 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
                 raise ValueError(
                     "News dataset is incomplete: completion row count does not match Parquet"
                 )
+            backend = completion.get("embedding_backend", "fastembed")
+            if not isinstance(backend, str):
+                raise ValueError("News completion has an invalid embedding backend")
+            catalog_embedding_model = news_model(backend)
+            fingerprint = completion.get("model_fingerprint")
+            if fingerprint is not None and fingerprint != catalog_embedding_model.fingerprint:
+                raise ValueError("News completion model fingerprint does not match its backend")
         validate_embedding_columns(paths, definition)
 
         metadata_path = dataset_root / "metadata.json"
@@ -516,7 +519,7 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
         "features": feature_index,
     }
     if "news" in {entry["name"] for entry in dataset_entries}:
-        catalog["embedding_models"] = embedding_models()
+        catalog["embedding_models"] = embedding_models(catalog_embedding_model)
     write_json(data_root / "catalog.json", catalog)
     write_text(data_root / "README.md", render_store_readme(dataset_metadata, source))
     return catalog

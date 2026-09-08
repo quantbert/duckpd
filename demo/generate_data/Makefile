@@ -8,6 +8,10 @@ OVERWRITE ?= false
 DRY_RUN ?= false
 NEWS_SOURCE ?= source_data/dojo_stock_news.parquet
 EMBEDDING_BATCH_SIZE ?= 1024
+EMBEDDING_BACKEND ?= fastembed
+EMBEDDING_DEVICE ?= cpu
+TRANSFORMER_BATCH_SIZE ?= 64
+NEWS_UV_RUN ?= uv run
 NEWS_SOURCE_URL := https://huggingface.co/datasets/AlphaDojo/dojo_stock_news/resolve/9d7a641b5cb5eaedc1874c34e74aa186a0a768f1/data.parquet
 NEWS_SOURCE_SHA256 := f8586e5a3515937da130b708006197652fd1560c2058d0dcd0134af5ebebe1fd
 
@@ -43,7 +47,7 @@ download-news: ## Download and verify the pinned news source
 	printf '%s  %s\n' "$(NEWS_SOURCE_SHA256)" "$(NEWS_SOURCE)" | sha256sum --check -
 
 generate-news: download-news ## Generate the embedded news stress dataset
-	uv run --group generation --extra embeddings python gendata.py \
+	$(NEWS_UV_RUN) --group generation --extra embeddings python gendata.py \
 		--news-only \
 		--news-source "$(NEWS_SOURCE)" \
 		--news-output "$(DATA_DIRECTORY)/news" \
@@ -51,7 +55,10 @@ generate-news: download-news ## Generate the embedded news stress dataset
 		--end "$(END_DATE)" \
 		--ticker-start "$(TICKER_START)" \
 		--ticker-count "$(TICKER_COUNT)" \
-		--embedding-batch-size "$(EMBEDDING_BATCH_SIZE)" $(OVERWRITE_FLAG)
+		--embedding-batch-size "$(EMBEDDING_BATCH_SIZE)" \
+		--embedding-backend "$(EMBEDDING_BACKEND)" \
+		--embedding-device "$(EMBEDDING_DEVICE)" \
+		--transformer-batch-size "$(TRANSFORMER_BATCH_SIZE)" $(OVERWRITE_FLAG)
 
 upload: ## Upload the generated feature store to Hugging Face
 	uv run --extra featurestore --env-file .env python hfupload.py \

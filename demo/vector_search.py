@@ -8,17 +8,27 @@ from time import perf_counter
 import duckpd as pd
 
 DATA_URL = "https://huggingface.co/datasets/AlphaDojo/dojo_stock_news/resolve/main/data.parquet"
-EMBEDDED_DATA = Path("nvidia-news-embedded.parquet")
+DEMO_DIR = Path(__file__).resolve().parent
+EMBEDDED_DATA = DEMO_DIR / "nvidia-news-embedded-transformers.parquet"
 QUERY = "AI chip demand and revenue growth"
+TRANSFORMER_BATCH_SIZE = 64
 MODEL = pd.embedding_model(
     "BAAI/bge-small-en-v1.5",
     revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
     dimension=384,
+    backend="transformers",
+    pooling="cls",
 )
 
 
 def main() -> None:
     with pd.connect() as session:
+        provider = pd.TransformersEmbeddingProvider(
+            MODEL,
+            device="cuda",
+            batch_size=TRANSFORMER_BATCH_SIZE,
+        )
+        session.register_embedding_provider(MODEL, provider)
         preparation_started = perf_counter()
         prepared = session.prepare_embedding_model(MODEL)
         preparation_seconds = perf_counter() - preparation_started
@@ -36,7 +46,7 @@ def main() -> None:
                 into="embedding",
                 model=MODEL,
                 batch_size=64,
-                null_policy="empty"
+                null_policy="empty",
             )
 
             embedded.write_parquet(EMBEDDED_DATA)
@@ -44,6 +54,7 @@ def main() -> None:
             dataset_status = (
                 f"created {EMBEDDED_DATA} from {DATA_URL} in {build_seconds:.3f} seconds"
             )
+            embedded = session.read_parquet(EMBEDDED_DATA)
         query_started = perf_counter()
         matches = embedded.vector.search_text(
             QUERY,

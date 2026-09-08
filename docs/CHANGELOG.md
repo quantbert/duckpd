@@ -51,6 +51,9 @@ the [release policy](RELEASES.md).
 - Recoverable embedding metadata for atomic Parquet and DuckDB-table sinks,
   embedding explain/profile metrics with query redaction, a local-backend
   benchmark track, and an end-to-end remote stock-news semantic search demo.
+- Explicit `TransformersEmbeddingProvider` inference on PyTorch CPU, NVIDIA
+  CUDA, or AMD ROCm devices, with immutable revision caches, CLS/mean pooling,
+  bounded internal batches, verified artifacts, and no silent GPU fallback.
 
 ### Changed
 

@@ -18,8 +18,26 @@ NEWS_MODEL = pd.embedding_model(
     revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
     dimension=384,
 )
+NEWS_TRANSFORMERS_MODEL = pd.embedding_model(
+    "BAAI/bge-small-en-v1.5",
+    revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    dimension=384,
+    backend="transformers",
+    pooling="cls",
+)
 
 
-def embedding_models() -> dict[str, dict[str, Any]]:
+def news_model(backend: str) -> pd.EmbeddingModelSpec:
+    """Return the pinned model specification for a supported generation backend."""
+    if backend == "fastembed":
+        return NEWS_MODEL
+    if backend == "transformers":
+        return NEWS_TRANSFORMERS_MODEL
+    raise ValueError("embedding backend must be 'fastembed' or 'transformers'")
+
+
+def embedding_models(
+    model: pd.EmbeddingModelSpec = NEWS_MODEL,
+) -> dict[str, dict[str, Any]]:
     """Return the serializable embedding-model registry."""
-    return {NEWS_MODEL_KEY: asdict(NEWS_MODEL)}
+    return {NEWS_MODEL_KEY: asdict(model)}

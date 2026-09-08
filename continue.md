@@ -3,35 +3,31 @@
 ## Goal
 
 Continue with the complete feature-store demo dataset in `demo/generate_data`.
-Separately, explore possible AMD ROCm acceleration later. GPU support needs deeper
-research before choosing an implementation or dependency strategy.
+GPU support is implemented and verified; use the explicit ROCm path below for
+news generation while keeping FastEmbed CPU as the default.
 
-## Future GPU Research
+## GPU Implementation
 
-This machine exposes an AMD GPU through ROCm:
+DuckPD now exposes `TransformersEmbeddingProvider` for explicit PyTorch CPU,
+NVIDIA CUDA, or AMD ROCm inference. The provider:
 
-```text
-Card Series: AMD Radeon Graphics
-GFX version: gfx1150
-Reported VRAM: 4 GiB
-```
+- requires an embedding specification with `backend="transformers"` and
+  explicit `cls` or `mean` pooling;
+- keeps model revision, pooling, prefixes, normalization, and backend in the
+  model fingerprint;
+- uses immutable, digest-verified local model caches;
+- performs bounded internal tokenizer/model batches;
+- reports `PyTorchCPU`, `PyTorchCUDA`, or `PyTorchROCm`;
+- raises when a requested GPU is unavailable instead of silently using CPU.
 
-`rocm-smi` works. `nvidia-smi` is irrelevant on this host.
+The host-qualified environment uses ROCm 7.2.4 PyTorch 2.9.1 and Triton 3.5.1
+from AMD's `gfx1150` wheels. Reproduce it with the commands in
+`demo/generate_data/README.md`; accelerator packages remain application-owned
+and are not added to DuckPD's portable dependency lock.
 
-The current `duckpd[embeddings]` environment reports these ONNX Runtime providers:
-
-```text
-['AzureExecutionProvider', 'CPUExecutionProvider']
-```
-
-The installed FastEmbed/ONNX Runtime stack currently uses CPU. This does not establish
-whether FastEmbed can or cannot run efficiently on this AMD GPU with a different
-runtime or integration.
-
-Explore GPU support later with a deeper search of current FastEmbed, ONNX Runtime,
-ROCm, MIGraphX, and `gfx1150` documentation and compatibility. Do not presume a
-provider name, package, or architecture before that research. Keep CPU behavior as the
-default if GPU support is eventually added.
+FastEmbed remains the default CPU provider. The generator selects GPU execution
+only when passed `--embedding-backend transformers --embedding-device cuda`, or
+the equivalent Make variables.
 
 ## Current Implementation
 
@@ -42,6 +38,8 @@ The full news-generation pipeline is implemented and validated. It:
 - embeds title/description text with `BAAI/bge-small-en-v1.5` (384 dimensions);
 - writes resumable staging chunks and monthly final Parquet partitions;
 - writes `_SUCCESS.json` only after successful finalization;
+- selects either the default FastEmbed CPU model or the distinct Transformers
+  GPU model and records that model fingerprint in completion/catalog metadata;
 - adds model and news metadata to catalog version 1;
 - rejects incomplete news output during catalog generation;
 - uploads the complete feature store only after generation.
@@ -54,41 +52,31 @@ demo/generate_data/source_data/dojo_stock_news.parquet
 
 The generated `demo/generate_data/data/` directory does not yet exist.
 
-Current uncommitted work was last observed as:
+The working tree also contains the user's broader in-progress dataset and
+feature-store changes. Do not discard them; re-read current files before editing.
+
+## GPU Qualification
+
+The controlling implementation is `TransformersEmbeddingProvider` in
+`src/duckpd/embeddings.py`. The generator exposes:
 
 ```text
- M .gitignore
- M demo/README.md
- M docs/design/featurestore-embeddings.md
- M pyproject.toml
- M uv.lock
-?? demo/generate_data/
+EMBEDDING_BACKEND=transformers
+EMBEDDING_DEVICE=cuda
+TRANSFORMER_BATCH_SIZE=64
 ```
 
-Do not discard these changes. Re-read current files before editing.
+On this AMD `gfx1150` host, the implemented provider produced normalized
+`float32[384]` vectors through `PyTorchROCm`. CPU/GPU parity over the same pinned
+`BAAI/bge-small-en-v1.5` Transformers model measured maximum absolute error
+`1.7881393432617188e-07` and minimum cosine similarity
+`0.9999999783689986`. An earlier 64-row GPU benchmark processed about 138 rows/s
+at roughly 294 MiB peak allocated device memory, versus about 15 rows/s through
+the existing CPU FastEmbed path.
 
-## GPU Research Anchors
-
-The controlling implementation is `src/duckpd/embeddings.py`.
-`FastEmbedProvider` currently:
-
-- describes itself as CPU-only;
-- passes `providers=["CPUExecutionProvider"]` in both `TextEmbedding(...)` paths;
-- reports `("CPUExecutionProvider",)` in `PreparedModelInfo`.
-
-`demo/generate_data/gendata.py` creates `pd.FastEmbedProvider(NEWS_MODEL)` without
-provider configuration. `tests/test_embeddings.py` currently asserts CPU-only
-behavior.
-
-Tomorrow's research should establish:
-
-1. Whether current FastEmbed supports AMD ROCm directly or through another backend.
-2. Which runtime and execution provider support this host's ROCm version and `gfx1150`.
-3. Whether suitable prebuilt Python wheels exist for the project's Python version.
-4. Whether 4 GiB reported VRAM can run `BAAI/bge-small-en-v1.5` at a useful batch size.
-5. What minimal DuckPD API would expose acceleration without changing CPU defaults.
-
-Only after those facts are verified should code or dependency changes be designed.
+FastEmbed through MIGraphX is not used: its optimized graph rejected the
+attention padding required by this model, and the unfused attempt produced
+invalid zero output. PyTorch Transformers is the verified correctness path.
 
 ## Default Dataset Size
 
@@ -107,8 +95,8 @@ News vectors alone require about 5.65 GiB before Parquet encoding. Staging and f
 news files coexist until completion. Approximately 1.42 TiB of disk was free when last
 checked.
 
-If GPU support is later proven, determine a stable `EMBEDDING_BATCH_SIZE` with small
-experiments before running the complete archive.
+Use `TRANSFORMER_BATCH_SIZE=64` for the qualified GPU run. The outer
+`EMBEDDING_BATCH_SIZE=1024` still controls DuckPD's Arrow execution batches.
 
 ## Validation
 
@@ -124,16 +112,20 @@ git diff --check
 make -n -C demo/generate_data data DRY_RUN=true
 ```
 
-Last known validation:
+Last validation for GPU support:
 
-- Ruff passed.
-- Generator tests: 14 passed.
-- CPU FastEmbed smoke test returned fixed-size `float[384]` vectors.
-- Source checksum and all required source fields were verified.
-- Production generator files had no editor diagnostics.
+- focused embedding tests: 19 passed;
+- generator tests: 14 passed;
+- Ruff and format checks passed for every changed Python file;
+- strict Pyright passed for changed library/embedding test files;
+- default and ROCm Make commands expanded with the expected backend/device
+  arguments;
+- the real provider executed on AMD ROCm and matched its CPU reference at the
+  parity values recorded above;
+- generated compatibility documentation and `git diff --check` passed.
 
-PyArrow stub `reportUnknown*` diagnostics remain in the generator tests and are
-third-party typing limitations, not runtime failures.
+The full-project Pyright command still reports pre-existing PyArrow stub and
+untyped `exchange_calendars` diagnostics in generator files.
 
 ## Full Run Safety
 
@@ -143,7 +135,11 @@ Generate and validate locally first:
 
 ```bash
 cd demo/generate_data
-make data DRY_RUN=true
+make data DRY_RUN=true \
+  NEWS_UV_RUN='UV_PROJECT_ENVIRONMENT=.venv-rocm uv run --no-sync' \
+  EMBEDDING_BACKEND=transformers \
+  EMBEDDING_DEVICE=cuda \
+  TRANSFORMER_BATCH_SIZE=64
 ```
 
 After inspecting the local store and `data/news/_SUCCESS.json`, publish separately:

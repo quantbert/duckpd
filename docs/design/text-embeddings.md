@@ -222,23 +222,28 @@ lazy; every materialization derives the input row count, reports documents only
 after validated provider calls, and closes the bar on success or failure.
 Applications never decorate or replace providers to obtain standard progress.
 
-### Initial backend
+### Local backends
 
-The initial backend is optional FastEmbed using ONNX Runtime on
+The default optional backend remains FastEmbed using ONNX Runtime on
 `CPUExecutionProvider`:
 
 ```bash
 uv add "duckpd[embeddings]"
 ```
 
-Core DuckPD must remain importable and fully functional without that extra. A
-missing backend raises an actionable unsupported-operation error before source
-execution.
+`TransformersEmbeddingProvider` adds explicit PyTorch CPU, NVIDIA CUDA, and AMD
+ROCm execution. Accelerator-specific PyTorch builds remain application-owned:
+DuckPD neither installs nor replaces them, and an explicitly requested GPU
+never falls back to CPU. The Transformers model identity requires explicit
+`cls` or `mean` pooling and has a distinct backend fingerprint from FastEmbed.
 
-A remote provider can follow, but requires separate qualification for
-credentials, retries, partial batches, rate limits, billing, privacy, and
-reproducibility. Remote text transmission must never be inferred from a model
-name or enabled implicitly.
+Core DuckPD remains importable and fully functional without either optional
+runtime. A missing backend raises an actionable unsupported-operation error
+before source execution.
+
+A remote provider requires separate qualification for credentials, retries,
+partial batches, rate limits, billing, privacy, and reproducibility. Remote text
+transmission must never be inferred from a model name or enabled implicitly.
 
 ## Logical plans and execution boundaries
 
@@ -431,14 +436,15 @@ and transactional table sinks; eager query embedding; persisted and transient
 exact search; redacted explain output; profile metrics; differential tests; a
 local CPU benchmark; and the AlphaDojo remote-news demo.
 
-The qualified backend is FastEmbed 0.7.x with ONNX Runtime
+The default qualified backend is FastEmbed 0.7.x with ONNX Runtime
 `CPUExecutionProvider`, model `BAAI/bge-small-en-v1.5`, immutable revision
-`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`, and dimension 384. Qualification
-records the downloaded artifact digest rather than treating the model name as
-identity.
+`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`, and dimension 384. The same model
+is qualified through PyTorch Transformers on AMD ROCm with explicit CLS
+pooling, bounded batches, and normalized float32 output. Qualification records
+the downloaded artifact digest rather than treating the model name as identity.
 
-Hosted providers, GPU execution, automatic corpus caches and refresh,
-multi-file dataset writers, hybrid lexical/vector retrieval, reranking,
-quantization, sparse or multi-vector storage, and distributed inference remain
-explicitly deferred. Repeated searches should persist embeddings once; the
-transient API deliberately exposes its repeated document-inference cost.
+Hosted providers, automatic corpus caches and refresh, multi-file dataset
+writers, hybrid lexical/vector retrieval, reranking, quantization, sparse or
+multi-vector storage, and distributed inference remain explicitly deferred.
+Repeated searches should persist embeddings once; the transient API
+deliberately exposes its repeated document-inference cost.

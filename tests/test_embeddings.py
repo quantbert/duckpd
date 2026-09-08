@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pandas as pd
 import pyarrow as pa
@@ -20,6 +20,7 @@ from duckpd.embeddings import (
     EmbeddingModelSpec,
     FastEmbedProvider,
     PreparedModelInfo,
+    TransformersEmbeddingProvider,
     _directory_digest,
     _make_fixed_array,
     _validate_embedding_array,
@@ -506,6 +507,161 @@ def test_fastembed_provider_prepares_verifies_and_executes(
     (Path(prepared.cache_path or "") / "model.onnx").write_bytes(b"changed")
     with pytest.raises(UnsupportedOperationError, match="changed"):
         FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+
+class FakeTensor:
+    def __init__(self, values: list[object]) -> None:
+        self.values = values
+
+    def to(self, *_args: object, **_kwargs: object) -> FakeTensor:
+        return self
+
+    def detach(self) -> FakeTensor:
+        return self
+
+    def tolist(self) -> list[object]:
+        return self.values
+
+    def __getitem__(self, key: tuple[slice, int]) -> FakeTensor:
+        _, column = key
+        rows = self.values
+        return FakeTensor([row[column] for row in rows])  # type: ignore[index]
+
+
+class FakeTokenizer:
+    calls: ClassVar[list[list[str]]] = []
+
+    def __call__(self, texts: list[str], **_kwargs: object) -> dict[str, FakeTensor]:
+        self.calls.append(texts)
+        return {
+            "input_ids": FakeTensor([[1] for _ in texts]),
+            "attention_mask": FakeTensor([[1] for _ in texts]),
+        }
+
+
+class FakeTransformerModel:
+    def eval(self) -> FakeTransformerModel:
+        return self
+
+    def to(self, _device: str) -> FakeTransformerModel:
+        return self
+
+    def __call__(self, **inputs: FakeTensor) -> object:
+        rows = len(inputs["input_ids"].values)
+        output = ModuleType("output")
+        output.last_hidden_state = FakeTensor([[[3.0, 4.0, 0.0]]] * rows)  # type: ignore[attr-defined]
+        return output
+
+
+class FakeTransformerFactory:
+    local_only: ClassVar[list[bool]] = []
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        _model: str,
+        *,
+        cache_dir: str,
+        local_files_only: bool,
+        **_kwargs: object,
+    ) -> FakeTokenizer | FakeTransformerModel:
+        cls.local_only.append(local_files_only)
+        cache = Path(cache_dir)
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "model.bin").write_bytes(b"verified-transformer")
+        return FakeTokenizer() if len(cls.local_only) % 2 else FakeTransformerModel()
+
+
+def _fake_normalize(tensor: FakeTensor, dim: int) -> FakeTensor:
+    assert dim == 1
+    rows = cast("list[list[float]]", tensor.values)
+    return FakeTensor(
+        [[value / math.sqrt(sum(item * item for item in row)) for value in row] for row in rows]
+    )
+
+
+def test_transformers_provider_batches_normalizes_and_reuses_verified_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = ModuleType("torch")
+    torch.cuda = ModuleType("cuda")  # type: ignore[attr-defined]
+    torch.cuda.is_available = lambda: True  # type: ignore[attr-defined]
+    torch.version = ModuleType("version")  # type: ignore[attr-defined]
+    torch.version.hip = "7.2"  # type: ignore[attr-defined]
+    torch.float32 = "float32"  # type: ignore[attr-defined]
+    torch.inference_mode = lambda: pytest.MonkeyPatch.context()  # type: ignore[attr-defined]
+    functional = ModuleType("functional")
+    functional.normalize = _fake_normalize  # type: ignore[attr-defined]
+    torch.nn = ModuleType("nn")  # type: ignore[attr-defined]
+    torch.nn.functional = functional  # type: ignore[attr-defined]
+    transformers = ModuleType("transformers")
+    transformers.AutoTokenizer = FakeTransformerFactory  # type: ignore[attr-defined]
+    transformers.AutoModel = FakeTransformerFactory  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    FakeTokenizer.calls.clear()
+    FakeTransformerFactory.local_only.clear()
+
+    model = duckpd.embedding_model(
+        "test/transformer",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+        backend="transformers",
+        pooling="cls",
+        document_prefix="passage: ",
+        query_prefix="query: ",
+    )
+    provider = TransformersEmbeddingProvider(
+        model,
+        device="cuda",
+        batch_size=2,
+        cache_dir=tmp_path,
+    )
+    with pytest.raises(UnsupportedOperationError, match="not prepared"):
+        provider.embed_documents(["hello"])
+
+    prepared = provider.prepare()
+    assert prepared.execution_providers == ("PyTorchROCm",)
+    vectors = provider.embed_documents(["one", "two", "three"]).to_pylist()
+    assert len(vectors) == 3
+    for vector in vectors:
+        assert vector == pytest.approx([0.6, 0.8, 0.0])
+    assert provider.embed_query("question").values == pytest.approx((0.6, 0.8, 0.0))
+    assert FakeTokenizer.calls == [
+        ["passage: one", "passage: two"],
+        ["passage: three"],
+        ["query: question"],
+    ]
+
+    restored = TransformersEmbeddingProvider(model, cache_dir=tmp_path)
+    assert restored.prepare().artifact_digest == prepared.artifact_digest
+    assert FakeTransformerFactory.local_only[-2:] == [True, True]
+
+
+def test_transformers_provider_rejects_unavailable_cuda(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = ModuleType("torch")
+    torch.cuda = ModuleType("cuda")  # type: ignore[attr-defined]
+    torch.cuda.is_available = lambda: False  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "transformers", ModuleType("transformers"))
+    model = duckpd.embedding_model(
+        "test/transformer",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+        backend="transformers",
+        pooling="cls",
+    )
+
+    with pytest.raises(UnsupportedOperationError, match="cannot access"):
+        TransformersEmbeddingProvider(
+            model,
+            device="cuda",
+            cache_dir=tmp_path,
+        ).prepare()
 
 
 def test_fastembed_cache_rejects_external_symlinks(tmp_path: Path) -> None:

@@ -16,14 +16,20 @@ import shutil
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from news_config import NEWS_MODEL, NEWS_SOURCE_REVISION, NEWS_SOURCE_ROWS, NEWS_SOURCE_SHA256
+from news_config import (
+    NEWS_MODEL,
+    NEWS_SOURCE_REVISION,
+    NEWS_SOURCE_ROWS,
+    NEWS_SOURCE_SHA256,
+    news_model,
+)
 
 import duckpd as pd
 
@@ -144,9 +150,7 @@ def assign_news_rows(
 
     events_per_ticker = math.ceil(row_count / len(tickers))
     if events_per_ticker > len(timestamps):
-        raise ValueError(
-            "news rows exceed the available unique ticker and trading-minute slots"
-        )
+        raise ValueError("news rows exceed the available unique ticker and trading-minute slots")
 
     assigned_tickers: list[str] = []
     assigned_timestamps: list[datetime] = []
@@ -188,12 +192,16 @@ def _news_generation_identity(
     ticker_start: int,
     ticker_count: int,
     row_count: int,
+    model: pd.EmbeddingModelSpec,
+    embedding_device: str,
 ) -> dict[str, Any]:
     return {
         "source_revision": NEWS_SOURCE_REVISION,
         "source_sha256": file_sha256(source_path),
         "source_rows": row_count,
-        "model_fingerprint": NEWS_MODEL.fingerprint,
+        "model_fingerprint": model.fingerprint,
+        "embedding_backend": model.backend,
+        "embedding_device": embedding_device,
         "start": start.isoformat(),
         "end": end.isoformat(),
         "ticker_start": ticker_start,
@@ -212,10 +220,18 @@ def generate_news_dataset(
     batch_size: int = 1_024,
     embed_documents: Callable[[Sequence[str]], pa.Array[Any]] | None = None,
     verify_pinned_source: bool = True,
+    embedding_backend: Literal["fastembed", "transformers"] = "fastembed",
+    embedding_device: Literal["cpu", "cuda"] = "cpu",
+    transformer_batch_size: int = 64,
 ) -> None:
     """Embed and spread a pinned news archive over synthetic market coordinates."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    if transformer_batch_size <= 0:
+        raise ValueError("transformer_batch_size must be positive")
+    model = news_model(embedding_backend)
+    if embedding_backend == "fastembed" and embedding_device != "cpu":
+        raise ValueError("FastEmbed generation supports only embedding_device='cpu'")
     if not source_path.is_file():
         raise FileNotFoundError(f"News source file not found: {source_path}")
     parquet_file = pq.ParquetFile(source_path)
@@ -225,7 +241,14 @@ def generate_news_dataset(
     timestamps = session_minutes(trading_days(start, end))
     assigned_tickers, assigned_timestamps = assign_news_rows(row_count, tickers, timestamps)
     identity = _news_generation_identity(
-        source_path, start, end, ticker_start, ticker_count, row_count
+        source_path,
+        start,
+        end,
+        ticker_start,
+        ticker_count,
+        row_count,
+        model,
+        embedding_device,
     )
     if verify_pinned_source and (
         identity["source_sha256"] != NEWS_SOURCE_SHA256 or row_count != NEWS_SOURCE_ROWS
@@ -257,7 +280,14 @@ def generate_news_dataset(
         identity_path.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
 
     if embed_documents is None:
-        provider = pd.FastEmbedProvider(NEWS_MODEL)
+        if embedding_backend == "fastembed":
+            provider: pd.TextEmbeddingProvider = pd.FastEmbedProvider(model)
+        else:
+            provider = pd.TransformersEmbeddingProvider(
+                model,
+                device=embedding_device,
+                batch_size=transformer_batch_size,
+            )
         provider.prepare()
         embed_documents = provider.embed_documents
     embed = embed_documents
@@ -275,14 +305,11 @@ def generate_news_dataset(
 
         values = batch.to_pydict()
         columns = {
-            name: _required_text(values[name], name, source_row)
-            for name in NEWS_SOURCE_COLUMNS
+            name: _required_text(values[name], name, source_row) for name in NEWS_SOURCE_COLUMNS
         }
         documents = [
             f"{title}\n\n{description}" if description else title
-            for title, description in zip(
-                columns["title"], columns["description"], strict=True
-            )
+            for title, description in zip(columns["title"], columns["description"], strict=True)
         ]
         embedding = embed(documents)
         if not embedding.type.equals(NEWS_SCHEMA.field("embedding").type):
@@ -361,9 +388,7 @@ def generate_symbology(tickers: list[str]) -> pa.Table:
             "isin": [f"SE{int(ticker):010d}" for ticker in tickers],
             "cik": [f"{int(ticker) + 1:010d}" for ticker in tickers],
             "company_name": [f"Example Company {ticker}" for ticker in tickers],
-            "description": [
-                f"Synthetic company record for ticker {ticker}." for ticker in tickers
-            ],
+            "description": [f"Synthetic company record for ticker {ticker}." for ticker in tickers],
             "market_code": ["XSTO"] * len(tickers),
         },
         schema=SYMBOLOGY_SCHEMA,
@@ -373,13 +398,9 @@ def generate_symbology(tickers: list[str]) -> pa.Table:
 def generate_markets() -> pa.Table:
     """Generate market-hours rows without declaring or enforcing a primary key."""
     weekdays = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
-    rows = [
-        ("XSTO", weekday, time(9, 0), time(17, 30), "Europe/Stockholm")
-        for weekday in weekdays
-    ]
+    rows = [("XSTO", weekday, time(9, 0), time(17, 30), "Europe/Stockholm") for weekday in weekdays]
     rows.extend(
-        ("XNYS", weekday, time(9, 30), time(16, 0), "America/New_York")
-        for weekday in weekdays
+        ("XNYS", weekday, time(9, 30), time(16, 0), "America/New_York") for weekday in weekdays
     )
     return pa.Table.from_pylist(
         [
@@ -601,6 +622,17 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--news-output", type=Path, default=Path("data/news"))
     parser.add_argument("--embedding-batch-size", type=int, default=1_024)
     parser.add_argument(
+        "--embedding-backend",
+        choices=("fastembed", "transformers"),
+        default="fastembed",
+    )
+    parser.add_argument(
+        "--embedding-device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+    )
+    parser.add_argument("--transformer-batch-size", type=int, default=64)
+    parser.add_argument(
         "--generate-sma",
         action="store_true",
         help="Generate data/sma from the yearly OHLCV Parquet files after generating OHLCV.",
@@ -639,6 +671,9 @@ if __name__ == "__main__":
             ticker_count=settings.ticker_count,
             overwrite=settings.overwrite,
             batch_size=settings.embedding_batch_size,
+            embedding_backend=settings.embedding_backend,
+            embedding_device=settings.embedding_device,
+            transformer_batch_size=settings.transformer_batch_size,
         )
     else:
         generate_dataset(

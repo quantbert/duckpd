@@ -118,10 +118,12 @@ datasets, optional `columns` metadata belongs on the dataset entry because
 reference-table columns do not have feature entries. A column declaration is
 metadata only; physical names and types still come from the Parquet schema.
 
-The first release accepts only `backend: "fastembed"` in a portable catalog.
-A future custom or hosted backend requires a separately designed, explicitly
-registered trust policy. Catalog values must never import Python objects,
-contain credentials, or select arbitrary code.
+Portable catalogs accept the built-in `fastembed` and `transformers` backends.
+Transformers artifacts remain local and require an application-installed
+PyTorch runtime; catalogs cannot choose a device or install accelerator
+packages. A future custom or hosted backend requires a separately designed,
+explicitly registered trust policy. Catalog values must never import Python
+objects, contain credentials, or select arbitrary code.
 
 The backend must enforce every field that contributes to model identity. In
 particular, automatic preparation must resolve the declared immutable

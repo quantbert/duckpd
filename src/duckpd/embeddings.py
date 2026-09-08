@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 
 NullTextPolicy = Literal["error", "empty"]
-EmbeddingBackend = Literal["fastembed", "custom"]
+EmbeddingBackend = Literal["fastembed", "transformers", "custom"]
 
 
 class _FastEmbedModel(Protocol):
@@ -225,6 +226,194 @@ class FastEmbedProvider:
                 "Embedding model is not prepared; call session.prepare_embedding_model(model)"
             )
         return self._model
+
+
+class TransformersEmbeddingProvider:
+    """Optional PyTorch provider backed by Hugging Face Transformers."""
+
+    def __init__(
+        self,
+        specification: EmbeddingModelSpec,
+        *,
+        device: Literal["cpu", "cuda"] = "cpu",
+        batch_size: int = 64,
+        cache_dir: str | Path | None = None,
+    ):
+        if specification.backend != "transformers":
+            raise ValueError("TransformersEmbeddingProvider requires backend='transformers'")
+        if device not in {"cpu", "cuda"}:
+            raise ValueError("device must be 'cpu' or 'cuda'")
+        if specification.pooling not in {"cls", "mean"}:
+            raise ValueError("TransformersEmbeddingProvider pooling must be 'cls' or 'mean'")
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        self._specification = specification
+        self._device = device
+        self._batch_size = batch_size
+        cache_root = Path(cache_dir or Path.home() / ".cache" / "duckpd" / "embeddings")
+        self._cache_dir = cache_root / specification.fingerprint
+        self._torch: Any | None = None
+        self._tokenizer: Any | None = None
+        self._model: Any | None = None
+        self._prepared: PreparedModelInfo | None = None
+
+    @property
+    def specification(self) -> EmbeddingModelSpec:
+        return self._specification
+
+    def prepare(self) -> PreparedModelInfo:
+        if self._prepared is not None:
+            return self._prepared
+        try:
+            torch = cast("Any", importlib.import_module("torch"))
+            transformers = cast("Any", importlib.import_module("transformers"))
+        except ImportError:
+            raise UnsupportedOperationError(
+                "Transformers embeddings require PyTorch and Transformers; install a "
+                "PyTorch build for the requested accelerator and the 'transformers' package"
+            ) from None
+
+        if self._device == "cuda" and not torch.cuda.is_available():
+            raise UnsupportedOperationError(
+                "Transformers CUDA device requested, but PyTorch cannot access a CUDA or ROCm GPU"
+            )
+
+        tokenizer_factory = transformers.AutoTokenizer
+        model_factory = transformers.AutoModel
+        manifest_name = f"duckpd-{self._specification.fingerprint}.json"
+        manifest_path = self._cache_dir / manifest_name
+        if self._cache_dir.exists():
+            if not manifest_path.is_file():
+                raise UnsupportedOperationError(
+                    "Embedding cache exists without a verified DuckPD manifest"
+                )
+            artifact_digest = _directory_digest(self._cache_dir)
+            try:
+                recorded = cast("dict[str, object]", json.loads(manifest_path.read_text()))
+            except (OSError, TypeError, json.JSONDecodeError):
+                raise UnsupportedOperationError(
+                    "Prepared embedding cache has an invalid verification manifest"
+                ) from None
+            if (
+                recorded.get("model_fingerprint") != self._specification.fingerprint
+                or recorded.get("artifact_digest") != artifact_digest
+            ):
+                raise UnsupportedOperationError(
+                    "Prepared embedding artifacts changed since their verified cache promotion"
+                )
+            tokenizer, model = self._load_model(
+                tokenizer_factory,
+                model_factory,
+                self._cache_dir,
+                local_files_only=True,
+            )
+            if _directory_digest(self._cache_dir) != artifact_digest:
+                raise UnsupportedOperationError(
+                    "Embedding backend mutated verified artifacts while loading"
+                )
+        else:
+            self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging = self._cache_dir.with_name(f".{self._cache_dir.name}.tmp-{uuid4().hex}")
+            shutil.rmtree(staging, ignore_errors=True)
+            try:
+                tokenizer, model = self._load_model(
+                    tokenizer_factory,
+                    model_factory,
+                    staging,
+                    local_files_only=False,
+                )
+                artifact_digest = _directory_digest(staging)
+                (staging / manifest_name).write_text(
+                    json.dumps(
+                        {
+                            "model_fingerprint": self._specification.fingerprint,
+                            "artifact_digest": artifact_digest,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                try:
+                    os.rename(staging, self._cache_dir)
+                except FileExistsError:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    return self.prepare()
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+
+        model.eval()
+        model.to(self._device)
+        if self._device == "cuda":
+            runtime = "PyTorchROCm" if torch.version.hip is not None else "PyTorchCUDA"
+        else:
+            runtime = "PyTorchCPU"
+        self._torch = torch
+        self._tokenizer = tokenizer
+        self._model = model
+        self._prepared = PreparedModelInfo(
+            self._specification.fingerprint,
+            "transformers",
+            str(self._cache_dir),
+            artifact_digest,
+            (runtime,),
+        )
+        return self._prepared
+
+    def embed_documents(self, texts: Sequence[str]) -> pa.Array[Any]:
+        values = self._embed([self._specification.document_prefix + text for text in texts])
+        return _vectors_to_arrow(values, self._specification)
+
+    def embed_query(self, text: str) -> EmbeddedQuery:
+        values = self._embed([self._specification.query_prefix + text])
+        if len(values) != 1:
+            raise ValueError("Embedding provider returned an invalid query row count")
+        array = _vectors_to_arrow(values, self._specification)
+        rows = cast("list[list[float]]", array.to_pylist())
+        return EmbeddedQuery(tuple(rows[0]), self._specification.fingerprint)
+
+    def _load_model(
+        self,
+        tokenizer_factory: Any,
+        model_factory: Any,
+        cache_dir: Path,
+        *,
+        local_files_only: bool,
+    ) -> tuple[Any, Any]:
+        options = {
+            "revision": self._specification.revision,
+            "cache_dir": str(cache_dir),
+            "local_files_only": local_files_only,
+        }
+        tokenizer = tokenizer_factory.from_pretrained(self._specification.model, **options)
+        model = model_factory.from_pretrained(self._specification.model, **options)
+        return tokenizer, model
+
+    def _embed(self, texts: Sequence[str]) -> list[list[float]]:
+        if self._torch is None or self._tokenizer is None or self._model is None:
+            raise UnsupportedOperationError(
+                "Embedding model is not prepared; call session.prepare_embedding_model(model)"
+            )
+        values: list[list[float]] = []
+        for offset in range(0, len(texts), self._batch_size):
+            batch = texts[offset : offset + self._batch_size]
+            inputs = self._tokenizer(
+                list(batch),
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            )
+            inputs = {name: tensor.to(self._device) for name, tensor in inputs.items()}
+            with self._torch.inference_mode():
+                hidden = self._model(**inputs).last_hidden_state
+                if self._specification.pooling == "cls":
+                    pooled = hidden[:, 0]
+                else:
+                    mask = inputs["attention_mask"].unsqueeze(-1)
+                    pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+                if self._specification.normalize:
+                    pooled = self._torch.nn.functional.normalize(pooled, dim=1)
+            values.extend(pooled.detach().to("cpu", dtype=self._torch.float32).tolist())
+        return values
 
 
 class SemanticMethods:

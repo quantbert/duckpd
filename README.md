@@ -229,8 +229,11 @@ with pd.connect() as session:
 
 Planning remains side-effect free. Model preparation is eager and cache-verified;
 execution validates every Arrow batch against the declared dimension,
-normalization, and model fingerprint. See
-[`docs/design/text-embeddings.md`](docs/design/text-embeddings.md).
+normalization, and model fingerprint. An explicit
+`TransformersEmbeddingProvider` can use an application-installed PyTorch CPU,
+NVIDIA CUDA, or AMD ROCm runtime without changing the default FastEmbed CPU
+path. See
+[`docs/api/vector-search-and-embeddings.md`](docs/api/vector-search-and-embeddings.md).
 
 ---
 

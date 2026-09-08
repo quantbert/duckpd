@@ -8,10 +8,39 @@ uv sync --frozen --group dev
 uv run python demo/basic_pipeline.py
 uv run python demo/parquet_pipeline.py
 uv run python demo/reduction_pipeline.py
-uv run --extra embeddings python demo/vector_search.py
 uv run python demo/generate_market_data.py
 uv run python demo/market_data_demo.py smoke
 ```
+
+The embedding tutorials use an explicit PyTorch GPU provider. First create the
+accelerator environment described in
+[`generate_data/README.md`](generate_data/README.md#amd-rocm-gpu-embeddings).
+Then run the script directly from that environment:
+
+```bash
+demo/generate_data/.venv-rocm/bin/python demo/vector_search.py
+```
+
+The ROCm setup registers a **DuckPD ROCm 7.2.4** Jupyter kernel. In VS Code,
+open `demo/DuckPD_Vector_Search.ipynb`, choose **Select Kernel** in the
+upper-right, and select that kernel. Restart the notebook kernel after switching.
+Do not use the repository's normal `.venv`; it intentionally lacks the
+accelerator-specific packages.
+
+To use JupyterLab instead, install it into the ROCm environment and launch it
+with the same interpreter:
+
+```bash
+uv pip install \
+  --python demo/generate_data/.venv-rocm/bin/python \
+  jupyterlab
+demo/generate_data/.venv-rocm/bin/python -m jupyter lab \
+  demo/DuckPD_Vector_Search.ipynb
+```
+
+PyTorch uses the `cuda` device API for both NVIDIA CUDA and AMD ROCm. The demos
+request that device explicitly and fail rather than falling back to CPU.
+
 
 - `basic_pipeline.py` builds a lazy frame from pandas, sets an explicit index,
   filters rows, calculates columns, tracks ordering, projects, previews, and
@@ -22,12 +51,14 @@ uv run python demo/market_data_demo.py smoke
   `min`, and `max` execution over a lazy frame. It covers DataFrame
   `numeric_only`, Series null handling, `skipna`, `min_count`, hidden indexes,
   expression reductions, and the session execution counter.
-- `vector_search.py` prepares a pinned optional FastEmbed/ONNX CPU model. On its
-  first run it lazily scans the AlphaDojo stock-news Parquet archive over HTTPS,
-  embeds NVIDIA candidates in bounded Arrow batches, and writes
-  `nvidia-news-embedded.parquet`. Later runs load that local dataset directly,
-  perform exact `vector.search_text()` retrieval, and report model-preparation
-  and query-to-response timings.
+- `vector_search.py` prepares a pinned Transformers model on an explicitly
+  selected PyTorch GPU. On its first run it lazily scans the AlphaDojo
+  stock-news Parquet archive over HTTPS, embeds NVIDIA candidates in bounded
+  Arrow and model batches, and writes
+  `nvidia-news-embedded-transformers.parquet`. Later runs load that local
+  dataset directly, perform exact `vector.search_text()` retrieval, and report
+  the selected PyTorch runtime plus model-preparation and query-to-response
+  timings.
 - `generate_market_data.py` calibrates compressed bytes per row, then streams a
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
@@ -58,10 +89,10 @@ uv run python demo/market_data_demo.py smoke
   ceil, round, and timezone conversions, timestamp/duration arithmetic, lazy
   `.cat` metadata accessors, ordered comparisons, and `groupby(observed=False)`
   unused-category expansion.
-- `DuckPD_Vector_Search.ipynb` is an interactive tutorial demonstrating
-  quantized text embedding model preparation, lazy remote Parquet streaming,
-  in-engine batch embedding via `.embed_text()`, and exact cosine vector
-  similarity search via `.vector.search_text()`.
+- `DuckPD_Vector_Search.ipynb` is an interactive GPU tutorial demonstrating
+  explicit `TransformersEmbeddingProvider` registration, pinned PyTorch model
+  preparation, lazy remote Parquet streaming, in-engine batch embedding via
+  `.embed_text()`, and exact cosine retrieval via `.vector.search_text()`.
 
 ## Generate Feature-Store Data
 
