@@ -257,12 +257,12 @@
     },
     {
       "method": "DuckPD DataFrame.vector.search_text",
-      "arguments": "query text, embedding column, matching model, metric, positive k, tie_breaker",
+      "arguments": "query text, embedding column, optional compatible model, metric, positive k, tie_breaker",
       "dtypes": "metadata-verified FLOAT[n]",
       "ordering": "distance ascending; optional tie-breaker ascending",
       "since": "0.1.5",
       "status": "supported",
-      "notes": "Embeds one query eagerly within lazy execution and runs exact retrieval; not exposed through the Narwhals protocol."
+      "notes": "Infers only verified sidecar or catalog metadata; catalog execution may prepare an approved local model before exact retrieval. Not exposed through Narwhals."
     },
     {
       "method": "DuckPD DataFrame.semantic.search",

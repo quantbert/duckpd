@@ -8,11 +8,12 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from glob import glob
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -131,6 +132,14 @@ class _RemoteAttachmentState:
 
 
 @dataclass(frozen=True)
+class _CatalogEmbeddingPolicy:
+    model: EmbeddingModelSpec
+    auto_prepare: bool
+    timeout_seconds: float | None
+    max_download_bytes: int | None
+
+
+@dataclass(frozen=True)
 class ObjectStoreSecret:
     """A session-owned temporary credential for S3-compatible storage."""
 
@@ -242,6 +251,9 @@ class Session:
         self._embedding_metrics: dict[str, int | float] = {}
         self._embedding_progress_callbacks: dict[str, Callable[[int], object]] = {}
         self._prepared_embedding_models: dict[str, PreparedModelInfo] = {}
+        self._catalog_embedding_policies: dict[str, _CatalogEmbeddingPolicy] = {}
+        self._embedding_catalog_access_seconds = 0.0
+        self._embedding_prepare_locks: dict[str, Lock] = {}
         self._embedding_udfs: dict[str, str] = {}
         self._embedding_queries: dict[str, tuple[str, str]] = {}
         self._embedded_queries: dict[str, EmbeddedQuery] = {}
@@ -290,28 +302,110 @@ class Session:
         cache_dir: str | Path | None = None,
     ) -> PreparedModelInfo:
         """Eagerly prepare and verify one local embedding model."""
-        self._ensure_open()
-        provider = self._embedding_providers.get(model.fingerprint)
-        if provider is None:
-            if model.backend == "fastembed":
-                provider = FastEmbedProvider(model, cache_dir=cache_dir)
-            elif model.backend == "transformers":
-                provider = TransformersEmbeddingProvider(model, cache_dir=cache_dir)
-            else:
-                raise UnsupportedOperationError(
-                    "Custom embedding models require register_embedding_provider()"
-                )
-            self._embedding_providers[model.fingerprint] = provider
         self._begin_execution()
-        started = perf_counter()
-        info = provider.prepare()
-        elapsed = perf_counter() - started
-        info = replace(info, preparation_seconds=elapsed)
-        self._embedding_metrics["preparation_seconds"] = elapsed
-        if info.model_fingerprint != model.fingerprint:
-            raise UnsupportedOperationError("Prepared provider returned a mismatched fingerprint")
-        self._prepared_embedding_models[model.fingerprint] = info
-        return info
+        return self._prepare_embedding_model(model, cache_dir=cache_dir)
+
+    def _prepare_embedding_model(
+        self,
+        model: EmbeddingModelSpec,
+        *,
+        cache_dir: str | Path | None = None,
+        timeout_seconds: float | None = None,
+        max_download_bytes: int | None = None,
+    ) -> PreparedModelInfo:
+        self._ensure_open()
+        lock = self._embedding_prepare_locks.setdefault(model.fingerprint, Lock())
+        with lock:
+            prepared = self._prepared_embedding_models.get(model.fingerprint)
+            if prepared is not None:
+                self._embedding_metrics["preparation_cache_reused"] = 1
+                return prepared
+            provider = self._embedding_providers.get(model.fingerprint)
+            if provider is None:
+                if model.backend == "fastembed":
+                    provider = FastEmbedProvider(
+                        model,
+                        cache_dir=cache_dir,
+                        prepare_timeout_seconds=timeout_seconds,
+                        max_download_bytes=max_download_bytes,
+                    )
+                elif model.backend == "transformers":
+                    provider = TransformersEmbeddingProvider(
+                        model,
+                        cache_dir=cache_dir,
+                        prepare_timeout_seconds=timeout_seconds,
+                        max_download_bytes=max_download_bytes,
+                    )
+                else:
+                    raise UnsupportedOperationError(
+                        "Custom embedding models require register_embedding_provider()"
+                    )
+                self._embedding_providers[model.fingerprint] = provider
+            started = perf_counter()
+            info = provider.prepare()
+            elapsed = perf_counter() - started
+            info = replace(info, preparation_seconds=elapsed)
+            self._embedding_metrics["preparation_seconds"] = elapsed
+            self._embedding_metrics["preparation_count"] = (
+                int(self._embedding_metrics.get("preparation_count", 0)) + 1
+            )
+            self._embedding_metrics["preparation_cache_reused"] = 0
+            if info.model_fingerprint != model.fingerprint:
+                raise UnsupportedOperationError(
+                    "Prepared provider returned a mismatched fingerprint"
+                )
+            self._prepared_embedding_models[model.fingerprint] = info
+            return info
+
+    def _register_catalog_embedding_model(
+        self,
+        model: EmbeddingModelSpec,
+        *,
+        auto_prepare: bool,
+        timeout_seconds: float | None,
+        max_download_bytes: int | None,
+    ) -> None:
+        existing = self._catalog_embedding_policies.get(model.fingerprint)
+        if existing is not None and existing.model != model:
+            raise UnsupportedOperationError(
+                "Catalog embedding fingerprint collision has inconsistent model semantics"
+            )
+        self._catalog_embedding_policies[model.fingerprint] = _CatalogEmbeddingPolicy(
+            model,
+            auto_prepare if existing is None else existing.auto_prepare and auto_prepare,
+            _minimum_optional(
+                None if existing is None else existing.timeout_seconds,
+                timeout_seconds,
+            ),
+            _minimum_optional(
+                None if existing is None else existing.max_download_bytes,
+                max_download_bytes,
+            ),
+        )
+
+    def _prepare_plan_embedding_models(self, plan: LogicalPlan) -> None:
+        from duckpd._executor import _plan_nodes
+
+        models = {
+            node.model.fingerprint: node.model
+            for node in _plan_nodes(plan)
+            if isinstance(node, SemanticSearchPlan) and node.catalog_model
+        }
+        for fingerprint, model in models.items():
+            if fingerprint in self._prepared_embedding_models:
+                self._embedding_metrics["preparation_cache_reused"] = 1
+                continue
+            policy = self._catalog_embedding_policies.get(fingerprint)
+            if policy is None or not policy.auto_prepare:
+                raise UnsupportedOperationError(
+                    "Catalog embedding model is not prepared and automatic preparation is "
+                    "disabled; call session.prepare_embedding_model(store.embedding_model(name))"
+                )
+            self._prepare_embedding_model(
+                model,
+                timeout_seconds=policy.timeout_seconds,
+                max_download_bytes=policy.max_download_bytes,
+            )
 
     def inspect_prepared_embedding_models(self) -> tuple[PreparedModelInfo, ...]:
         """Return verified embedding models available to this session."""
@@ -361,7 +455,7 @@ class Session:
 
     def _write_embedding_manifest(self, plan: LogicalPlan, path: str) -> None:
         specs = {
-            column.label: asdict(column.embedding.model)
+            column.label: column.embedding.model.to_dict()
             for column in plan.metadata.visible_columns
             if column.embedding is not None
         }
@@ -402,7 +496,8 @@ class Session:
                 replace(
                     column,
                     embedding=EmbeddingColumnSpec(
-                        EmbeddingModelSpec(**raw_columns[column.label])  # type: ignore[arg-type]
+                        EmbeddingModelSpec(**raw_columns[column.label]),  # type: ignore[arg-type]
+                        origin="sidecar",
                     ),
                 )
                 if column.label in raw_columns
@@ -423,7 +518,7 @@ class Session:
         mode: Literal["error", "overwrite", "append"] = "overwrite",
     ) -> None:
         incoming = {
-            column.label: column.embedding
+            column.label: replace(column.embedding, origin="table", auto_prepare=False)
             for column in metadata.visible_columns
             if column.embedding is not None
         }
@@ -764,6 +859,11 @@ class Session:
                             "Embedding provider returned a mismatched query fingerprint"
                         )
                     self._embedded_queries[raw_key] = embedded
+                else:
+                    self._embedding_metrics.setdefault("query_inference_seconds", 0.0)
+                    self._embedding_metrics["query_cache_reuses"] = (
+                        int(self._embedding_metrics.get("query_cache_reuses", 0)) + 1
+                    )
                 rows.append(list(embedded.values))
             output = _make_fixed_array(rows, model.dimension)
             return _validate_embedding_array(output, model, expected_rows=len(rows))
@@ -1455,6 +1555,9 @@ class Session:
         filters: Mapping[str, Sequence[str]] | None = None,
         alignment: Literal["exact", "point_in_time"] | None = None,
         spine: str | None = None,
+        auto_prepare_embeddings: bool = True,
+        embedding_prepare_timeout_seconds: float | None = 300.0,
+        embedding_download_limit_bytes: int | None = 1_073_741_824,
     ) -> Any:
         """Create a FeatureStore bound to this session."""
         from duckpd.featurestore import FeatureStore
@@ -1472,6 +1575,9 @@ class Session:
             filters=filters,
             alignment=alignment,
             spine=spine,
+            auto_prepare_embeddings=auto_prepare_embeddings,
+            embedding_prepare_timeout_seconds=embedding_prepare_timeout_seconds,
+            embedding_download_limit_bytes=embedding_download_limit_bytes,
         )
 
     def close(self) -> None:
@@ -1726,3 +1832,17 @@ def connect(
         threads=threads,
         fallback=fallback,
     )
+
+
+_LimitT = TypeVar("_LimitT", int, float)
+
+
+def _minimum_optional(
+    left: _LimitT | None,
+    right: _LimitT | None,
+) -> _LimitT | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)

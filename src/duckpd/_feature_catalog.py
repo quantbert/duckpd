@@ -7,6 +7,81 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from duckpd.embeddings import EmbeddingModelSpec
+
+_EMBEDDING_MODEL_FIELDS = frozenset(
+    {
+        "model",
+        "revision",
+        "dimension",
+        "backend",
+        "normalize",
+        "pooling",
+        "document_prefix",
+        "query_prefix",
+    }
+)
+
+
+def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("Catalog embedding_models must be a mapping")
+    models: dict[str, EmbeddingModelSpec] = {}
+    raw_models = cast("Mapping[object, object]", value)
+    for raw_name, raw_specification in raw_models.items():
+        if not isinstance(raw_name, str) or not raw_name:
+            raise ValueError("Catalog embedding model keys must be non-empty strings")
+        if not isinstance(raw_specification, Mapping):
+            raise ValueError(f"Embedding model {raw_name!r} must be a mapping")
+        specification_data = dict(cast("Mapping[str, Any]", raw_specification))
+        unknown = sorted(set(specification_data) - _EMBEDDING_MODEL_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"Embedding model {raw_name!r} has unknown fields: {', '.join(unknown)}"
+            )
+        backend = specification_data.get("backend", "fastembed")
+        if backend not in {"fastembed", "transformers"}:
+            raise ValueError(f"Embedding model {raw_name!r} has unsupported backend: {backend!r}")
+        revision = specification_data.get("revision")
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-fA-F]{40,64}", revision) is None:
+            raise ValueError(
+                f"Embedding model {raw_name!r} revision must be an immutable commit digest"
+            )
+        try:
+            specification = EmbeddingModelSpec(**specification_data)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid embedding model {raw_name!r}: {error}") from None
+        if backend == "fastembed" and (
+            specification.pooling != "model-default" or not specification.normalize
+        ):
+            raise ValueError(
+                f"Embedding model {raw_name!r} uses FastEmbed fields the backend cannot honor"
+            )
+        if backend == "transformers" and specification.pooling not in {"cls", "mean"}:
+            raise ValueError(
+                f"Embedding model {raw_name!r} Transformers pooling must be 'cls' or 'mean'"
+            )
+        models[raw_name] = specification
+    return models
+
+
+def _embedding_reference(
+    declaration: Mapping[str, Any],
+    *,
+    owner: str,
+    models: Mapping[str, EmbeddingModelSpec],
+) -> str | None:
+    raw_reference = declaration.get("embedding_model")
+    if raw_reference is None:
+        return None
+    if not isinstance(raw_reference, str) or not raw_reference:
+        raise ValueError(f"{owner} embedding_model must be a non-empty string")
+    if raw_reference not in models:
+        raise ValueError(f"{owner} references unknown embedding model {raw_reference!r}")
+    return raw_reference
+
 
 def parse_timestamp(value: Any) -> datetime:
     """Parse an aware ISO 8601 timestamp and normalize it to UTC."""
@@ -44,12 +119,17 @@ def parse_availability_delay(value: Any, reference: str) -> timedelta:
 
 def validate_catalog(
     catalog: dict[str, Any],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Validate a catalog dictionary adhering to Catalog Version 1."""
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, EmbeddingModelSpec],
+]:
+    """Validate the complete catalog version 1 schema."""
     catalog_version = catalog.get("catalog_version")
     if catalog_version != 1:
         raise ValueError(f"Unsupported catalog version: {catalog_version!r}")
 
+    embedding_models = _validate_embedding_models(catalog.get("embedding_models"))
     dataset_entries_raw = catalog.get("datasets")
     if not isinstance(dataset_entries_raw, list) or not dataset_entries_raw:
         raise ValueError("Catalog must define at least one dataset")
@@ -79,6 +159,36 @@ def validate_catalog(
             series_keys = cast("list[Any]", series_keys_raw)
             if not all(isinstance(key, str) and key for key in series_keys):
                 raise ValueError(f"Timeseries dataset {name!r} requires series_keys")
+        columns_raw = entry.get("columns")
+        if columns_raw is not None:
+            if kind != "table" or not isinstance(columns_raw, Mapping):
+                raise ValueError(f"Dataset {name!r} columns metadata must be a table mapping")
+            normalized_columns: dict[str, dict[str, Any]] = {}
+            columns = cast("Mapping[object, object]", columns_raw)
+            for raw_column_name, raw_declaration in columns.items():
+                if not isinstance(raw_column_name, str) or not raw_column_name:
+                    raise ValueError(f"Dataset {name!r} column names must be non-empty strings")
+                if not isinstance(raw_declaration, Mapping):
+                    raise ValueError(
+                        f"Dataset {name!r} column {raw_column_name!r} metadata must be a mapping"
+                    )
+                declaration = cast("Mapping[str, Any]", raw_declaration)
+                unknown_column_fields = sorted(set(declaration) - {"embedding_model"})
+                if unknown_column_fields:
+                    raise ValueError(
+                        f"Dataset {name!r} column {raw_column_name!r} has unknown fields: "
+                        f"{', '.join(unknown_column_fields)}"
+                    )
+                embedding = _embedding_reference(
+                    declaration,
+                    owner=f"Dataset {name!r} column {raw_column_name!r}",
+                    models=embedding_models,
+                )
+                normalized = dict(declaration)
+                if embedding is not None:
+                    normalized["embedding"] = embedding
+                normalized_columns[raw_column_name] = normalized
+            entry = {**entry, "columns": normalized_columns}
         dataset_index[name] = entry
 
     feature_entries_raw = catalog.get("features", {})
@@ -87,6 +197,7 @@ def validate_catalog(
     feature_entries: dict[str, Any] = cast("dict[str, Any]", feature_entries_raw)
 
     feature_index: dict[str, dict[str, Any]] = {}
+    physical_embeddings: dict[tuple[str, str], str] = {}
     for ref_key, entry_val in feature_entries.items():
         reference = str(ref_key)
         if not isinstance(entry_val, dict):
@@ -101,9 +212,24 @@ def validate_catalog(
         dataset = dataset_index.get(ds_name)
         if dataset is None or dataset["kind"] != "timeseries":
             raise ValueError(f"Catalog feature {reference!r} must belong to a timeseries dataset")
-        feature_index[reference] = entry
+        embedding = _embedding_reference(
+            entry,
+            owner=f"Catalog feature {reference!r}",
+            models=embedding_models,
+        )
+        normalized_entry = dict(entry)
+        if embedding is not None:
+            normalized_entry["embedding"] = embedding
+            key = (entry["dataset"], entry["name"])
+            existing = physical_embeddings.setdefault(key, embedding)
+            if existing != embedding:
+                raise ValueError(
+                    f"Catalog feature {reference!r} conflicts with another embedding "
+                    f"declaration for {key[0]}.{key[1]}"
+                )
+        feature_index[reference] = normalized_entry
 
-    return dataset_index, feature_index
+    return dataset_index, feature_index, embedding_models
 
 
 def resolve_features(

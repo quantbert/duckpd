@@ -37,10 +37,21 @@ def parse_destination(destination: str) -> tuple[str, str]:
             if store_id.count("/") != 1 or any(not part for part in store_id.split("/")):
                 break
             return storage_type, store_id
-    raise ValueError(
-        "destination must be hf://buckets/OWNER/NAME or "
-        "hf://datasets/OWNER/NAME"
-    )
+    raise ValueError("destination must be hf://buckets/OWNER/NAME or hf://datasets/OWNER/NAME")
+
+
+def _uploadable_parquet_files(data_directory: Path) -> list[Path]:
+    """Return generated Parquet files while excluding resumable staging data."""
+    return [
+        path
+        for path in data_directory.rglob("*.parquet")
+        if not any(part.startswith(".") for part in path.relative_to(data_directory).parts)
+    ]
+
+
+def _upload_exclusions() -> tuple[str, ...]:
+    """Return local-only paths that must never be uploaded."""
+    return (".cache/**", "**/.cache/**", ".news-staging/**", "**/.news-staging/**")
 
 
 def upload_data(
@@ -56,15 +67,12 @@ def upload_data(
         raise FileNotFoundError(f"Dataset directory not found: {data_directory}")
 
     catalog = build_catalog(data_directory, store_name=store_id, source=destination)
-    parquet_files = list(data_directory.rglob("*.parquet"))
+    parquet_files = _uploadable_parquet_files(data_directory)
     if not parquet_files:
         raise FileNotFoundError(f"No Parquet files found under {data_directory}")
 
     print(f"Prepared {len(parquet_files):,} Parquet files from {data_directory}")
-    print(
-        f"Catalog: {len(catalog['datasets'])} datasets, "
-        f"{len(catalog['features'])} features"
-    )
+    print(f"Catalog: {len(catalog['datasets'])} datasets, {len(catalog['features'])} features")
     print(f"Store README: {data_directory / 'README.md'}")
     print(f"Target: https://huggingface.co/{storage_type}/{store_id} (private)")
 
@@ -77,7 +85,7 @@ def upload_data(
         plan = sync_bucket(
             str(data_directory),
             destination,
-            exclude=[".cache/**", "**/.cache/**"],
+            exclude=list(_upload_exclusions()),
             dry_run=dry_run,
             token=token,
         )
@@ -100,7 +108,8 @@ def upload_data(
         repo_id=store_id,
         folder_path=data_directory,
         repo_type="dataset",
-        ignore_patterns=[".cache/**", "**/.cache/**"],
+        ignore_patterns=list(_upload_exclusions()),
+        token=token,
     )
 
 

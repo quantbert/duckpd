@@ -8,13 +8,15 @@ import json
 import os
 import shutil
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 import pyarrow as pa
 
+from duckpd._locking import exclusive_file_lock
 from duckpd.errors import UnsupportedOperationError
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
 
 NullTextPolicy = Literal["error", "empty"]
 EmbeddingBackend = Literal["fastembed", "transformers", "custom"]
+EmbeddingMetadataOrigin = Literal["generated", "sidecar", "table", "catalog"]
 
 
 class _FastEmbedModel(Protocol):
@@ -45,20 +48,34 @@ class EmbeddingModelSpec:
     query_prefix: str = ""
 
     def __post_init__(self) -> None:
-        if not self.model:
-            raise ValueError("model must be non-empty")
-        if not self.revision or self.revision.casefold() in {"main", "master", "latest", "head"}:
+        if type(self.model) is not str or not self.model:
+            raise ValueError("model must be a non-empty string")
+        if (
+            type(self.revision) is not str
+            or not self.revision
+            or self.revision.casefold() in {"main", "master", "latest", "head"}
+        ):
             raise ValueError("revision must identify an immutable model revision")
         if type(self.dimension) is not int or self.dimension <= 0:
             raise ValueError("dimension must be a positive integer")
-        if not self.pooling:
+        if self.backend not in {"fastembed", "transformers", "custom"}:
+            raise ValueError("backend must be 'fastembed', 'transformers', or 'custom'")
+        if type(self.normalize) is not bool:
+            raise TypeError("normalize must be a boolean")
+        if type(self.pooling) is not str or not self.pooling:
             raise ValueError("pooling must be non-empty")
+        if type(self.document_prefix) is not str or type(self.query_prefix) is not str:
+            raise TypeError("document_prefix and query_prefix must be strings")
 
     @property
     def fingerprint(self) -> str:
         """Stable, credential-free identity of the complete embedding space."""
-        encoded = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the canonical catalog and sidecar representation."""
+        return cast("dict[str, object]", asdict(self))
 
 
 @dataclass(frozen=True)
@@ -66,6 +83,8 @@ class EmbeddingColumnSpec:
     """Persistable model identity attached to one fixed-size vector column."""
 
     model: EmbeddingModelSpec
+    origin: EmbeddingMetadataOrigin = field(default="generated", compare=False)
+    auto_prepare: bool = field(default=False, compare=False)
 
     @property
     def fingerprint(self) -> str:
@@ -109,12 +128,26 @@ class TextEmbeddingProvider(Protocol):
 class FastEmbedProvider:
     """Optional CPU ONNX provider backed by Qdrant FastEmbed."""
 
-    def __init__(self, specification: EmbeddingModelSpec, *, cache_dir: str | Path | None = None):
+    def __init__(
+        self,
+        specification: EmbeddingModelSpec,
+        *,
+        cache_dir: str | Path | None = None,
+        prepare_timeout_seconds: float | None = None,
+        max_download_bytes: int | None = None,
+    ):
         if specification.backend != "fastembed":
             raise ValueError("FastEmbedProvider requires backend='fastembed'")
+        if specification.pooling != "model-default" or not specification.normalize:
+            raise ValueError(
+                "FastEmbedProvider requires pooling='model-default' and normalize=True"
+            )
+        _validate_prepare_limits(prepare_timeout_seconds, max_download_bytes)
         self._specification = specification
         cache_root = Path(cache_dir or Path.home() / ".cache" / "duckpd" / "embeddings")
         self._cache_dir = cache_root / specification.fingerprint
+        self._prepare_timeout_seconds = prepare_timeout_seconds
+        self._max_download_bytes = max_download_bytes
         self._model: _FastEmbedModel | None = None
         self._prepared: PreparedModelInfo | None = None
 
@@ -132,70 +165,95 @@ class FastEmbedProvider:
                 "Local text embeddings require the optional 'duckpd[embeddings]' extra"
             ) from None
 
+        source, declared_size = _fastembed_source(TextEmbedding, self._specification)
+        if (
+            self._max_download_bytes is not None
+            and declared_size is not None
+            and declared_size > self._max_download_bytes
+        ):
+            raise UnsupportedOperationError(
+                "Embedding model exceeds the configured automatic download-size limit"
+            )
         manifest_name = f"duckpd-{self._specification.fingerprint}.json"
         manifest_path = self._cache_dir / manifest_name
-        if self._cache_dir.exists():
-            if not manifest_path.is_file():
-                raise UnsupportedOperationError(
-                    "Embedding cache exists without a verified DuckPD manifest"
+        lock_path = self._cache_dir.with_name(f".{self._cache_dir.name}.lock")
+        started = perf_counter()
+        with exclusive_file_lock(lock_path):
+            if self._cache_dir.exists():
+                if not manifest_path.is_file():
+                    raise UnsupportedOperationError(
+                        "Embedding cache exists without a verified DuckPD manifest"
+                    )
+                _check_prepare_limits(
+                    self._cache_dir,
+                    started=started,
+                    timeout_seconds=self._prepare_timeout_seconds,
+                    max_bytes=self._max_download_bytes,
                 )
-            artifact_digest = _directory_digest(self._cache_dir)
-            try:
-                recorded = cast("dict[str, object]", json.loads(manifest_path.read_text()))
-            except (OSError, TypeError, json.JSONDecodeError):
-                raise UnsupportedOperationError(
-                    "Prepared embedding cache has an invalid verification manifest"
-                ) from None
-            if (
-                recorded.get("model_fingerprint") != self._specification.fingerprint
-                or recorded.get("artifact_digest") != artifact_digest
-            ):
-                raise UnsupportedOperationError(
-                    "Prepared embedding artifacts changed since their verified cache promotion"
-                )
-            model = cast(
-                "_FastEmbedModel",
-                TextEmbedding(  # pyright: ignore[reportUnknownVariableType]
-                    model_name=self._specification.model,
-                    cache_dir=str(self._cache_dir),
-                    providers=["CPUExecutionProvider"],
-                ),
-            )
-            if _directory_digest(self._cache_dir) != artifact_digest:
-                raise UnsupportedOperationError(
-                    "Embedding backend mutated verified artifacts while loading"
-                )
-        else:
-            self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
-            staging = self._cache_dir.with_name(f".{self._cache_dir.name}.tmp-{uuid4().hex}")
-            shutil.rmtree(staging, ignore_errors=True)
-            try:
+                artifact_digest = _directory_digest(self._cache_dir)
+                try:
+                    recorded = cast("dict[str, object]", json.loads(manifest_path.read_text()))
+                except (OSError, TypeError, json.JSONDecodeError):
+                    raise UnsupportedOperationError(
+                        "Prepared embedding cache has an invalid verification manifest"
+                    ) from None
+                if (
+                    recorded.get("model_fingerprint") != self._specification.fingerprint
+                    or recorded.get("artifact_digest") != artifact_digest
+                    or recorded.get("model_specification") != self._specification.to_dict()
+                ):
+                    raise UnsupportedOperationError(
+                        "Prepared embedding artifacts changed since their verified cache promotion"
+                    )
                 model = cast(
                     "_FastEmbedModel",
                     TextEmbedding(  # pyright: ignore[reportUnknownVariableType]
                         model_name=self._specification.model,
-                        cache_dir=str(staging),
+                        cache_dir=str(self._cache_dir),
                         providers=["CPUExecutionProvider"],
+                        specific_model_path=str(self._cache_dir),
                     ),
                 )
-                artifact_digest = _directory_digest(staging)
-                (staging / manifest_name).write_text(
-                    json.dumps(
-                        {
-                            "model_fingerprint": self._specification.fingerprint,
-                            "artifact_digest": artifact_digest,
-                        },
-                        sort_keys=True,
+                if _directory_digest(self._cache_dir) != artifact_digest:
+                    raise UnsupportedOperationError(
+                        "Embedding backend mutated verified artifacts while loading"
                     )
-                )
-                try:
-                    os.rename(staging, self._cache_dir)
-                except FileExistsError:
-                    shutil.rmtree(staging, ignore_errors=True)
-                    return self.prepare()
-            except BaseException:
+            else:
+                self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
+                staging = self._cache_dir.with_name(f".{self._cache_dir.name}.tmp-{uuid4().hex}")
                 shutil.rmtree(staging, ignore_errors=True)
-                raise
+                try:
+                    _download_hf_snapshot(source, self._specification.revision, staging)
+                    _check_prepare_limits(
+                        staging,
+                        started=started,
+                        timeout_seconds=self._prepare_timeout_seconds,
+                        max_bytes=self._max_download_bytes,
+                    )
+                    model = cast(
+                        "_FastEmbedModel",
+                        TextEmbedding(  # pyright: ignore[reportUnknownVariableType]
+                            model_name=self._specification.model,
+                            cache_dir=str(staging),
+                            providers=["CPUExecutionProvider"],
+                            specific_model_path=str(staging),
+                        ),
+                    )
+                    artifact_digest = _directory_digest(staging)
+                    (staging / manifest_name).write_text(
+                        json.dumps(
+                            {
+                                "model_fingerprint": self._specification.fingerprint,
+                                "model_specification": self._specification.to_dict(),
+                                "artifact_digest": artifact_digest,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    os.rename(staging, self._cache_dir)
+                except BaseException:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
         self._model = model
         self._prepared = PreparedModelInfo(
             self._specification.fingerprint,
@@ -238,6 +296,8 @@ class TransformersEmbeddingProvider:
         device: Literal["cpu", "cuda"] = "cpu",
         batch_size: int = 64,
         cache_dir: str | Path | None = None,
+        prepare_timeout_seconds: float | None = None,
+        max_download_bytes: int | None = None,
     ):
         if specification.backend != "transformers":
             raise ValueError("TransformersEmbeddingProvider requires backend='transformers'")
@@ -247,11 +307,14 @@ class TransformersEmbeddingProvider:
             raise ValueError("TransformersEmbeddingProvider pooling must be 'cls' or 'mean'")
         if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
+        _validate_prepare_limits(prepare_timeout_seconds, max_download_bytes)
         self._specification = specification
         self._device = device
         self._batch_size = batch_size
         cache_root = Path(cache_dir or Path.home() / ".cache" / "duckpd" / "embeddings")
         self._cache_dir = cache_root / specification.fingerprint
+        self._prepare_timeout_seconds = prepare_timeout_seconds
+        self._max_download_bytes = max_download_bytes
         self._torch: Any | None = None
         self._tokenizer: Any | None = None
         self._model: Any | None = None
@@ -282,64 +345,77 @@ class TransformersEmbeddingProvider:
         model_factory = transformers.AutoModel
         manifest_name = f"duckpd-{self._specification.fingerprint}.json"
         manifest_path = self._cache_dir / manifest_name
-        if self._cache_dir.exists():
-            if not manifest_path.is_file():
-                raise UnsupportedOperationError(
-                    "Embedding cache exists without a verified DuckPD manifest"
+        lock_path = self._cache_dir.with_name(f".{self._cache_dir.name}.lock")
+        started = perf_counter()
+        with exclusive_file_lock(lock_path):
+            if self._cache_dir.exists():
+                if not manifest_path.is_file():
+                    raise UnsupportedOperationError(
+                        "Embedding cache exists without a verified DuckPD manifest"
+                    )
+                _check_prepare_limits(
+                    self._cache_dir,
+                    started=started,
+                    timeout_seconds=self._prepare_timeout_seconds,
+                    max_bytes=self._max_download_bytes,
                 )
-            artifact_digest = _directory_digest(self._cache_dir)
-            try:
-                recorded = cast("dict[str, object]", json.loads(manifest_path.read_text()))
-            except (OSError, TypeError, json.JSONDecodeError):
-                raise UnsupportedOperationError(
-                    "Prepared embedding cache has an invalid verification manifest"
-                ) from None
-            if (
-                recorded.get("model_fingerprint") != self._specification.fingerprint
-                or recorded.get("artifact_digest") != artifact_digest
-            ):
-                raise UnsupportedOperationError(
-                    "Prepared embedding artifacts changed since their verified cache promotion"
-                )
-            tokenizer, model = self._load_model(
-                tokenizer_factory,
-                model_factory,
-                self._cache_dir,
-                local_files_only=True,
-            )
-            if _directory_digest(self._cache_dir) != artifact_digest:
-                raise UnsupportedOperationError(
-                    "Embedding backend mutated verified artifacts while loading"
-                )
-        else:
-            self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
-            staging = self._cache_dir.with_name(f".{self._cache_dir.name}.tmp-{uuid4().hex}")
-            shutil.rmtree(staging, ignore_errors=True)
-            try:
+                artifact_digest = _directory_digest(self._cache_dir)
+                try:
+                    recorded = cast("dict[str, object]", json.loads(manifest_path.read_text()))
+                except (OSError, TypeError, json.JSONDecodeError):
+                    raise UnsupportedOperationError(
+                        "Prepared embedding cache has an invalid verification manifest"
+                    ) from None
+                if (
+                    recorded.get("model_fingerprint") != self._specification.fingerprint
+                    or recorded.get("artifact_digest") != artifact_digest
+                    or recorded.get("model_specification") != self._specification.to_dict()
+                ):
+                    raise UnsupportedOperationError(
+                        "Prepared embedding artifacts changed since their verified cache promotion"
+                    )
                 tokenizer, model = self._load_model(
                     tokenizer_factory,
                     model_factory,
-                    staging,
-                    local_files_only=False,
+                    self._cache_dir,
+                    local_files_only=True,
                 )
-                artifact_digest = _directory_digest(staging)
-                (staging / manifest_name).write_text(
-                    json.dumps(
-                        {
-                            "model_fingerprint": self._specification.fingerprint,
-                            "artifact_digest": artifact_digest,
-                        },
-                        sort_keys=True,
+                if _directory_digest(self._cache_dir) != artifact_digest:
+                    raise UnsupportedOperationError(
+                        "Embedding backend mutated verified artifacts while loading"
                     )
-                )
-                try:
-                    os.rename(staging, self._cache_dir)
-                except FileExistsError:
-                    shutil.rmtree(staging, ignore_errors=True)
-                    return self.prepare()
-            except BaseException:
+            else:
+                self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
+                staging = self._cache_dir.with_name(f".{self._cache_dir.name}.tmp-{uuid4().hex}")
                 shutil.rmtree(staging, ignore_errors=True)
-                raise
+                try:
+                    tokenizer, model = self._load_model(
+                        tokenizer_factory,
+                        model_factory,
+                        staging,
+                        local_files_only=False,
+                    )
+                    _check_prepare_limits(
+                        staging,
+                        started=started,
+                        timeout_seconds=self._prepare_timeout_seconds,
+                        max_bytes=self._max_download_bytes,
+                    )
+                    artifact_digest = _directory_digest(staging)
+                    (staging / manifest_name).write_text(
+                        json.dumps(
+                            {
+                                "model_fingerprint": self._specification.fingerprint,
+                                "model_specification": self._specification.to_dict(),
+                                "artifact_digest": artifact_digest,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    os.rename(staging, self._cache_dir)
+                except BaseException:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
 
         model.eval()
         model.to(self._device)
@@ -607,6 +683,107 @@ def _validate_embedding_array(  # pyright: ignore[reportUnusedFunction]
             if abs(norm - 1.0) > 1e-4:
                 raise ValueError("Embedding provider returned an unnormalized vector")
     return cast("pa.Array[Any]", fixed)
+
+
+def _embedding_schema_error(  # pyright: ignore[reportUnusedFunction]
+    schema: pa.Schema,
+    columns: Sequence[tuple[str, int]],
+) -> str | None:
+    for label, dimension in columns:
+        index = schema.get_field_index(label)
+        if index < 0:
+            return f"Catalog embedding column {label!r} is absent from feature data"
+        dtype = cast("Any", schema).field(index).type
+        if (
+            not pa.types.is_fixed_size_list(dtype)
+            or dtype.list_size != dimension
+            or not pa.types.is_float32(dtype.value_type)
+        ):
+            return (
+                f"Catalog embedding column {label!r} requires fixed-size "
+                f"float32[{dimension}] feature data; found {dtype}"
+            )
+    return None
+
+
+def _validate_prepare_limits(
+    timeout_seconds: float | None,
+    max_download_bytes: int | None,
+) -> None:
+    if timeout_seconds is not None and (isinstance(timeout_seconds, bool) or timeout_seconds <= 0):
+        raise ValueError("prepare_timeout_seconds must be positive")
+    if max_download_bytes is not None and (
+        type(max_download_bytes) is not int or max_download_bytes <= 0
+    ):
+        raise ValueError("max_download_bytes must be a positive integer")
+
+
+def _directory_size(root: Path) -> int:
+    resolved_root = root.resolve()
+    total = 0
+    for path in root.rglob("*"):
+        if path.is_symlink() and not path.resolve().is_relative_to(resolved_root):
+            raise UnsupportedOperationError(
+                "Embedding cache must not contain symbolic links outside its root"
+            )
+        if path.is_file():
+            total += path.stat().st_size
+    return total
+
+
+def _check_prepare_limits(
+    root: Path,
+    *,
+    started: float,
+    timeout_seconds: float | None,
+    max_bytes: int | None,
+) -> None:
+    if timeout_seconds is not None and perf_counter() - started > timeout_seconds:
+        raise UnsupportedOperationError("Embedding model preparation exceeded its timeout")
+    if max_bytes is not None and _directory_size(root) > max_bytes:
+        raise UnsupportedOperationError(
+            "Embedding model exceeds the configured automatic download-size limit"
+        )
+
+
+def _fastembed_source(
+    text_embedding: Any,
+    specification: EmbeddingModelSpec,
+) -> tuple[str, int | None]:
+    try:
+        supported = cast("list[dict[str, Any]]", text_embedding.list_supported_models())
+        description = next(item for item in supported if item.get("model") == specification.model)
+        source = cast("dict[str, object]", description["sources"]).get("hf")
+    except (AttributeError, KeyError, StopIteration, TypeError):
+        raise UnsupportedOperationError(
+            f"FastEmbed model {specification.model!r} has no qualified immutable artifact source"
+        ) from None
+    if not isinstance(source, str) or not source:
+        raise UnsupportedOperationError(
+            f"FastEmbed model {specification.model!r} has no Hugging Face artifact source"
+        )
+    dimension = description.get("dim")
+    if dimension != specification.dimension:
+        raise UnsupportedOperationError(
+            f"FastEmbed model declares dimension {dimension}; expected {specification.dimension}"
+        )
+    raw_size = description.get("size_in_GB")
+    size = int(float(raw_size) * 1_000_000_000) if raw_size is not None else None
+    return source, size
+
+
+def _download_hf_snapshot(repository: str, revision: str, target: Path) -> None:
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+    except ImportError:
+        raise UnsupportedOperationError(
+            "FastEmbed artifact preparation requires huggingface-hub"
+        ) from None
+    snapshot_download(
+        repo_id=repository,
+        revision=revision,
+        local_dir=target,
+    )
 
 
 def _directory_digest(root: Path) -> str:

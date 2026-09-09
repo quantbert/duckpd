@@ -254,14 +254,14 @@ def generate_news_dataset(
         identity["source_sha256"] != NEWS_SOURCE_SHA256 or row_count != NEWS_SOURCE_ROWS
     ):
         raise ValueError("Local news source does not match the pinned artifact")
+    staging = output.parent / f".{output.name}-staging"
     completion_path = output / "_SUCCESS.json"
     if completion_path.is_file() and not overwrite:
         if json.loads(completion_path.read_text(encoding="utf-8")) == identity:
+            shutil.rmtree(staging, ignore_errors=True)
             print(f"Skipping completed news dataset at {output}")
             return
         raise ValueError("Existing news dataset was generated with different settings")
-
-    staging = output.parent / f".{output.name}-staging"
     identity_path = staging / "identity.json"
     if overwrite:
         shutil.rmtree(output, ignore_errors=True)
@@ -377,6 +377,7 @@ def generate_news_dataset(
         year, month = partition
         temporary_path.replace(output / f"year={year}" / f"month={month:02d}" / "data.parquet")
     completion_path.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
+    shutil.rmtree(staging, ignore_errors=True)
     print(f"Wrote {row_count:,} embedded news rows to {output}")
 
 

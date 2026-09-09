@@ -22,10 +22,13 @@ demo/generate_data/.venv-rocm/bin/python demo/vector_search.py
 ```
 
 The ROCm setup registers a **DuckPD ROCm 7.2.4** Jupyter kernel. In VS Code,
-open `demo/DuckPD_Vector_Search.ipynb`, choose **Select Kernel** in the
-upper-right, and select that kernel. Restart the notebook kernel after switching.
-Do not use the repository's normal `.venv`; it intentionally lacks the
-accelerator-specific packages.
+open `demo/DuckPD_Vector_Search.ipynb` or
+`demo/featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb`, choose
+**Select Kernel** in the upper-right, and select that kernel. Restart the
+notebook kernel after switching. The FeatureStore notebook's non-embedding
+sections also run in the normal development environment; its semantic-search
+sections require Transformers and PyTorch. The normal `.venv` intentionally
+lacks those accelerator-specific packages.
 
 To use JupyterLab instead, install it into the ROCm environment and launch it
 with the same interpreter:
@@ -34,8 +37,7 @@ with the same interpreter:
 uv pip install \
   --python demo/generate_data/.venv-rocm/bin/python \
   jupyterlab
-demo/generate_data/.venv-rocm/bin/python -m jupyter lab \
-  demo/DuckPD_Vector_Search.ipynb
+demo/generate_data/.venv-rocm/bin/python -m jupyter lab demo
 ```
 
 PyTorch uses the `cuda` device API for both NVIDIA CUDA and AMD ROCm. The demos
@@ -92,7 +94,18 @@ request that device explicitly and fail rather than falling back to CPU.
 - `DuckPD_Vector_Search.ipynb` is an interactive GPU tutorial demonstrating
   explicit `TransformersEmbeddingProvider` registration, pinned PyTorch model
   preparation, lazy remote Parquet streaming, in-engine batch embedding via
-  `.embed_text()`, and exact cosine retrieval via `.vector.search_text()`.
+  `.embed_text()`, persisted sidecar metadata, model-omitting
+  `.vector.search_text()`, and parity with an explicit fingerprint assertion.
+  Ordinary sidecar-backed frames still require explicit model preparation.
+  Catalog-scoped automatic preparation is demonstrated separately in the
+  FeatureStore walkthrough.
+
+- `featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb` covers remote
+  catalog inspection, exact and point-in-time alignment, reference tables,
+  Arrow batch streaming, and catalog-inferred semantic search. Its embedding
+  workflow inspects the catalog model, plans without side effects, demonstrates
+  bounded automatic preparation, compares cold and warm profile metrics, and
+  shows explicit prewarming with automatic preparation disabled.
 
 ## Generate Feature-Store Data
 

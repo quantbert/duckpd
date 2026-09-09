@@ -866,24 +866,48 @@ class DuckDBCompiler:
             )
 
         if isinstance(source, FeatureParquetSource):
-            from duckpd._feature_sources import materialize_feature_source
+            import pyarrow.parquet as pq
+
+            from duckpd._feature_sources import (
+                capture_transfer_metrics,
+                materialize_feature_source,
+            )
+            from duckpd.embeddings import _embedding_schema_error
 
             filesystem = (
                 self._session._get_registered_source(source.filesystem_key)
                 if source.filesystem_key is not None
                 else None
             )
-            feature_paths = materialize_feature_source(
-                source,
-                self._session._connection,
-                filesystem,
-            )
+            with capture_transfer_metrics(self._session._embedding_metrics):
+                feature_paths = materialize_feature_source(
+                    source,
+                    self._session._connection,
+                    filesystem,
+                )
             if not feature_paths:
                 raise FileNotFoundError(
                     f"No partition files found for feature source {source.path_template!r}"
                 )
             paths: str | list[str] = feature_paths[0] if len(feature_paths) == 1 else feature_paths
-            return self._session._connection.read_parquet(paths)
+            for path in feature_paths:
+                if error := _embedding_schema_error(
+                    pq.ParquetFile(path).schema_arrow,
+                    source.embedding_columns,
+                ):
+                    raise UnsupportedOperationError(error)
+            relation = self._session._connection.read_parquet(paths)
+            embedding_dimensions = dict(source.embedding_columns)
+            projections = [
+                (
+                    f"CAST({quote_identifier(label)} AS FLOAT"
+                    f"[{embedding_dimensions[label]}]) AS {quote_identifier(label)}"
+                    if label in embedding_dimensions
+                    else quote_identifier(label)
+                )
+                for label in relation.columns
+            ]
+            return relation.project(", ".join(projections))
 
         paths: str | list[str] = source.paths[0] if len(source.paths) == 1 else list(source.paths)
         return self._session._connection.read_parquet(

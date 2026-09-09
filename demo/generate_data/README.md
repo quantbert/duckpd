@@ -87,9 +87,11 @@ The generator embeds all 3,951,636 article titles and descriptions with
 encoding, and staging plus final output requires additional free disk space. The
 operation can take a long time on CPU. Work is staged in bounded, restartable chunks.
 
-Catalog-driven model inference is part of the feature-store embedding design and must
-be implemented in the DuckPD runtime before `search_text()` can omit its explicit
-`model=` argument. Generation and raw-vector search do not depend on that inference.
+The generated catalog carries the complete immutable model specification.
+`FeatureStore` validates and propagates it, so catalog-loaded embeddings support
+`search_text()` without repeating `model=`. Constructing or explaining the query
+does not prepare the model; first execution uses the store's bounded automatic
+preparation policy. Disable that policy and pre-warm explicitly for offline use.
 
 ### AMD ROCm generation
 
@@ -136,7 +138,7 @@ Generate with the verified Transformers/ROCm path:
 
 ```bash
 make generate-news \
-  NEWS_UV_RUN='UV_PROJECT_ENVIRONMENT=.venv-rocm uv run --no-sync' \
+  NEWS_UV_RUN='UV_PROJECT_ENVIRONMENT=$(CURDIR)/.venv-rocm uv run --no-sync' \
   EMBEDDING_BACKEND=transformers \
   EMBEDDING_DEVICE=cuda \
   TRANSFORMER_BATCH_SIZE=64

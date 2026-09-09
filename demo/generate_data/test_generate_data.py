@@ -233,6 +233,10 @@ class GeneratedDatasetTests(unittest.TestCase):
             )
             generated = pq.read_table(output)
             first_call_count = len(calls)
+            staging = output.parent / ".news-staging"
+            self.assertFalse(staging.exists())
+            staging.mkdir()
+            (staging / "stale.parquet").write_bytes(b"stale")
             generate_news_dataset(
                 source,
                 output,
@@ -245,6 +249,7 @@ class GeneratedDatasetTests(unittest.TestCase):
                 embed_documents=embed,
                 verify_pinned_source=False,
             )
+            self.assertFalse(staging.exists())
 
         self.assertEqual(generated.num_rows, 6)
         self.assertEqual(generated.column("ticker").to_pylist(), ["007", "008"] * 3)

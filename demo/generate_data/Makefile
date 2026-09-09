@@ -61,11 +61,11 @@ generate-news: download-news ## Generate the embedded news stress dataset
 		--transformer-batch-size "$(TRANSFORMER_BATCH_SIZE)" $(OVERWRITE_FLAG)
 
 upload: ## Upload the generated feature store to Hugging Face
-	uv run --extra featurestore --env-file .env python hfupload.py \
+	env -u HF_TOKEN -u HF_DESTINATION uv run --extra featurestore --env-file .env python hfupload.py \
 		--data "$(DATA_DIRECTORY)" $(DRY_RUN_FLAG)
 
 demo: ## Run the remote cache and query example
-	uv run --extra featurestore --env-file .env python demo.py
+	env -u HF_TOKEN -u HF_DESTINATION uv run --extra featurestore --env-file .env python demo.py
 
 clean: ## Remove generated data and the feature cache
 	rm -rf "$(DATA_DIRECTORY)" feature_cache

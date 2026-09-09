@@ -1,6 +1,6 @@
 # Feature Store Embedding Metadata and Automatic Model Preparation
 
-**Status: proposed.**
+**Status: implemented in Phase 15.**
 
 ## Product decision
 
@@ -64,7 +64,7 @@ specifications.
   "embedding_models": {
     "bge-small-en-v1.5": {
       "model": "BAAI/bge-small-en-v1.5",
-      "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+      "revision": "52398278842ec682c6f32300af41344b1c0b0bb2",
       "dimension": 384,
       "backend": "fastembed",
       "normalize": true,
@@ -191,6 +191,8 @@ store = pd.FeatureStore(
     source="hf://datasets/example/embedded-news",
     cache="~/.cache/embedded-news",
     auto_prepare_embeddings=False,
+    embedding_prepare_timeout_seconds=300,
+    embedding_download_limit_bytes=1_073_741_824,
 )
 ```
 
@@ -206,12 +208,11 @@ store.session.prepare_embedding_model(model)
 `EmbeddingModelSpec` without downloading anything. This supports offline
 preparation, deployment warm-up, inspection, and reproducible logging.
 
-The session should own the effective preparation policy because model providers
-and prepared artifacts are session-owned. `FeatureStore` configures that policy
-for models originating from its catalog without changing the behavior of
-unrelated frames in the same session. If multiple stores share a session, each
-catalog model registration carries its own allow-auto-prepare flag; a conflict
-for the same fingerprint uses the stricter policy and is reported.
+The session owns the effective preparation policy because model providers and
+prepared artifacts are session-owned. `FeatureStore` configures that policy for
+models originating from its catalog without changing unrelated frames. If
+multiple stores share a session, a conflict for the same fingerprint uses the
+stricter policy and the smallest configured timeout and download-size limit.
 
 ## Metadata propagation
 
@@ -231,8 +232,8 @@ flowchart LR
 
 The following implementation points are required:
 
-1. `_feature_catalog.validate_catalog()` validates versions 1 and 2 and returns
-   or constructs the model registry in addition to dataset and feature indexes.
+1. `_feature_catalog.validate_catalog()` validates the catalog version 1 schema
+   and returns or constructs the model registry in addition to dataset and feature indexes.
 2. `FeatureStore._timeseries_frame()` attaches the resolved embedding metadata
    to physical feature columns when it builds scan metadata.
 3. `FeatureStore._inspect_table_columns()` applies validated dataset `columns`
@@ -370,10 +371,10 @@ At execution, immediately before the first query embedding call:
 5. Verify the prepared provider fingerprint and artifact manifest.
 6. Embed the query and execute the existing exact vector-search path.
 
-Preparation must be idempotent within a session. Cross-process behavior relies
-on the embedding cache's atomic staging and verified manifest contract; the
-implementation must add a per-fingerprint lock if concurrent preparation can
-currently race before atomic promotion.
+Preparation is idempotent within a session. A per-fingerprint session lock and
+an adjacent cross-process cache lock serialize preparation; atomic staging,
+failure cleanup, manifest verification, and promotion make concurrent processes
+converge on one verified cache.
 
 Model preparation occurs before scanning feature partitions where practical, so
 a dependency, network, digest, or model-availability failure does not trigger a

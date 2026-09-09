@@ -54,6 +54,21 @@ the [release policy](RELEASES.md).
 - Explicit `TransformersEmbeddingProvider` inference on PyTorch CPU, NVIDIA
   CUDA, or AMD ROCm devices, with immutable revision caches, CLS/mean pooling,
   bounded internal batches, verified artifacts, and no silent GPU fallback.
+- A GPU vector-search script and Jupyter tutorial with explicit Transformers
+  provider registration, named ROCm-kernel setup, dependency/device preflight,
+  and backend-specific persisted embedding files.
+- A fully generated and validated feature-store demo corpus containing
+  388,491,746 rows across 212 Parquet files, including 3,951,636
+  GPU-embedded news rows, plus verified private Hugging Face publication and a
+  bounded remote query/streaming smoke workflow.
+- Strict feature-store `embedding_models`, feature, and table-column metadata;
+  side-effect-free `FeatureStore.embedding_model()` lookup; catalog-inferred
+  `vector.search_text()`; and bounded execution-time model preparation before
+  remote partition transfer.
+- Immutable FastEmbed artifact revision resolution, full-specification cache
+  manifests, per-fingerprint process/thread locking, atomic failure cleanup,
+  stricter shared-session preparation policy, and separate embedding lifecycle
+  profile metrics.
 
 ### Changed
 
@@ -68,6 +83,12 @@ the [release policy](RELEASES.md).
 - Text embedding materialization now displays progress automatically;
   applications no longer manage `tqdm`, row counts, provider decorators, or
   provider replacement lifecycles.
+- Completed news generation now removes resumable staging chunks, and feature
+  store uploads exclude hidden news staging defensively instead of publishing
+  thousands of local checkpoint files.
+- Feature-store upload and demo targets now treat their local `.env` file as
+  authoritative over inherited stale credentials; the remote smoke demo uses a
+  bounded exact-alignment query instead of downloading full predecessor history.
 
 ## 0.1.4 - 2026-09-06
 

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
+import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import ClassVar, cast
@@ -100,6 +104,40 @@ def _frame() -> tuple[duckpd.Session, duckpd.DataFrame, KeywordProvider]:
         )
     )
     return session, frame, provider
+
+
+def test_model_identity_rejects_unenforceable_builtin_configuration(
+    tmp_path: Path,
+) -> None:
+    model = _model()
+    with pytest.raises(TypeError, match="normalize"):
+        replace(model, normalize=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="immutable"):
+        replace(model, revision="latest")
+    with pytest.raises(ValueError, match="model must"):
+        replace(model, model="")
+    with pytest.raises(ValueError, match="backend"):
+        replace(model, backend="remote")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="prefix"):
+        replace(model, query_prefix=1)  # type: ignore[arg-type]
+
+    fastembed = replace(model, backend="fastembed", pooling="model-default")
+    with pytest.raises(ValueError, match="pooling='model-default'"):
+        FastEmbedProvider(replace(fastembed, pooling="mean"), cache_dir=tmp_path)
+    with pytest.raises(ValueError, match="normalize=True"):
+        FastEmbedProvider(replace(fastembed, normalize=False), cache_dir=tmp_path)
+    with pytest.raises(ValueError, match="positive"):
+        FastEmbedProvider(fastembed, cache_dir=tmp_path, max_download_bytes=0)
+
+    transformers = replace(model, backend="transformers", pooling="mean")
+    with pytest.raises(ValueError, match="device"):
+        TransformersEmbeddingProvider(transformers, device="tpu")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="pooling"):
+        TransformersEmbeddingProvider(replace(transformers, pooling="model-default"))
+    with pytest.raises(ValueError, match="batch_size"):
+        TransformersEmbeddingProvider(transformers, batch_size=0)
+    with pytest.raises(ValueError, match="timeout"):
+        TransformersEmbeddingProvider(transformers, prepare_timeout_seconds=0)
 
 
 def test_embed_text_is_lazy_batched_typed_and_row_preserving() -> None:
@@ -450,19 +488,30 @@ class FakeFastEmbedding:
     document_inputs: ClassVar[list[list[str]]] = []
     query_inputs: ClassVar[list[str]] = []
 
+    @classmethod
+    def list_supported_models(cls) -> list[dict[str, object]]:
+        return [
+            {
+                "model": "test/fake-fastembed",
+                "dim": 3,
+                "size_in_GB": 0.000001,
+                "sources": {"hf": "test/fake-fastembed-artifacts"},
+            }
+        ]
+
     def __init__(
         self,
         *,
         model_name: str,
         cache_dir: str,
         providers: list[str],
+        specific_model_path: str,
     ) -> None:
         assert model_name == "test/fake-fastembed"
         assert providers == ["CPUExecutionProvider"]
+        assert specific_model_path == cache_dir
         artifact = Path(cache_dir) / "model.onnx"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        if not artifact.exists():
-            artifact.write_bytes(b"verified-model")
+        assert artifact.is_file()
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         self.document_inputs.append(list(texts))
@@ -473,6 +522,52 @@ class FakeFastEmbedding:
         return [[0.0, 1.0, 0.0]]
 
 
+def test_fastembed_rejects_unqualified_artifact_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("fastembed")
+    monkeypatch.setitem(sys.modules, "fastembed", module)
+    model = duckpd.embedding_model(
+        "test/fake-fastembed",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+    )
+
+    class MissingModel(FakeFastEmbedding):
+        @classmethod
+        def list_supported_models(cls) -> list[dict[str, object]]:
+            return []
+
+    module.TextEmbedding = MissingModel  # type: ignore[attr-defined]
+    with pytest.raises(UnsupportedOperationError, match="no qualified"):
+        FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+    class MissingRepository(FakeFastEmbedding):
+        @classmethod
+        def list_supported_models(cls) -> list[dict[str, object]]:
+            return [{"model": model.model, "dim": 3, "sources": {}}]
+
+    module.TextEmbedding = MissingRepository  # type: ignore[attr-defined]
+    with pytest.raises(UnsupportedOperationError, match="no Hugging Face"):
+        FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+    class WrongDimension(FakeFastEmbedding):
+        @classmethod
+        def list_supported_models(cls) -> list[dict[str, object]]:
+            return [
+                {
+                    "model": model.model,
+                    "dim": 2,
+                    "sources": {"hf": "test/fake-fastembed-artifacts"},
+                }
+            ]
+
+    module.TextEmbedding = WrongDimension  # type: ignore[attr-defined]
+    with pytest.raises(UnsupportedOperationError, match="declares dimension"):
+        FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+
 def test_fastembed_provider_prepares_verifies_and_executes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -480,6 +575,14 @@ def test_fastembed_provider_prepares_verifies_and_executes(
     module = ModuleType("fastembed")
     module.TextEmbedding = FakeFastEmbedding  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "fastembed", module)
+    downloads: list[tuple[str, str]] = []
+
+    def download(repository: str, revision: str, target: Path) -> None:
+        downloads.append((repository, revision))
+        target.mkdir(parents=True)
+        (target / "model.onnx").write_bytes(b"verified-model")
+
+    monkeypatch.setattr("duckpd.embeddings._download_hf_snapshot", download)
     model = duckpd.embedding_model(
         "test/fake-fastembed",
         revision="0123456789abcdef0123456789abcdef01234567",
@@ -494,6 +597,9 @@ def test_fastembed_provider_prepares_verifies_and_executes(
 
     prepared = provider.prepare()
     assert provider.prepare() is prepared
+    assert downloads == [
+        ("test/fake-fastembed-artifacts", model.revision),
+    ]
     assert prepared.artifact_digest == _directory_digest(Path(prepared.cache_path or ""))
     assert prepared.execution_providers == ("CPUExecutionProvider",)
     assert provider.embed_documents(["hello"]).to_pylist() == [[1.0, 0.0, 0.0]]
@@ -507,6 +613,130 @@ def test_fastembed_provider_prepares_verifies_and_executes(
     (Path(prepared.cache_path or "") / "model.onnx").write_bytes(b"changed")
     with pytest.raises(UnsupportedOperationError, match="changed"):
         FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+
+def test_fastembed_cache_requires_valid_full_identity_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("fastembed")
+    module.TextEmbedding = FakeFastEmbedding  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fastembed", module)
+
+    def download(_repository: str, _revision: str, target: Path) -> None:
+        target.mkdir(parents=True)
+        (target / "model.onnx").write_bytes(b"verified-model")
+
+    monkeypatch.setattr("duckpd.embeddings._download_hf_snapshot", download)
+    model = duckpd.embedding_model(
+        "test/fake-fastembed",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+    )
+    prepared = FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+    cache = Path(prepared.cache_path or "")
+    manifest = next(cache.glob("duckpd-*.json"))
+    valid_manifest = manifest.read_text()
+
+    manifest.write_text("{")
+    with pytest.raises(UnsupportedOperationError, match="invalid verification manifest"):
+        FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+    recorded = json.loads(valid_manifest)
+    recorded["model_specification"]["query_prefix"] = "changed"
+    manifest.write_text(json.dumps(recorded))
+    with pytest.raises(UnsupportedOperationError, match="changed"):
+        FastEmbedProvider(model, cache_dir=tmp_path).prepare()
+
+    missing_root = tmp_path / "missing-manifest"
+    missing_cache = missing_root / model.fingerprint
+    missing_cache.mkdir(parents=True)
+    (missing_cache / "model.onnx").write_bytes(b"verified-model")
+    with pytest.raises(UnsupportedOperationError, match="without a verified"):
+        FastEmbedProvider(model, cache_dir=missing_root).prepare()
+
+
+def test_fastembed_preparation_lock_converges_on_one_verified_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("fastembed")
+    module.TextEmbedding = FakeFastEmbedding  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fastembed", module)
+    downloads: list[str] = []
+
+    def download(_repository: str, revision: str, target: Path) -> None:
+        downloads.append(revision)
+        time.sleep(0.05)
+        target.mkdir(parents=True)
+        (target / "model.onnx").write_bytes(b"verified-model")
+
+    monkeypatch.setattr("duckpd.embeddings._download_hf_snapshot", download)
+    model = duckpd.embedding_model(
+        "test/fake-fastembed",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+    )
+    providers = [
+        FastEmbedProvider(model, cache_dir=tmp_path),
+        FastEmbedProvider(model, cache_dir=tmp_path),
+    ]
+
+    def prepare(provider: FastEmbedProvider) -> PreparedModelInfo:
+        return provider.prepare()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        prepared = tuple(pool.map(prepare, providers))
+
+    assert len(downloads) == 1
+    assert prepared[0].artifact_digest == prepared[1].artifact_digest
+    assert not tuple(tmp_path.glob(".*.tmp-*"))
+
+
+def test_fastembed_automatic_preparation_limits_fail_without_cache_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("fastembed")
+    module.TextEmbedding = FakeFastEmbedding  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fastembed", module)
+    model = duckpd.embedding_model(
+        "test/fake-fastembed",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+    )
+    with pytest.raises(UnsupportedOperationError, match="download-size limit"):
+        FastEmbedProvider(
+            model,
+            cache_dir=tmp_path,
+            max_download_bytes=1,
+        ).prepare()
+
+    def slow_download(_repository: str, _revision: str, target: Path) -> None:
+        target.mkdir(parents=True)
+        (target / "model.onnx").write_bytes(b"verified-model")
+        time.sleep(0.02)
+
+    monkeypatch.setattr("duckpd.embeddings._download_hf_snapshot", slow_download)
+    with pytest.raises(UnsupportedOperationError, match="exceeded its timeout"):
+        FastEmbedProvider(
+            model,
+            cache_dir=tmp_path,
+            prepare_timeout_seconds=0.001,
+        ).prepare()
+
+    def oversized_download(_repository: str, _revision: str, target: Path) -> None:
+        target.mkdir(parents=True)
+        (target / "model.onnx").write_bytes(b"x" * 2_000)
+
+    monkeypatch.setattr("duckpd.embeddings._download_hf_snapshot", oversized_download)
+    with pytest.raises(UnsupportedOperationError, match="download-size limit"):
+        FastEmbedProvider(
+            model,
+            cache_dir=tmp_path,
+            max_download_bytes=1_500,
+        ).prepare()
+    assert not (tmp_path / model.fingerprint).exists()
 
 
 class FakeTensor:

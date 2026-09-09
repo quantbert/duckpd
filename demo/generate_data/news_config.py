@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any
 
 import duckpd as pd
@@ -15,7 +14,7 @@ NEWS_SOURCE_ROWS = 3_951_636
 NEWS_MODEL_KEY = "bge-small-en-v1.5"
 NEWS_MODEL = pd.embedding_model(
     "BAAI/bge-small-en-v1.5",
-    revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    revision="52398278842ec682c6f32300af41344b1c0b0bb2",
     dimension=384,
 )
 NEWS_TRANSFORMERS_MODEL = pd.embedding_model(
@@ -40,4 +39,4 @@ def embedding_models(
     model: pd.EmbeddingModelSpec = NEWS_MODEL,
 ) -> dict[str, dict[str, Any]]:
     """Return the serializable embedding-model registry."""
-    return {NEWS_MODEL_KEY: asdict(model)}
+    return {NEWS_MODEL_KEY: model.to_dict()}

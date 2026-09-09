@@ -161,7 +161,7 @@ The revision must be non-empty and immutable. Mutable names such as `main`,
 `master`, `latest`, and `head` are rejected. The dimension must be a positive
 integer.
 
-Preparation is explicit and session-scoped:
+Preparation is explicit and session-scoped for ordinary frames:
 
 ```python
 prepared = session.prepare_embedding_model(model, cache_dir=".model-cache")
@@ -173,14 +173,17 @@ print(prepared.execution_providers)
 ```
 
 DuckPD verifies the prepared artifact cache and refuses to use artifacts that
-have changed since cache promotion. Inspect prepared models with:
+have changed since cache promotion. Built-in providers serialize preparation by
+model fingerprint, stage atomically, and bind the manifest to the complete model
+specification. FastEmbed artifacts are resolved from the declared immutable
+revision instead of the backend's mutable default. Inspect prepared models with:
 
 ```python
 prepared_models = session.inspect_prepared_embedding_models()
 ```
 
-Execution that needs an unprepared model fails with an instruction to call
-`prepare_embedding_model()`.
+Execution that needs an unprepared non-catalog model fails with an instruction
+to call `prepare_embedding_model()`.
 
 For explicit PyTorch GPU inference, use a distinct backend and pooling identity,
 then register the device-specific provider before preparation:
@@ -252,7 +255,8 @@ embedding space.
 ### Search persisted embeddings with text
 
 `DataFrame.vector.search_text()` embeds one query and performs exact top-k
-search against a verified embedding column:
+search against a verified embedding column. `model` is optional only when the
+column carries verified embedding metadata:
 
 ```python
 stored = session.read_parquet("documents-embedded.parquet")
@@ -260,7 +264,6 @@ stored = session.read_parquet("documents-embedded.parquet")
 matches = stored.vector.search_text(
     "renewable energy investment",
     column="embedding",
-    model=model,
     metric="cosine",
     k=10,
     distance_column="_distance",
@@ -268,10 +271,11 @@ matches = stored.vector.search_text(
 )
 ```
 
-The column must carry embedding metadata with the same fingerprint as `model`.
-DuckPD rejects missing or mismatched metadata instead of assuming that equal
-dimensions imply compatibility. `search_text()` is exact; it does not expose an
-approximate mode.
+Metadata restored from a DuckPD sidecar or feature-store catalog supplies the
+model. Passing `model=` remains supported and acts as a fingerprint
+compatibility assertion, not an override. DuckPD rejects missing, mismatched, or
+dimension-invalid metadata instead of assuming that equal dimensions imply
+compatibility. `search_text()` is exact; it does not expose an approximate mode.
 
 ### Embed a query explicitly
 
@@ -465,9 +469,10 @@ Execute with profiling when inference or retrieval cost matters:
 profile = matches.profile()
 ```
 
-Embedding profile metrics include source and document rows, text bytes, batch
-count, preparation and inference timing, throughput, prepared-model count, and
-provider retries where available.
+Embedding profile metrics separate catalog access, model preparation, verified
+provider reuse, feature-partition transfer, query inference/cache reuse, and
+document inference. Explain output reports model origin, preparation policy, and
+prepared state while redacting query text.
 
 ## Execution summary
 

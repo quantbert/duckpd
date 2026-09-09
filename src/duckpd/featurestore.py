@@ -8,6 +8,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -41,6 +42,11 @@ from duckpd._logical import (
     SourceProvenance,
 )
 from duckpd._metadata import after_join, after_projection
+from duckpd.embeddings import (
+    EmbeddingColumnSpec,
+    EmbeddingModelSpec,
+    _embedding_schema_error,
+)
 from duckpd.series import Series
 
 if TYPE_CHECKING:
@@ -74,6 +80,9 @@ class FeatureStore:
         filters: Mapping[str, Sequence[str]] | None = None,
         alignment: Literal["exact", "point_in_time"] | None = None,
         spine: str | None = None,
+        auto_prepare_embeddings: bool = True,
+        embedding_prepare_timeout_seconds: float | None = 300.0,
+        embedding_download_limit_bytes: int | None = 1_073_741_824,
     ) -> None:
         from duckpd.io import _get_implicit_session
 
@@ -84,6 +93,20 @@ class FeatureStore:
         self._catalog_path_raw = Path(catalog_path) if catalog_path is not None else None
         self.alignment = self._validate_alignment(alignment)
         self.spine = spine
+        if type(auto_prepare_embeddings) is not bool:
+            raise TypeError("auto_prepare_embeddings must be a boolean")
+        if embedding_prepare_timeout_seconds is not None and (
+            isinstance(embedding_prepare_timeout_seconds, bool)
+            or embedding_prepare_timeout_seconds <= 0
+        ):
+            raise ValueError("embedding_prepare_timeout_seconds must be positive")
+        if embedding_download_limit_bytes is not None and (
+            type(embedding_download_limit_bytes) is not int or embedding_download_limit_bytes <= 0
+        ):
+            raise ValueError("embedding_download_limit_bytes must be a positive integer")
+        self._auto_prepare_embeddings = auto_prepare_embeddings
+        self._embedding_prepare_timeout_seconds = embedding_prepare_timeout_seconds
+        self._embedding_download_limit_bytes = embedding_download_limit_bytes
 
         self._is_remote = self._source_raw.startswith(("hf://", "http://", "https://"))
         self._filesystem: Any = None
@@ -120,7 +143,19 @@ class FeatureStore:
         self._catalog: dict[str, Any] = {}
         self._dataset_entries: dict[str, dict[str, Any]] = {}
         self._feature_entries: dict[str, dict[str, Any]] = {}
+        self._embedding_models: dict[str, EmbeddingModelSpec] = {}
+        catalog_started = perf_counter()
         self._load_catalog()
+        catalog_elapsed = perf_counter() - catalog_started
+        if self._embedding_models:
+            self._session._embedding_catalog_access_seconds += catalog_elapsed
+        for model in self._embedding_models.values():
+            self._session._register_catalog_embedding_model(
+                model,
+                auto_prepare=auto_prepare_embeddings,
+                timeout_seconds=embedding_prepare_timeout_seconds,
+                max_download_bytes=embedding_download_limit_bytes,
+            )
 
         # Selection state
         self._configured_features: Sequence[str] | Mapping[str, str] | None = None
@@ -200,10 +235,11 @@ class FeatureStore:
             raise FileNotFoundError(f"Catalog not found in {self._source_raw}")
 
         catalog_data = json.loads(catalog_text)
-        dataset_index, feature_index = validate_catalog(catalog_data)
+        dataset_index, feature_index, embedding_models = validate_catalog(catalog_data)
         self._catalog = catalog_data
         self._dataset_entries = dataset_index
         self._feature_entries = feature_index
+        self._embedding_models = embedding_models
 
     def catalog(self) -> dict[str, Any]:
         """Return a defensive copy of the validated catalog."""
@@ -218,6 +254,15 @@ class FeatureStore:
     def session(self) -> Session:
         """Return the owning DuckPD session."""
         return self._session
+
+    def embedding_model(self, name: Any) -> EmbeddingModelSpec:
+        """Return one immutable model specification from the catalog registry."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("embedding model name must be a non-empty string")
+        try:
+            return self._embedding_models[name]
+        except KeyError:
+            raise ValueError(f"Unknown catalog embedding model: {name!r}") from None
 
     def table(self, name: Any) -> DataFrame:
         """Return a lazy scan of a registered catalog reference table."""
@@ -241,7 +286,7 @@ class FeatureStore:
         if "{month" in path_template:
             raise ValueError(f"Table dataset {name!r} cannot have month partition template")
 
-        columns = self._inspect_table_columns(path_template)
+        columns = self._inspect_table_columns(path_template, entry)
         source = FeatureParquetSource(
             source_root=self._source_raw if self._is_remote else str(self._source_path),
             cache_root=str(self._cache_path) if self._is_remote else None,
@@ -249,6 +294,11 @@ class FeatureStore:
             needed_columns=tuple(column.label for column in columns),
             filesystem_key=self._filesystem_key,
             table=True,
+            embedding_columns=tuple(
+                (column.label, column.embedding.model.dimension)
+                for column in columns
+                if column.embedding is not None
+            ),
         )
         metadata = FrameMetadata(
             columns,
@@ -261,7 +311,11 @@ class FeatureStore:
 
         return DataFrame(self._session, ScanPlan(source, metadata))
 
-    def _inspect_table_columns(self, path_template: str) -> tuple[Column, ...]:
+    def _inspect_table_columns(
+        self,
+        path_template: str,
+        entry: Mapping[str, Any],
+    ) -> tuple[Column, ...]:
         """Read only Parquet schema metadata; table bytes remain uncached until execution."""
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -282,11 +336,63 @@ class FeatureStore:
                 with self._filesystem.open(remote_path, "rb") as remote_file:
                     schema = pq.ParquetFile(remote_file).schema_arrow
 
+        column_config = cast("Mapping[str, Mapping[str, Any]]", entry.get("columns", {}))
+        embedding_columns = tuple(
+            (
+                label,
+                self._embedding_models[cast("str", declaration["embedding"])].dimension,
+            )
+            for label, declaration in column_config.items()
+            if "embedding" in declaration
+        )
+        if error := _embedding_schema_error(schema, embedding_columns):
+            raise ValueError(error)
         empty = pa.Table.from_batches([], schema=schema)
         relation = self._session._connection.from_arrow(empty)
-        return tuple(
-            Column(ColumnId.create(), label, str(dtype))
-            for label, dtype in zip(relation.columns, relation.types, strict=True)
+        physical_types = dict(zip(relation.columns, relation.types, strict=True))
+        columns: list[Column] = []
+        for label, dtype in physical_types.items():
+            embedding = self._column_embedding(column_config.get(label))
+            duckdb_type = (
+                f"FLOAT[{embedding.model.dimension}]" if embedding is not None else str(dtype)
+            )
+            columns.append(Column(ColumnId.create(), label, duckdb_type, embedding=embedding))
+        return tuple(columns)
+
+    def _column_embedding(
+        self,
+        config: Mapping[str, Any] | None,
+    ) -> EmbeddingColumnSpec | None:
+        if config is None or "embedding" not in config:
+            return None
+        return EmbeddingColumnSpec(
+            self._embedding_models[cast("str", config["embedding"])],
+            origin="catalog",
+            auto_prepare=self._auto_prepare_embeddings,
+        )
+
+    def _feature_embedding(
+        self,
+        dataset: str,
+        physical_name: str,
+    ) -> EmbeddingColumnSpec | None:
+        references = {
+            cast("str", entry["embedding"])
+            for entry in self._feature_entries.values()
+            if entry["dataset"] == dataset
+            and entry["name"] == physical_name
+            and "embedding" in entry
+        }
+        if not references:
+            return None
+        if len(references) != 1:
+            raise ValueError(
+                f"Catalog has conflicting embedding models for {dataset}.{physical_name}"
+            )
+        return EmbeddingColumnSpec(
+            self._embedding_models[references.pop()],
+            origin="catalog",
+            auto_prepare=self._auto_prepare_embeddings,
         )
 
     def _configure(
@@ -439,7 +545,19 @@ class FeatureStore:
                 ]
             )
         )
-        columns = tuple(Column(ColumnId.create(), label, "UNKNOWN") for label in labels)
+        columns = tuple(
+            Column(
+                ColumnId.create(),
+                label,
+                (
+                    f"FLOAT[{embedding.model.dimension}]"
+                    if (embedding := self._feature_embedding(dataset, label)) is not None
+                    else "UNKNOWN"
+                ),
+                embedding=embedding,
+            )
+            for label in labels
+        )
         source = FeatureParquetSource(
             source_root=self._source_raw if self._is_remote else str(self._source_path),
             cache_root=str(self._cache_path) if self._is_remote else None,
@@ -450,6 +568,11 @@ class FeatureStore:
             min_time=entry.get("min_time"),
             max_time=entry.get("max_time"),
             filesystem_key=self._filesystem_key,
+            embedding_columns=tuple(
+                (column.label, column.embedding.model.dimension)
+                for column in columns
+                if column.embedding is not None
+            ),
         )
         metadata = FrameMetadata(
             columns,
@@ -484,6 +607,7 @@ class FeatureStore:
                 source_column.duckdb_type,
                 nullable=source_column.nullable,
                 alias_of=source_column.id,
+                embedding=source_column.embedding,
             )
             projections.append(NamedExpression(output_column, ColumnRef(source_column.id)))
             output_columns.append(output_column)
@@ -647,6 +771,7 @@ class FeatureStore:
                     right_columns[output_name].duckdb_type,
                     nullable=Nullability.NULLABLE,
                     alias_of=right_columns[output_name].alias_of,
+                    embedding=right_columns[output_name].embedding,
                 )
                 for output_name, _ in features
             )

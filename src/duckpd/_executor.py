@@ -9,7 +9,7 @@ import shutil
 import sys
 import tempfile
 import warnings
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
@@ -276,21 +276,23 @@ def _execution_context(
             *args: _P.args,
             **kwargs: _P.kwargs,
         ) -> _R:
-            progress = (
-                self._show_embedding_progress(plan)
-                if operation
-                in {
-                    "collect",
-                    "to_arrow",
-                    "write_parquet",
-                    "write_csv",
-                    "persist",
-                    "save_as_table",
-                    "commit",
-                    "profile",
-                }
-                else nullcontext()
-            )
+            executes = operation in {
+                "collect",
+                "to_arrow",
+                "write_parquet",
+                "write_csv",
+                "persist",
+                "save_as_table",
+                "commit",
+                "profile",
+            }
+            if executes:
+                if operation == "profile":
+                    self._session._embedding_metrics = {
+                        "catalog_access_seconds": (self._session._embedding_catalog_access_seconds)
+                    }
+                self._session._prepare_plan_embedding_models(plan)
+            progress = self._show_embedding_progress(plan) if executes else nullcontext()
             try:
                 with progress:
                     return function(self, plan, *args, **kwargs)
@@ -428,6 +430,7 @@ def _vector_operations(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
 def _embedding_operations(
     plan: LogicalPlan,
     prepared_models: frozenset[str] = frozenset(),
+    automatic_preparation: Mapping[str, bool] | None = None,
 ) -> tuple[dict[str, object], ...]:
     operations: list[dict[str, object]] = []
     for node in _plan_nodes(plan):
@@ -459,9 +462,14 @@ def _embedding_operations(
                     else "semantic_search",
                     "backend": node.model.backend,
                     "model_fingerprint": node.model.fingerprint,
-                    "dimension": node.model.dimension,
+                    "automatic_preparation_allowed": (
+                        automatic_preparation.get(node.model.fingerprint, node.auto_prepare)
+                        if automatic_preparation is not None
+                        else node.auto_prepare
+                    ),
                     "normalize": node.model.normalize,
                     "model_prepared": node.model.fingerprint in prepared_models,
+                    "model_origin": node.model_origin,
                     "batch_size": node.batch_size,
                     "null_policy": node.null_policy,
                     "filter_placement": (
@@ -1472,6 +1480,10 @@ class Executor:
         embedding_operations = _embedding_operations(
             plan,
             frozenset(self._session._prepared_embedding_models),
+            {
+                fingerprint: policy.auto_prepare
+                for fingerprint, policy in self._session._catalog_embedding_policies.items()
+            },
         )
         resource_policy = {
             "non_spillable_aggregate_states": "error",
@@ -1611,7 +1623,6 @@ class Executor:
     @_execution_context("profile")
     def profile(self, plan: LogicalPlan) -> ProfileResult:
         """Execute plan and separate planning from engine execution time."""
-        self._session._embedding_metrics = {}
         embedding_models = {
             node.model.fingerprint
             for node in _plan_nodes(plan)
@@ -1623,13 +1634,9 @@ class Executor:
             if fingerprint in self._session._prepared_embedding_models
         ]
         if prepared:
-            self._session._embedding_metrics.update(
-                {
-                    "prepared_models": len(prepared),
-                    "preparation_seconds": sum(model.preparation_seconds for model in prepared),
-                    "provider_retries": 0,
-                }
-            )
+            self._session._embedding_metrics.setdefault("prepared_models", len(prepared))
+            self._session._embedding_metrics.setdefault("preparation_seconds", 0.0)
+            self._session._embedding_metrics.setdefault("provider_retries", 0)
         self._validate_execution(plan)
         con = self._session._connection
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
@@ -1693,6 +1700,10 @@ class Executor:
             embedding_operations=_embedding_operations(
                 plan,
                 frozenset(self._session._prepared_embedding_models),
+                {
+                    fingerprint: policy.auto_prepare
+                    for fingerprint, policy in self._session._catalog_embedding_policies.items()
+                },
             ),
         )
 

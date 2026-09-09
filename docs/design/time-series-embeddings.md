@@ -10,8 +10,8 @@ implemented time-series embedding API.
 Companion designs: [Text Embeddings and Semantic Search][design-text],
 [Vector Search][design-vector], [Feature Store Architecture][design-store], and
 [Feature Store Embedding Metadata and Automatic Model Preparation][design-catalog].
-The last document is itself a proposal. Its catalog version 2 and automatic
-preparation behavior must not be treated as shipped dependencies.
+The last document is itself a proposal. Its catalog-version-1 text embedding
+declarations and automatic preparation behavior must not be treated as shipped dependencies.
 
 ## Product decision
 
@@ -89,7 +89,7 @@ The following are source observations, not proposed additions.
 | Metadata | A `Column` currently has text-specific `embedding` metadata. | Introduce additive series metadata without rehashing legacy text models. |
 | Persistence | Local Parquet embedding sidecars and session-managed table embedding metadata exist. | Extend versioned persistence; do not assume metadata survives every external tool or session reopen. |
 | Feature store | Catalog parser accepts version 1. Timeseries feature planning initially uses `UNKNOWN` column types. | Catalog series search needs declared logical vector types plus physical validation. |
-| Catalog embedding design | Version 2 text embedding declarations and automatic preparation are proposed. | Series catalog work has an explicit dependency, not an assumed capability. |
+| Catalog embedding design | Catalog-version-1 text embedding declarations and automatic preparation are proposed. | Series catalog work has an explicit dependency, not an assumed capability. |
 
 These observations are grounded in the architecture decisions and source for
 [windows][src-window], [embeddings][src-embeddings], [vectors][src-vector],
@@ -965,12 +965,15 @@ without semantic checks. Its use should be visible in explain output as
 
 ### Parquet
 
-Keep reading the existing `<path>.duckpd-embeddings.json` version 1 format for
-legacy text-only artifacts. New writes that contain only text metadata may retain
-that format. Add a separate, versioned `<path>.duckpd-series.json` companion for
+Parquet sidecar manifest versions are independent of the feature-store
+`catalog_version`, which remains 1. Keep reading the existing
+`<path>.duckpd-embeddings.json` sidecar manifest version 1 format for legacy
+text-only artifacts. New writes that contain only text metadata may retain that
+format. Add a separate, versioned `<path>.duckpd-series.json` companion for
 series window and representation metadata. A file containing both modalities
-has both companions and uses the generation-bound envelopes below; the serialized
-legacy `EmbeddingModelSpec` objects and their fingerprints remain unchanged.
+has both companions and uses the generation-bound envelopes below; the
+serialized legacy `EmbeddingModelSpec` objects and their fingerprints remain
+unchanged.
 
 The new series sidecar envelope contains:
 
@@ -987,15 +990,16 @@ columns:
         provenance: producer/declaration information
 ```
 
-    For a mixed-modality file, write `<path>.duckpd-embeddings.json` version 2 with
-    the same `artifact` object before its existing `columns` mapping. Both sidecars
-    must contain identical `size_bytes`, `sha256`, and a newly generated opaque
-    `generation` value. A series-aware reader attaches neither text nor series
-    metadata unless both required sidecars exist, both envelopes agree, and the data
-    file matches the bound size and digest. It must never restore valid-looking text
-    metadata independently from an invalid series sidecar on a mixed artifact.
-    Version 2 changes only envelope binding; text model objects and fingerprinting
-    are byte-for-byte compatible with their version 1 definitions.
+For a mixed-modality file, write `<path>.duckpd-embeddings.json` sidecar
+manifest version 2 with the same `artifact` object before its existing `columns`
+mapping. Both sidecars must contain identical `size_bytes`, `sha256`, and a
+newly generated opaque `generation` value. A series-aware reader attaches
+neither text nor series metadata unless both required sidecars exist, both
+envelopes agree, and the data file matches the bound size and digest. It must
+never restore valid-looking text metadata independently from an invalid series
+sidecar on a mixed artifact. Sidecar manifest version 2 changes only envelope
+binding; text model objects and fingerprinting are byte-for-byte compatible
+with their version 1 definitions.
 
 The digest binds metadata to the actual data file, not only to its schema. For
 the initial local implementation, compute it by streaming the completed file;
@@ -1047,23 +1051,21 @@ a separate persistence enhancement, not a hidden prerequisite.
 ### Relationship to the existing catalog proposal
 
 Core window/representation/search functionality must ship independently of the
-catalog work. For planning purposes, reserve **catalog version 3** for this
-extension, layered on the proposed version 2 text-embedding schema. If both
-proposals are merged into one pre-release schema, update both documents and the
-parser in the same change; do not silently assign conflicting meanings to
-version 2.
+catalog work. DuckPD has one catalog schema, identified by `catalog_version: 1`.
+The text-embedding and series-representation proposals both extend that schema
+in place; they do not introduce catalog versions 2 or 3.
 
-Continue reading version 1 unchanged. Version 2 behavior is conditional on its
-companion implementation. Version 3 adds `series_embedding_models` and
+The series extension adds `series_embedding_models` and
 `series_representations` registries plus `series_representation` references on
 feature or table-column declarations. Existing text `embedding_models` and
-`embedding_model` fields remain unchanged.
+`embedding_model` fields remain unchanged. The parser, generator, examples, and
+both proposals must adopt the complete catalog version 1 schema atomically.
 
 A deterministic example is:
 
 ```json
 {
-  "catalog_version": 3,
+  "catalog_version": 1,
   "series_embedding_models": {},
   "series_representations": {
     "return_shape_60_1m": {
@@ -1482,7 +1484,7 @@ schema][src-logical], and [metadata transition helpers][src-metadata].
 | `src/duckpd/series.py` | Typed-query distance integration points and representation propagation through Series projections |
 | `src/duckpd/vector.py` | `search_series()`, typed numeric/text query compatibility validation, existing exact/ANN rules retained |
 | `src/duckpd/featurestore.py` | Registry lookup, typed declared columns, alias/exact/ASOF metadata propagation |
-| `src/duckpd/_feature_catalog.py` | Explicit schema-version dispatch and strict series registry validation |
+| `src/duckpd/_feature_catalog.py` | Strict catalog-version-1 series registry validation |
 | `src/duckpd/__init__.py` | Export new public specifications, constructors, and typed query |
 | Optional provider module/package | Reviewed adapter and dependency isolation; no import-time model/runtime loading in core |
 | `tests/` and `docs/COMPATIBILITY.md` | New contract tests and truthful support matrix; preserve existing text/vector tests |
@@ -1697,7 +1699,7 @@ weighted combination, proving why candidate-limited reranking is not exact.
 
 ### Feature-store and optimizer regression
 
-Test each catalog version separately, registry resolution, unknown fields,
+Test the complete catalog version 1 schema, registry resolution, unknown fields,
 unsupported backends, alias metadata, `FLOAT[D]` logical typing before partition
 reads, physical schema mismatch, exact and point-in-time alignment, and no model
 preparation from metadata-only access. Preserve existing remote partition and
@@ -1733,8 +1735,8 @@ shared text/time-series space.
 
 Add immutable specs, canonicalization, typed queries, metadata propagation
 helpers, and no-network fake providers. Record the unchanged legacy text hash
-fixtures and define the new persistence/catalog versions. Land any necessary
-alias/ASOF metadata fixes with regression tests.
+fixtures, define the new persistence formats and catalog-version-1 registry
+additions, and land any necessary alias/ASOF metadata fixes with regression tests.
 
 **Exit gate:** specifications serialize deterministically; typed-query mismatches
 fail; all existing text/vector/feature-store tests remain valid. No model backend
@@ -1759,7 +1761,17 @@ late-fusion examples, and event-join/overlap tests. No joint model is introduced
 correct; fused ranking is distinguished from candidate reranking. This completes
 the core news-plus-market-reaction exploration workflow without learned models.
 
-### Phase 3: optional learned inference
+### Phase 3: feature-store catalog declarations
+
+Implement registries and typed metadata propagation in catalog version 1 after
+the companion text registry contract is resolved. Support deterministic catalogs
+first; add qualified portable model backends under explicit preparation policy.
+
+**Exit gate:** catalog-version-1 fixtures, alias/ASOF metadata preservation,
+physical validation, offline behavior, and model trust-policy tests pass. No
+catalog call generates or refreshes corpus embeddings.
+
+### Phase 4: optional learned inference
 
 Implement the provider lifecycle and Arrow execution path with custom providers,
 then qualify one built-in adapter, initially MOMENT if it passes. Include exact
@@ -1769,16 +1781,6 @@ reports. Add TS2Vec or other adapters without changing the DataFrame/search API.
 **Exit gate:** bounded provider calls, deterministic query/corpus agreement,
 accurate resource reporting, no hidden normalization, and a documented retrieval
 use case where the adapter is useful. Do not block native release on this gate.
-
-### Phase 4: feature-store catalog declarations
-
-Implement versioned registries and typed metadata propagation after resolving the
-companion version 2 dependency. Support deterministic catalogs first; add qualified
-portable model backends under explicit preparation policy.
-
-**Exit gate:** version-specific fixtures, alias/ASOF metadata preservation,
-physical validation, offline behavior, and model trust-policy tests pass. No
-catalog call generates or refreshes corpus embeddings.
 
 ### Later research: aligned multimodal spaces
 

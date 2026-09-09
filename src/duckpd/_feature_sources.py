@@ -7,6 +7,7 @@ import os
 import shutil
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from io import BytesIO, TextIOWrapper
 from pathlib import Path, PurePosixPath
@@ -19,10 +20,27 @@ import duckdb
 import pyarrow.parquet as pq
 
 from duckpd._feature_catalog import parse_timestamp
+from duckpd._locking import exclusive_file_lock
 from duckpd._quoting import quote_identifier, quote_literal
 
 if TYPE_CHECKING:
     from duckpd._logical import FeatureParquetSource
+
+_TRANSFER_METRICS: ContextVar[dict[str, int | float] | None] = ContextVar(
+    "_TRANSFER_METRICS",
+    default=None,
+)
+
+
+@contextmanager
+def capture_transfer_metrics(
+    metrics: dict[str, int | float],
+) -> Generator[None, None, None]:
+    token = _TRANSFER_METRICS.set(metrics)
+    try:
+        yield
+    finally:
+        _TRANSFER_METRICS.reset(token)
 
 
 def _validated_relative_path(relative_path: str) -> PurePosixPath:
@@ -81,34 +99,6 @@ def remote_file_path(source_root: str, relative_path: str) -> str:
     remote_root = source_root.removeprefix("hf://").rstrip("/")
     remote_path = _validated_relative_path(relative_path).as_posix()
     return f"{remote_root}/{remote_path}"
-
-
-@contextmanager
-def _exclusive_file_lock(path: Path) -> Generator[None, None, None]:
-    """Serialize cache population across processes using an adjacent lock file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def load_dataset_metadata(
@@ -264,11 +254,12 @@ def ensure_cached_partition(
 ) -> Path:
     """Ensure a partition contains the cumulative requested projection."""
     local_target = _rooted_path(cache_root, relative_path)
+    metrics = _TRANSFER_METRICS.get()
     lock_path = local_target.with_name(f".{local_target.name}.lock")
     remote_path = _validated_relative_path(relative_path).as_posix()
     remote_file_url = f"{source_uri.rstrip('/')}/{remote_path}"
 
-    with _exclusive_file_lock(lock_path):
+    with exclusive_file_lock(lock_path):
         existing_columns: list[str] = []
         if local_target.is_file():
             try:
@@ -276,6 +267,10 @@ def ensure_cached_partition(
             except Exception:
                 existing_columns = []
         if set(needed_columns).issubset(existing_columns):
+            if metrics is not None:
+                metrics["partition_cache_reuses"] = (
+                    int(metrics.get("partition_cache_reuses", 0)) + 1
+                )
             return local_target
 
         projected_columns = list(dict.fromkeys([*existing_columns, *needed_columns]))
@@ -294,6 +289,11 @@ def ensure_cached_partition(
         try:
             con.execute(copy_query)
             os.replace(temp_target, local_target)
+            if metrics is not None:
+                metrics["partition_transfer_bytes"] = (
+                    int(metrics.get("partition_transfer_bytes", 0)) + local_target.stat().st_size
+                )
+                metrics["partition_transfers"] = int(metrics.get("partition_transfers", 0)) + 1
         except BaseException:
             temp_target.unlink(missing_ok=True)
             raise
@@ -308,13 +308,18 @@ def ensure_cached_table(
     fs: Any,
 ) -> Path:
     """Ensure a static reference table is downloaded in full to the local cache."""
+    metrics = _TRANSFER_METRICS.get()
     local_target = _rooted_path(cache_root, relative_path)
     lock_path = local_target.with_name(f".{local_target.name}.lock")
     remote_path = _validated_relative_path(relative_path).as_posix()
     remote_file_pathname = remote_file_path(source_uri, remote_path)
 
-    with _exclusive_file_lock(lock_path):
+    with exclusive_file_lock(lock_path):
         if local_target.is_file():
+            if metrics is not None:
+                metrics["partition_cache_reuses"] = (
+                    int(metrics.get("partition_cache_reuses", 0)) + 1
+                )
             return local_target
 
         local_target.parent.mkdir(parents=True, exist_ok=True)
@@ -325,6 +330,11 @@ def ensure_cached_table(
             with fs.open(remote_file_pathname, "rb") as src, temp_target.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
             os.replace(temp_target, local_target)
+            if metrics is not None:
+                metrics["partition_transfer_bytes"] = (
+                    int(metrics.get("partition_transfer_bytes", 0)) + local_target.stat().st_size
+                )
+                metrics["partition_transfers"] = int(metrics.get("partition_transfers", 0)) + 1
         except BaseException:
             temp_target.unlink(missing_ok=True)
             raise

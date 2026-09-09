@@ -5,16 +5,99 @@ from __future__ import annotations
 import json
 import multiprocessing
 import tempfile
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import duckpd
+from duckpd.embeddings import (
+    EmbeddedQuery,
+    EmbeddingModelSpec,
+    PreparedModelInfo,
+    _make_fixed_array,
+)
+from duckpd.errors import UnsupportedOperationError
 from duckpd.featurestore import FeatureStore, parse_availability_delay, parse_timestamp
+
+
+class CatalogEmbeddingProvider:
+    def __init__(self, specification: EmbeddingModelSpec) -> None:
+        self._specification = specification
+        self.prepare_calls = 0
+        self.query_calls: list[str] = []
+
+    @property
+    def specification(self) -> EmbeddingModelSpec:
+        return self._specification
+
+    def prepare(self) -> PreparedModelInfo:
+        self.prepare_calls += 1
+        return PreparedModelInfo(
+            self.specification.fingerprint,
+            "test",
+            None,
+            "catalog-test-artifact",
+            ("CPUExecutionProvider",),
+        )
+
+    def embed_documents(self, texts: Sequence[str]) -> pa.Array[Any]:
+        return _make_fixed_array([[1.0, 0.0, 0.0] for _ in texts], 3)
+
+    def embed_query(self, text: str) -> EmbeddedQuery:
+        self.query_calls.append(text)
+        return EmbeddedQuery((1.0, 0.0, 0.0), self.specification.fingerprint)
+
+
+def _add_embedding_catalog(root: Path) -> EmbeddingModelSpec:
+    model = duckpd.embedding_model(
+        "test/catalog-fastembed",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        dimension=3,
+    )
+    partition = root / "ohlcv" / "year=2024" / "data.parquet"
+    table = pq.read_table(partition)  # pyright: ignore[reportUnknownMemberType]
+    vectors = _make_fixed_array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.8, 0.2, 0.0],
+            [0.5, 0.5, 0.0],
+            [0.2, 0.8, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        3,
+    )
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        table.append_column("embedding", vectors), partition
+    )
+
+    symbols = root / "symbols" / "data.parquet"
+    symbol_table = pq.read_table(symbols)  # pyright: ignore[reportUnknownMemberType]
+    symbol_vectors = _make_fixed_array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], 3)
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        symbol_table.append_column("embedding", symbol_vectors), symbols
+    )
+
+    catalog_path = root / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["embedding_models"] = {"catalog-model": model.to_dict()}
+    catalog["features"]["ohlcv:embedding"] = {
+        "dataset": "ohlcv",
+        "name": "embedding",
+        "availability_delay": "PT0S",
+        "lookahead_safe": True,
+        "embedding_model": "catalog-model",
+    }
+    next(entry for entry in catalog["datasets"] if entry["name"] == "symbology")["columns"] = {
+        "embedding": {"embedding_model": "catalog-model"}
+    }
+    catalog_path.write_text(json.dumps(catalog))
+    return model
 
 
 def _cache_partition_worker(
@@ -1622,3 +1705,241 @@ def test_http_feature_store_end_to_end(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
     assert list(result["value"]) == [42.0]
+
+
+def test_catalog_embedding_schema_is_strict_and_dimension_checked(
+    feature_store_fixture: Path,
+) -> None:
+    _add_embedding_catalog(feature_store_fixture)
+    catalog_path = feature_store_fixture / "catalog.json"
+    valid = json.loads(catalog_path.read_text())
+
+    unknown_field = json.loads(json.dumps(valid))
+    unknown_field["embedding_models"]["catalog-model"]["unqualified"] = True
+    catalog_path.write_text(json.dumps(unknown_field))
+    with pytest.raises(ValueError, match="unknown fields"):
+        FeatureStore(feature_store_fixture)
+
+    unknown_reference = json.loads(json.dumps(valid))
+    unknown_reference["features"]["ohlcv:embedding"]["embedding_model"] = "missing"
+    catalog_path.write_text(json.dumps(unknown_reference))
+    with pytest.raises(ValueError, match="unknown embedding model"):
+        FeatureStore(feature_store_fixture)
+
+    catalog_path.write_text(json.dumps(valid))
+    symbols = feature_store_fixture / "symbols" / "data.parquet"
+    table = pq.read_table(symbols).drop(  # pyright: ignore[reportUnknownMemberType]
+        ["embedding"]
+    )
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        table.append_column(
+            "embedding",
+            _make_fixed_array([[1.0, 0.0], [0.0, 1.0]], 2),
+        ),
+        symbols,
+    )
+    with pytest.raises(ValueError, match=r"requires fixed-size float32\[3\]"):
+        FeatureStore(feature_store_fixture).table("symbology")
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("unsupported_backend", "unsupported backend"),
+        ("mutable_revision", "immutable commit"),
+        ("fastembed_normalization", "cannot honor"),
+        ("transformers_pooling", "pooling"),
+        ("unknown_column_field", "unknown fields"),
+    ],
+)
+def test_catalog_embedding_declarations_reject_unsafe_variants(
+    feature_store_fixture: Path,
+    change: str,
+    message: str,
+) -> None:
+    _add_embedding_catalog(feature_store_fixture)
+    catalog_path = feature_store_fixture / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    specification = catalog["embedding_models"]["catalog-model"]
+    if change == "unsupported_backend":
+        specification["backend"] = "custom"
+    elif change == "mutable_revision":
+        specification["revision"] = "main"
+    elif change == "fastembed_normalization":
+        specification["normalize"] = False
+    elif change == "transformers_pooling":
+        specification["backend"] = "transformers"
+    else:
+        next(entry for entry in catalog["datasets"] if entry["name"] == "symbology")["columns"][
+            "embedding"
+        ]["description"] = "not allowed"
+    catalog_path.write_text(json.dumps(catalog))
+
+    with pytest.raises(ValueError, match=message):
+        FeatureStore(feature_store_fixture)
+
+
+def test_feature_store_embedding_policy_rejects_unsafe_limits(
+    feature_store_fixture: Path,
+) -> None:
+    with pytest.raises(TypeError, match="auto_prepare_embeddings"):
+        FeatureStore(feature_store_fixture, auto_prepare_embeddings=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="timeout"):
+        FeatureStore(feature_store_fixture, embedding_prepare_timeout_seconds=0)
+    with pytest.raises(ValueError, match="download_limit"):
+        FeatureStore(feature_store_fixture, embedding_download_limit_bytes=True)
+
+
+def test_catalog_embedding_search_is_lazy_inferred_reused_and_equivalent(
+    feature_store_fixture: Path,
+) -> None:
+    model = _add_embedding_catalog(feature_store_fixture)
+    session = duckpd.connect()
+    provider = CatalogEmbeddingProvider(model)
+    session.register_embedding_provider(model, provider)
+    store = FeatureStore(feature_store_fixture, session=session)
+
+    frame = store.features(
+        features={"vector": "ohlcv:embedding"},
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    vector = next(
+        column for column in frame._plan.metadata.visible_columns if column.label == "vector"
+    )
+    assert vector.embedding is not None
+    assert vector.embedding.model == store.embedding_model("catalog-model")
+    assert vector.embedding.origin == "catalog"
+
+    pit = store.features(
+        features={"vector": "ohlcv:embedding"},
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="point_in_time",
+        spine="ohlcv",
+    )
+    pit_vector = next(
+        column for column in pit._plan.metadata.visible_columns if column.label == "vector"
+    )
+    assert pit_vector.embedding == vector.embedding
+
+    execution_count = session.execution_count
+    inferred = frame.vector.search_text(
+        "ai chips",
+        column="vector",
+        k=3,
+    )
+    explained = inferred.explain("logical")
+    assert session.execution_count == execution_count
+    assert provider.prepare_calls == 0
+    assert provider.query_calls == []
+    assert '"model_origin": "catalog"' in explained
+    assert '"model_prepared": false' in explained
+    assert "ai chips" not in explained
+
+    inferred_result = inferred.collect()
+    assert provider.prepare_calls == 1
+    explicit_result = frame.vector.search_text(
+        "ai chips",
+        column="vector",
+        model=store.embedding_model("catalog-model"),
+        k=3,
+    ).collect()
+    pd.testing.assert_frame_equal(inferred_result, explicit_result)
+
+    table = store.table("symbology")
+    table_vector = next(
+        column for column in table._plan.metadata.visible_columns if column.label == "embedding"
+    )
+    assert table_vector.embedding is not None
+    assert table_vector.embedding.origin == "catalog"
+    table.vector.search_text(
+        "ai chips",
+        column="embedding",
+        k=1,
+        tie_breaker="ticker",
+    ).collect()
+    assert provider.prepare_calls == 1
+
+    profile = inferred.profile()
+    assert profile.embedding_metrics is not None
+    assert profile.embedding_metrics["catalog_access_seconds"] >= 0
+    assert profile.embedding_metrics["preparation_cache_reused"] == 1
+    assert profile.embedding_metrics["query_inference_seconds"] >= 0
+
+
+def test_disabled_catalog_auto_preparation_fails_before_partition_transfer(
+    feature_store_fixture: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _add_embedding_catalog(feature_store_fixture)
+    session = duckpd.connect()
+    store = FeatureStore(
+        "https://features.example.test/store",
+        cache=tmp_path / "cache",
+        catalog_path=feature_store_fixture / "catalog.json",
+        session=session,
+        auto_prepare_embeddings=True,
+    )
+    FeatureStore(
+        "https://features.example.test/store",
+        cache=tmp_path / "cache",
+        catalog_path=feature_store_fixture / "catalog.json",
+        session=session,
+        auto_prepare_embeddings=False,
+    )
+    frame = store.features(
+        features=["ohlcv:embedding"],
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    transfers = 0
+
+    def transferred(*_args: object, **_kwargs: object) -> list[str]:
+        nonlocal transfers
+        transfers += 1
+        return []
+
+    monkeypatch.setattr(
+        "duckpd._feature_sources.materialize_feature_source",
+        transferred,
+    )
+    with pytest.raises(UnsupportedOperationError, match="automatic preparation is disabled"):
+        frame.vector.search_text("ai", column="embedding").collect()
+    assert transfers == 0
+
+
+def test_explicit_preparation_supports_disabled_catalog_policy(
+    feature_store_fixture: Path,
+) -> None:
+    model = _add_embedding_catalog(feature_store_fixture)
+    session = duckpd.connect()
+    provider = CatalogEmbeddingProvider(model)
+    session.register_embedding_provider(model, provider)
+    store = FeatureStore(
+        feature_store_fixture,
+        session=session,
+        auto_prepare_embeddings=False,
+    )
+    session.prepare_embedding_model(store.embedding_model("catalog-model"))
+    result = (
+        store.features(
+            features=["ohlcv:embedding"],
+            start="2024-01-02T08:00:00Z",
+            end="2024-01-02T08:05:00Z",
+            alignment="exact",
+        )
+        .vector.search_text("ai", column="embedding", k=1)
+        .collect()
+    )
+    assert len(result) == 1
+    assert provider.prepare_calls == 1
+
+
+def test_search_text_without_verified_metadata_requires_explicit_model() -> None:
+    frame = duckpd.from_pandas(pd.DataFrame({"embedding": [[1.0, 0.0, 0.0]]}))
+    with pytest.raises(UnsupportedOperationError, match="cannot infer"):
+        frame.vector.search_text("ai", column="embedding")

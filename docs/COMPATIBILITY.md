@@ -276,10 +276,10 @@ Narwhals protocol. The core package does not depend on a model runtime.
 | Method | Classification | Parameters | Execution | Notes |
 | :--- | :--- | :--- | :--- | :--- |
 | `embedding_model()` | **`[DuckPD Native]`** | immutable revision, dimension, backend, normalization, pooling, prefixes | Planning only | Produces a stable model fingerprint without downloading metadata. |
-| `Session.prepare_embedding_model()` | **`[DuckPD Native]`** | model and optional cache directory | Eager | Downloads only when explicitly called, verifies the local artifact digest, and reports the selected FastEmbed or PyTorch runtime. |
+| `Session.prepare_embedding_model()` | **`[DuckPD Native]`** | model and optional cache directory | Eager | Explicitly prepares a verified local artifact; feature-store searches may prepare an approved catalog model automatically at execution. |
 | `Session.embed_query()` | **`[DuckPD Native]`** | text and prepared model | Eager | Returns an immutable `EmbeddedQuery` carrying its model fingerprint. |
 | `DataFrame.embed_text()` | **`[DuckPD Native]`** | text columns, output label, model, batch size, separator, null policy | Lazy | Row-preserving Arrow-batched inference with automatic materialization progress; appends non-nullable `FLOAT[n]` and supports direct Parquet/table sinks. |
-| `DataFrame.vector.search_text()` | **`[DuckPD Native]`** | text, persisted embedding column, matching model, metric, `k`, tie-breaker | Lazy | Exact search; rejects missing or mismatched embedding metadata before execution. |
+| `DataFrame.vector.search_text()` | **`[DuckPD Native]`** | text, persisted embedding column, optional compatible model, metric, `k`, tie-breaker | Lazy | Exact search; infers only verified column metadata and rejects missing or mismatched identity before execution. |
 | `DataFrame.semantic.search()` | **`[DuckPD Native]`** | text, source text columns, model, metric, `k`, batch size, null policy, tie-breaker | Lazy | Exact transient top-k. Every execution recomputes candidate document embeddings. |
 
 Embedding metadata survives supported projection, rename, row-wise concatenation,
@@ -288,6 +288,9 @@ Replacing or calculating an embedding column clears its model identity.
 `null_policy="error"` aborts on null components; `"empty"` substitutes empty
 strings without dropping rows. Provider row count, fixed dimension, float32
 type, finiteness, and requested normalization are checked per batch.
+Feature-store catalog metadata can attach the same identity to timeseries and
+table columns. Catalog search preparation is store-scoped, bounded by timeout
+and download-size limits, and occurs before remote partition transfer.
 
 Install the qualified local FastEmbed/ONNX CPU backend with
 `uv add "duckpd[embeddings]"`. `TransformersEmbeddingProvider` supports explicit

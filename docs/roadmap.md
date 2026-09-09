@@ -876,9 +876,22 @@ transient-search path, while keeping model runtimes optional.
       embedding API and document the persistent and transient workflows.
 - [x] Update API documentation, compatibility data, changelog, and optional
       dependency installation guidance.
-- [x] Defer hosted providers, GPU qualification, automatic caches and refresh,
-      hybrid retrieval, reranking, quantization, sparse embeddings, and
-      distributed inference until the local exact contracts are stable.
+- [x] Add explicit PyTorch Transformers inference on CPU, NVIDIA CUDA, and AMD
+      ROCm without changing the default FastEmbed CPU path or silently falling
+      back when a requested accelerator is unavailable.
+- [x] Qualify `BAAI/bge-small-en-v1.5` on AMD `gfx1150` with ROCm 7.2.4,
+      normalized `float32[384]` output, CPU/GPU parity, bounded batches, and
+      verified immutable model artifacts.
+- [x] Generate and validate the complete 388,491,746-row feature-store corpus,
+      including 3,951,636 GPU-embedded news rows in 180 monthly partitions.
+- [x] Publish the validated 212-Parquet-file private feature store, verify its
+      catalog and dataset card remotely, and exercise bounded exact-alignment
+      queries and streamed batches against the published source.
+- [x] Update embedding scripts and notebooks for explicit GPU provider
+      registration, named ROCm kernels, dependency preflight, and
+      backend-specific persisted vector files.
+- [x] Defer hosted providers, automatic caches and refresh, hybrid retrieval,
+      reranking, quantization, sparse embeddings, and distributed inference.
 
 Exit gate:
 
@@ -888,6 +901,175 @@ Exit gate:
 - [x] Persisted `search_text()` and transient `semantic.search()` match the exact
       vector oracle, preserve prefilter semantics, expose inference cost and
       boundaries, fail safely, and add no required dependency to core DuckPD.
+
+### Phase 15 — Priority 0: feature-store text embedding integration
+
+Goal: make the generated embedding-aware feature-store catalog usable through
+the public text-search API without repeating model specifications, while
+preserving side-effect-free planning and explicit supply-chain controls.
+
+Complete these milestones in order:
+
+1. **Model identity and preparation hardening**
+   - [x] Require each built-in backend to enforce every field included in
+         `EmbeddingModelSpec.fingerprint`; remove or reject fields a backend
+         cannot honor.
+   - [x] Qualify immutable FastEmbed revision resolution and bind the prepared
+         artifact manifest to the declared model identity.
+   - [x] Add per-fingerprint preparation locking, concurrent-process
+         convergence, atomic failure cleanup, and cache-integrity regression
+         tests.
+2. **Catalog version 1 metadata**
+   - [x] Extend the single `catalog_version: 1` schema with strict
+         `embedding_models`, feature `embedding_model`, and table-column
+         declarations; do not add catalog-version branches.
+   - [x] Validate model fields, references, physical fixed-size numeric array
+         types, dimensions, unsupported backends, unknown fields, and
+         conflicting declarations.
+   - [x] Attach `EmbeddingColumnSpec` to timeseries and table scans and preserve
+         it through aliases, projections, filters, exact alignment, and
+         point-in-time alignment.
+   - [x] Add side-effect-free `FeatureStore.embedding_model(name)` inspection.
+3. **Inferred persisted search**
+   - [x] Make `DataFrame.vector.search_text(..., model=None)` resolve only
+         verified column metadata.
+   - [x] Treat an explicit model as a fingerprint compatibility assertion, not
+         an override; keep raw-vector search independent of model preparation.
+   - [x] Report model origin (`catalog`, `sidecar`, or `explicit`) and prepared
+         state in non-executing explain output without exposing query text.
+4. **Execution-time automatic preparation**
+   - [x] Add store-scoped automatic-preparation policy backed by session-owned
+         providers; shared-session conflicts use the stricter policy.
+   - [x] Resolve timeout and download-size safeguards before enabling automatic
+         preparation by default.
+   - [x] Prepare a missing approved local model immediately before query
+         inference and, where possible, before feature-partition transfer.
+   - [x] Separate catalog access, model preparation, cache reuse, partition
+         transfer, query inference, and vector search in profile metrics.
+5. **Qualification and authoring closure**
+   - [x] Centralize catalog serialization of `EmbeddingModelSpec` so generators
+         cannot duplicate or drift from runtime identity rules.
+   - [x] Qualify local and remote feature stores with cold, warm, explicitly
+         pre-warmed, disabled-auto-prepare, and air-gapped model caches.
+   - [x] Exercise the published news catalog through model-omitting
+         `search_text()` and document local, remote, pre-warmed, and offline
+         workflows.
+
+Exit gate:
+
+- [x] Catalog construction, feature selection, and explain perform no model
+      preparation or inference.
+- [x] First execution prepares at most once, warm execution reuses the verified
+      provider, disabled preparation fails before partition transfer, and
+      explicit preparation remains supported.
+- [x] Catalog-inferred and explicit-model searches return the same exact result;
+      missing, conflicting, or dimension-mismatched metadata fails before
+      retrieval.
+
+### Phase 16 — Priority 1: native time-series representations
+
+Goal: ship useful, model-free time-series similarity on the existing exact
+vector engine before evaluating learned encoders.
+
+- [ ] Add immutable series window/representation specifications, canonical
+      fingerprints, typed queries, and additive column metadata without
+      changing text embedding fingerprints.
+- [ ] Define propagation and invalidation through projection, rename,
+      assignment, joins, ASOF payloads, concatenation, and persistence.
+- [ ] Add fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` with
+      explicit ordering, complete-window, finite-float32, and group-boundary
+      contracts.
+- [ ] Add native `DataFrame.embed_series()` for declared centering,
+      normalization, channel ordering, flattening, and zero-scale policy.
+- [ ] Add exact `search_series()` and typed-query support in vector distance and
+      search, rejecting equal-dimension but incompatible representation spaces.
+- [ ] Persist and restore series metadata for local Parquet and session-owned
+      tables; keep planning free of full-file integrity scans.
+- [ ] Differential-test ordered windows and exact retrieval against independent
+      array and brute-force distance oracles; prove direct sinks avoid pandas
+      materialization.
+
+Exit gate:
+
+- [ ] Native source and query representations agree within declared float
+      tolerances, incompatible spaces fail before retrieval, and filter/history
+      semantics are explicit.
+
+### Phase 17 — Priority 2: event windows and exact event similarity
+
+Goal: support news-plus-market-reaction analysis without implying causality or
+introducing a joint multimodal model.
+
+- [ ] Add typed fixed-grid `event_windows()` with explicit event/entity keys,
+      bar labeling, availability timestamps, missing-bar policy, and duplicate
+      handling.
+- [ ] Preserve optimizer barriers so filters cannot change contributing window
+      rows or move across exact top-k boundaries.
+- [ ] Support exact text-first, reaction-first, and full eligible-set
+      late-fusion workflows using stable event observation keys.
+- [ ] Test grid boundaries, revisions, late bars, overlap exclusions,
+      availability cutoffs, and the distinction between exact fusion and
+      candidate-limited reranking.
+
+Exit gate:
+
+- [ ] Event windows are complete, ordered, availability-correct, and exact fused
+      rankings score the full eligible population.
+
+### Phase 18 — Priority 3: feature-store series declarations
+
+Goal: publish and retrieve deterministic series representations through the
+same catalog version 1 metadata path established for text embeddings.
+
+- [ ] Add strict `series_embedding_models`, `series_representations`, and
+      `series_representation` declarations to `catalog_version: 1`.
+- [ ] Resolve declared `FLOAT[D]` types during planning and validate physical
+      types, dimensions, nullability, and representation identity when binding
+      partitions.
+- [ ] Preserve series metadata through feature aliases, exact alignment, and
+      point-in-time ASOF payloads.
+- [ ] Support deterministic native representations first; catalog access must
+      never generate or refresh corpus representations.
+- [ ] Test the complete catalog version 1 schema, registry references, unknown
+      fields, offline behavior, and model trust policies.
+
+Exit gate:
+
+- [ ] Catalog-declared native series vectors can be searched without restating
+      their representation and without model or network activity during
+      planning.
+
+### Phase 19 — Priority 4: optional learned series encoders
+
+Goal: add learned inference only after the native representation and retrieval
+contracts are stable and independently useful.
+
+- [ ] Add a session-owned `SeriesEmbeddingProvider` lifecycle with explicit
+      preparation, bounded Arrow batches, masks, channel order, context length,
+      and output validation.
+- [ ] Qualify one immutable built-in checkpoint only if a reviewed retrieval
+      benchmark demonstrates value over native representations for a named
+      task; do not block native release on this result.
+- [ ] Record preparation, inference, memory, and cache metrics without hidden
+      normalization, device fallback, or planning-time downloads.
+- [ ] Add further adapters without changing the DataFrame, typed-query, or exact
+      search contracts.
+
+Exit gate:
+
+- [ ] Corpus and query encoding agree deterministically, provider calls remain
+      bounded, failures leave no promoted cache or output, and qualification
+      records the exact model artifact and runtime.
+
+### Deferred embedding research
+
+The following have no scheduled implementation priority: hosted embedding
+providers, hybrid lexical/vector retrieval, reranking, quantized, sparse, or
+multi-vector storage, distributed inference, automatic corpus refresh, vector
+`mode="auto"`, batched per-row point-in-time retrieval, and jointly aligned
+text/time-series spaces. Promote one only with a separate design, explicit
+security and execution semantics, and evidence that the existing exact APIs
+cannot express the required workflow.
 
 ### Beta exit portability gate
 
@@ -981,6 +1163,18 @@ decomposed into independently testable milestones below.
       dependency-lean exact-first milestones in Phase 13.
 28. [x] Add optional, streaming text embeddings and exact semantic search
         through the model-safe milestones in Phase 14.
+29. [x] Qualify GPU text embeddings and publish the complete feature-store
+        corpus through the completed Phase 14 accelerator and dataset milestones.
+30. [x] Complete feature-store text embedding metadata, inferred model lookup,
+        model-identity hardening, and controlled automatic preparation in Phase 15.
+31. [ ] Ship model-free native time-series representations and exact retrieval
+        through Phase 16.
+32. [ ] Add availability-correct event windows and exact event-score fusion
+        through Phase 17.
+33. [ ] Integrate deterministic series representations into the single catalog
+        version 1 schema through Phase 18.
+34. [ ] Qualify optional learned series encoders only after the native and
+        catalog contracts pass their exit gates in Phase 19.
 
 ### Completed Linux-beta workstreams
 

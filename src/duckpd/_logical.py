@@ -105,6 +105,7 @@ class FeatureParquetSource:
     max_time: str | None = None
     filesystem_key: str | None = None
     table: bool = False
+    embedding_columns: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -756,6 +757,9 @@ class SemanticSearchPlan(LogicalPlanBase):
     distance_column: Column
     tie_breaker: ColumnId | None
     metadata: FrameMetadata
+    model_origin: str = "explicit"
+    auto_prepare: bool = False
+    catalog_model: bool = False
 
 
 @dataclass(frozen=True)

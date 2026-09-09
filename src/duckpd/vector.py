@@ -204,7 +204,7 @@ class VectorFrameMethods:
         query: str,
         *,
         column: str,
-        model: EmbeddingModelSpec,
+        model: EmbeddingModelSpec | None = None,
         metric: VectorMetricName = "cosine",
         k: int = 10,
         batch_size: int = 256,
@@ -218,27 +218,36 @@ class VectorFrameMethods:
         if not query:
             raise ValueError("query must be a non-empty string")
         vector_column = find_column(self._frame._plan.metadata, column)
+        embedding = vector_column.embedding
+        if model is None:
+            if embedding is None:
+                raise UnsupportedOperationError(
+                    "search_text cannot infer a model because the column has no embedding metadata"
+                )
+            selected_model = embedding.model
+            model_origin = embedding.origin
+        else:
+            selected_model = model
+            model_origin = "explicit"
         _, dimension = _vector_type(vector_column.duckdb_type)
-        if dimension is not None and dimension != model.dimension:
+        if dimension is not None and dimension != selected_model.dimension:
             raise ValueError(
-                f"model dimension {model.dimension} does not match column dimension {dimension}"
+                f"model dimension {selected_model.dimension} does not match "
+                f"column dimension {dimension}"
             )
-        if (
-            vector_column.embedding is None
-            or vector_column.embedding.fingerprint != model.fingerprint
-        ):
+        if embedding is None or embedding.fingerprint != selected_model.fingerprint:
             raise UnsupportedOperationError(
                 "search_text requires embedding metadata matching the requested model"
             )
         settings = _embedding_settings(
             self._frame,
-            model=model,
+            model=selected_model,
             batch_size=batch_size,
             separator="",
             null_policy="error",
             output_label=None,
         )
-        query_key = self._frame._session._register_embedding_query(model, query)
+        query_key = self._frame._session._register_embedding_query(selected_model, query)
         vector_metric, distance, tie_column, metadata = _search_metadata(
             self._frame,
             metric=metric,
@@ -251,7 +260,7 @@ class VectorFrameMethods:
             (),
             vector_column.id,
             query_key,
-            model,
+            selected_model,
             settings.batch_size,
             settings.separator,
             settings.null_policy,
@@ -260,6 +269,9 @@ class VectorFrameMethods:
             distance,
             tie_column.id if tie_column is not None else None,
             metadata,
+            model_origin=model_origin,
+            auto_prepare=embedding.auto_prepare,
+            catalog_model=embedding.origin == "catalog",
         )
         return DataFrame(self._frame._session, plan)
 
