@@ -25,6 +25,13 @@ store = pd.FeatureStore(
 )
 print(f"Remote feature store: {store.source}")
 print(f"Local feature cache: {cache_directory}")
+catalog = store.catalog()
+timeseries = [dataset for dataset in catalog["datasets"] if dataset["kind"] == "timeseries"]
+partition_units = {dataset["name"]: dataset["partitioning"]["unit"] for dataset in timeseries}
+if set(partition_units.values()) != {"day"}:
+    raise RuntimeError(f"Expected UTC-day feature partitions, found: {partition_units}")
+print(f"Time-series partition units: {partition_units}")
+print("Daily cache layout: <dataset>/year=YYYY/month=MM/day=DD/part.parquet")
 
 symbols = store.table("symbology")
 print("Symbology sample:")

@@ -58,9 +58,9 @@ the [release policy](RELEASES.md).
   provider registration, named ROCm-kernel setup, dependency/device preflight,
   and backend-specific persisted embedding files.
 - A fully generated and validated feature-store demo corpus containing
-  388,491,746 rows across 212 Parquet files, including 3,951,636
-  GPU-embedded news rows, plus verified private Hugging Face publication and a
-  bounded remote query/streaming smoke workflow.
+  388,491,746 rows across 16,427 Parquet files, including 3,951,636
+  GPU-embedded news rows and schema-bearing empty UTC days, plus verified
+  private Hugging Face publication and bounded remote query/streaming workflows.
 - Strict feature-store `embedding_models`, feature, and table-column metadata;
   side-effect-free `FeatureStore.embedding_model()` lookup; catalog-inferred
   `vector.search_text()`; and bounded execution-time model preparation before
@@ -69,6 +69,9 @@ the [release policy](RELEASES.md).
   manifests, per-fingerprint process/thread locking, atomic failure cleanup,
   stricter shared-session preparation policy, and separate embedding lifecycle
   profile metrics.
+- Daily Hive-style feature-store partitions with arbitrary catalog path
+  templates, plus catalog-validated `history_lookback` bounds for point-in-time
+  predecessor scans.
 
 ### Changed
 
@@ -89,6 +92,12 @@ the [release policy](RELEASES.md).
 - Feature-store upload and demo targets now treat their local `.env` file as
   authoritative over inherited stale credentials; the remote smoke demo uses a
   bounded exact-alignment query instead of downloading full predecessor history.
+- Generated OHLCV, SMA, and embedded-news datasets now use one atomic,
+  schema-bearing Parquet file per UTC day, including empty non-trading days.
+  Remote stores refresh cached catalog metadata atomically so layout migrations
+  do not leave clients pinned to stale partition templates.
+- Remote projected embedding partitions preserve their catalog-declared
+  fixed-size Arrow list schema after DuckDB Parquet projection.
 
 ## 0.1.4 - 2026-09-06
 

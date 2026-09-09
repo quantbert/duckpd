@@ -8,7 +8,7 @@ It covers:
 2. Static reference table retrieval (symbology).
 3. Exact feature alignment (equi-join across datasets).
 4. Point-in-time (ASOF) alignment with availability_delay to eliminate lookahead bias.
-5. High-speed local cache acceleration (Phase 3 partition mirroring).
+5. UTC-day partition pruning and partition-mirrored local cache acceleration.
 6. Rich composition with DuckPD DataFrames: .assign(), filtering, .merge(), and streaming.
 """
 
@@ -65,6 +65,13 @@ def main() -> None:
     print(f"   Catalog Name: {catalog.get('name')}")
     print(f"   Catalog Version: {catalog.get('catalog_version')}")
     print(f"   Available Datasets: {[d['name'] for d in catalog.get('datasets', [])]}")
+    timeseries = [
+        dataset for dataset in catalog.get("datasets", []) if dataset["kind"] == "timeseries"
+    ]
+    partition_units = {dataset["name"]: dataset["partitioning"]["unit"] for dataset in timeseries}
+    if set(partition_units.values()) != {"day"}:
+        raise RuntimeError(f"Expected UTC-day feature partitions, found: {partition_units}")
+    print(f"   Time-Series Partition Units: {partition_units}")
     print(f"   Registered Features ({len(catalog.get('features', {}))} total):")
     for feat_name, meta in list(catalog.get("features", {}).items())[:6]:
         delay = meta.get("availability_delay", "N/A")
@@ -122,7 +129,10 @@ def main() -> None:
     pit_df = pit_features.collect()
     print(f"   Fetched {len(pit_df)} rows in {time.perf_counter() - t0:.4f}s:")
     print(pit_df)
-    print("   Notice: At 08:00, 'close' is NaN because the 08:00 bar close is only known at 08:01!")
+    print(
+        "   Notice: At 08:00, 'close' is the latest eligible predecessor; "
+        "the current 08:00 bar close becomes available at 08:01."
+    )
 
     # 5. Composition with DuckPD DataFrames
     print("\n6. Rich DuckPD Composition (Signals & Reference Merging):")
@@ -154,7 +164,7 @@ def main() -> None:
     print(f"   Streamed {total_batches} windowed batches ({total_rows} rows) in {elapsed:.4f}s.")
 
     # 7. Summary of Local Cache Directory
-    print("\n8. Local Cache Footprint (~/.cache/fdb):")
+    print("\n8. Daily Local Cache Footprint:")
     for p in sorted(cache_dir.rglob("*")):
         if p.is_file():
             print(f"   {p.relative_to(cache_dir)}: {p.stat().st_size / 1e6:.2f} MB")

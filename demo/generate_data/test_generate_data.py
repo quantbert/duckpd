@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 from build_catalog import DATASETS, build_catalog, inspect_partition, validate_embedding_columns
 from gendata import (
     assign_news_rows,
+    daily_partition_path,
     generate_dataset,
     generate_markets,
     generate_news_dataset,
@@ -22,6 +23,7 @@ from gendata import (
     write_table_dataset,
 )
 from hfupload import parse_destination
+from migrate_daily import _compact_partition, migrate_dataset
 from news_config import NEWS_MODEL, NEWS_TRANSFORMERS_MODEL
 
 import duckpd as pd
@@ -48,7 +50,7 @@ class CatalogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data_root = Path(directory)
             for dataset in ("ohlcv", "sma"):
-                partition = data_root / dataset / "year=2024"
+                partition = data_root / dataset / "year=2024" / "month=01" / "day=02"
                 partition.mkdir(parents=True)
                 pq.write_table(
                     pa.table(
@@ -59,7 +61,7 @@ class CatalogTests(unittest.TestCase):
                             )
                         }
                     ),
-                    partition / "data.parquet",
+                    partition / "part.parquet",
                 )
             write_table_dataset(
                 data_root / "symbols" / "data.parquet",
@@ -90,11 +92,11 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("primary_key", catalog["datasets"][3])
         self.assertIn('source="hf://buckets/owner/store"', readme)
 
-    def test_adds_news_model_and_monthly_partition_metadata(self) -> None:
+    def test_adds_news_model_and_daily_partition_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data_root = Path(directory)
             for dataset in ("ohlcv", "sma"):
-                partition = data_root / dataset / "year=2024"
+                partition = data_root / dataset / "year=2024" / "month=01" / "day=02"
                 partition.mkdir(parents=True)
                 pq.write_table(
                     pa.table(
@@ -105,9 +107,9 @@ class CatalogTests(unittest.TestCase):
                             )
                         }
                     ),
-                    partition / "data.parquet",
+                    partition / "part.parquet",
                 )
-            news_partition = data_root / "news" / "year=2024" / "month=01"
+            news_partition = data_root / "news" / "year=2024" / "month=01" / "day=02"
             news_partition.mkdir(parents=True)
             pq.write_table(
                 pa.table(
@@ -123,7 +125,7 @@ class CatalogTests(unittest.TestCase):
                         ),
                     }
                 ),
-                news_partition / "data.parquet",
+                news_partition / "part.parquet",
             )
             (data_root / "news" / "_SUCCESS.json").write_text(
                 json.dumps(
@@ -149,7 +151,8 @@ class CatalogTests(unittest.TestCase):
             catalog = build_catalog(data_root, "owner/store", str(data_root))
 
         news = next(dataset for dataset in catalog["datasets"] if dataset["name"] == "news")
-        self.assertEqual(news["partitioning"]["unit"], "month")
+        self.assertEqual(news["partitioning"]["unit"], "day")
+        self.assertEqual(news["history_lookback"], "PT0S")
         self.assertIn("bge-small-en-v1.5", catalog["embedding_models"])
         self.assertEqual(
             catalog["features"]["news:embedding"]["embedding_model"],
@@ -249,6 +252,12 @@ class GeneratedDatasetTests(unittest.TestCase):
                 embed_documents=embed,
                 verify_pinned_source=False,
             )
+            first_news_partition_exists = (
+                output / "year=2024" / "month=01" / "day=02" / "part.parquet"
+            ).is_file()
+            empty_news_partition_exists = (
+                output / "year=2024" / "month=01" / "day=03" / "part.parquet"
+            ).is_file()
             self.assertFalse(staging.exists())
 
         self.assertEqual(generated.num_rows, 6)
@@ -258,6 +267,8 @@ class GeneratedDatasetTests(unittest.TestCase):
             generated.schema.field("embedding").type,
             pa.list_(pa.float32(), NEWS_MODEL.dimension),
         )
+        self.assertTrue(first_news_partition_exists)
+        self.assertTrue(empty_news_partition_exists)
         self.assertEqual(calls[0], ["Title 0\n\nBody", "Title 1"])
         self.assertEqual(len(calls), first_call_count)
 
@@ -308,10 +319,62 @@ class GeneratedDatasetTests(unittest.TestCase):
                 end="2024-01-02T08:05:00Z",
                 alignment="exact",
             )
+            ohlcv_partition_exists = (
+                data_root / "ohlcv" / "year=2024" / "month=01" / "day=02" / "part.parquet"
+            ).is_file()
             result = frame.collect()
 
         self.assertEqual(result.shape, (5, 4))
+        self.assertTrue(ohlcv_partition_exists)
         self.assertEqual(result["ticker"].unique().tolist(), ["007"])
+
+    def test_migrates_legacy_yearly_files_to_atomic_daily_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "ohlcv"
+            legacy = root / "year=2024"
+            legacy.mkdir(parents=True)
+            pq.write_table(
+                pa.table(
+                    {
+                        "datetime": pa.array(
+                            [
+                                datetime(2024, 1, 2, 8, tzinfo=UTC),
+                                datetime(2024, 1, 4, 8, tzinfo=UTC),
+                            ],
+                            type=pa.timestamp("us", tz="UTC"),
+                        ),
+                        "ticker": ["007", "007"],
+                        "close": [100.0, 101.0],
+                    }
+                ),
+                legacy / "data.parquet",
+            )
+
+            rows = migrate_dataset(root, "year=*/data.parquet")
+            first = daily_partition_path(root, date(2024, 1, 2))
+            empty = daily_partition_path(root, date(2024, 1, 3))
+            last = daily_partition_path(root, date(2024, 1, 4))
+
+            self.assertEqual(rows, 2)
+            self.assertEqual(pq.ParquetFile(first).metadata.num_rows, 1)
+            self.assertEqual(pq.ParquetFile(empty).metadata.num_rows, 0)
+            self.assertEqual(pq.ParquetFile(last).metadata.num_rows, 1)
+            self.assertFalse((root / "year=2024" / "data.parquet").exists())
+
+    def test_compacts_parallel_partition_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            partition = Path(directory)
+            pq.write_table(pa.table({"value": [[1.0, 2.0]]}), partition / "part0.parquet")
+            pq.write_table(pa.table({"value": [[3.0, 4.0]]}), partition / "part1.parquet")
+            schema = pa.schema([pa.field("value", pa.list_(pa.float32(), 2))])
+
+            _compact_partition(partition, schema)
+
+            files = list(partition.glob("*.parquet"))
+            self.assertEqual(files, [partition / "part.parquet"])
+            parquet = pq.ParquetFile(files[0])
+            self.assertEqual(parquet.metadata.num_rows, 2)
+            self.assertTrue(parquet.schema_arrow.equals(schema))
 
     def test_session_timestamps_are_normalized_to_utc(self) -> None:
         winter, summer = session_minutes([date(2024, 1, 2), date(2024, 7, 1)])[::510]

@@ -82,8 +82,9 @@ specifications.
       "partitioning": {
         "column": "datetime",
         "timezone": "UTC",
-        "unit": "month"
-      }
+        "unit": "day"
+      },
+      "history_lookback": "PT0S"
     },
     {
       "name": "companies",
@@ -266,10 +267,12 @@ Pinning the revision makes those characteristics a testable input contract
 rather than a moving sample.
 
 The output is a `news` timeseries dataset partitioned by generated `datetime`
-UTC year and month. It contains `datetime`, `ticker`, `document_id`,
-`source_publish_date`, `source_symbol`, `title`, `description`, `publisher`,
-`url`, `source`, and `embedding`. `datetime` and `ticker` deliberately match the
-OHLCV contract, while the original timestamp and symbol remain available only
+into one UTC-day file at
+`news/year=YYYY/month=MM/day=DD/part.parquet`. It contains `datetime`, `ticker`,
+`document_id`, `source_publish_date`, `source_symbol`, `title`, `description`,
+`publisher`, `url`, `source`, and `embedding`. `datetime` and `ticker`
+deliberately match the OHLCV contract, while the original timestamp and symbol
+remain available only
 as provenance.
 
 Rows are ordered by the pinned Parquet `file_row_number`. For source row ordinal
@@ -295,7 +298,7 @@ the headline, publisher, and URL alongside distance.
 The 384-dimensional float32 vectors alone require 6,069,712,896 bytes
 (5.65 GiB) before Parquet encoding and non-vector columns. The generator must
 report estimated output and free-disk requirements before starting. It must not
-hold a year, month, or the complete embedding result in memory.
+hold a day or the complete embedding result in memory.
 
 The generator changes are:
 
@@ -318,8 +321,8 @@ The generator changes are:
    reject a missing, variable-length, non-numeric, or dimension-mismatched
    embedding column before upload. Add the `news` dataset and its text,
    provenance, and embedding feature declarations to `DATASETS`; the embedding
-   feature references `bge-small-en-v1.5`. Generalize catalog partition
-   discovery to `year=*/month=*/*.parquet` for monthly datasets.
+   feature references `bge-small-en-v1.5`. Catalog discovery uses the production
+   `year=*/month=*/day=*/*.parquet` daily hierarchy.
 5. Add an `embeddings` generation dependency or run this step with
    `--extra embeddings`. The Makefile should expose a clear opt-in such as
    `generate-news`; ordinary synthetic OHLCV/SMA generation should remain usable
@@ -339,7 +342,7 @@ The generator changes are:
 8. Make generation resumable. Write bounded intermediate chunks under a staging
    directory, record the source revision, model fingerprint, row interval, row
    count, and checksum for each completed chunk, then atomically finalize each
-   monthly Parquet partition. A restart may reuse only chunks whose complete
+   UTC-day `part.parquet`. A restart may reuse only chunks whose complete
    generation identity matches. `--overwrite` discards incompatible state.
 9. Validate the completed artifact before upload: exactly 3,951,636 rows, one
    embedding per row, unique `document_id`, finite vectors of dimension 384,

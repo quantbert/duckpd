@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -212,25 +213,46 @@ class FeatureStore:
                 self._session._connection.register_filesystem(self._filesystem)
 
     def _load_catalog(self) -> None:
-        candidates: list[Path] = []
-        if self._catalog_path_raw is not None:
-            candidates.append(self._catalog_path_raw.expanduser().resolve())
-        if self._source_path is not None:
-            candidates.append(self._source_path / "catalog.json")
-        if self._cache_path is not None:
-            candidates.append(self._cache_path / "catalog.json")
+        catalog_text: str
+        explicit_catalog = (
+            self._catalog_path_raw.expanduser().resolve()
+            if self._catalog_path_raw is not None
+            else None
+        )
+        local_catalog = (
+            self._source_path / "catalog.json" if self._source_path is not None else None
+        )
+        cached_catalog = self._cache_path / "catalog.json" if self._cache_path is not None else None
 
-        cat_file = next((p for p in candidates if p.is_file()), None)
-        if cat_file is not None:
-            catalog_text = cat_file.read_text(encoding="utf-8")
+        if explicit_catalog is not None:
+            if not explicit_catalog.is_file():
+                raise FileNotFoundError(f"Catalog not found: {explicit_catalog}")
+            catalog_text = explicit_catalog.read_text(encoding="utf-8")
+        elif local_catalog is not None:
+            if not local_catalog.is_file():
+                raise FileNotFoundError(f"Catalog not found in {self._source_raw}")
+            catalog_text = local_catalog.read_text(encoding="utf-8")
         elif self._is_remote and self._filesystem is not None:
-            # Read from remote filesystem
             remote_cat_path = remote_file_path(self._source_raw, "catalog.json")
             try:
-                with self._filesystem.open(remote_cat_path, "r") as f:
-                    catalog_text = f.read()
-            except Exception as err:
-                raise FileNotFoundError(f"Remote catalog not found: {remote_cat_path}") from err
+                with self._filesystem.open(remote_cat_path, "r") as file:
+                    catalog_text = file.read()
+            except Exception as error:
+                if cached_catalog is None or not cached_catalog.is_file():
+                    raise FileNotFoundError(
+                        f"Remote catalog not found: {remote_cat_path}"
+                    ) from error
+                catalog_text = cached_catalog.read_text(encoding="utf-8")
+            else:
+                assert cached_catalog is not None
+                cached_catalog.parent.mkdir(parents=True, exist_ok=True)
+                temporary = cached_catalog.with_name(f".{cached_catalog.name}.{uuid4().hex}.tmp")
+                try:
+                    temporary.write_text(catalog_text, encoding="utf-8")
+                    os.replace(temporary, cached_catalog)
+                except BaseException:
+                    temporary.unlink(missing_ok=True)
+                    raise
         else:
             raise FileNotFoundError(f"Catalog not found in {self._source_raw}")
 
@@ -742,16 +764,19 @@ class FeatureStore:
                 fs=self._filesystem,
             )
             min_time = entry.get("min_time")
-            if "{year}" in path_template and min_time is None:
+            history_lookback = entry.get("_history_lookback")
+            if "{year}" in path_template and min_time is None and history_lookback is None:
                 raise ValueError(
-                    f"Point-in-time dataset {dataset!r} requires min_time "
-                    "to resolve complete predecessor history"
+                    f"Point-in-time dataset {dataset!r} requires min_time or history_lookback "
+                    "to resolve predecessor history"
                 )
             history_start = (
                 parse_timestamp(min_time)
                 if min_time is not None
                 else datetime.min.replace(tzinfo=start.tzinfo)
             )
+            if isinstance(history_lookback, timedelta):
+                history_start = max(history_start, start - history_lookback)
             physical_names = list(dict.fromkeys(name for _, name in features))
             right = self._timeseries_frame(dataset, history_start, end, physical_names)
             right_time = cast("Series", right[time_column])

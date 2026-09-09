@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import duckdb
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from duckpd._feature_catalog import parse_timestamp
@@ -149,7 +150,11 @@ def get_dataset_path_template(
                 if isinstance(partitioning, dict)
                 else None
             )
-            if unit == "month":
+            if unit == "day":
+                path_template = (
+                    f"{dataset_name}/year={{year}}/month={{month:02d}}/day={{day:02d}}/part.parquet"
+                )
+            elif unit == "month":
                 path_template = f"{dataset_name}/year={{year}}/month={{month:02d}}/data.parquet"
             else:
                 path_template = f"{dataset_name}/year={{year}}/data.parquet"
@@ -187,6 +192,14 @@ def partition_paths_for_interval(
         return []
     avail_start, avail_end = interval
     final_time = avail_end - timedelta(microseconds=1)
+
+    if "{day" in path_template:
+        cursor = avail_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        paths: list[str] = []
+        while cursor <= final_time:
+            paths.append(path_template.format(year=cursor.year, month=cursor.month, day=cursor.day))
+            cursor += timedelta(days=1)
+        return paths
 
     if "{month" in path_template:
         cursor = avail_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -244,6 +257,38 @@ def file_contains_columns(file_path: Path, needed_columns: list[str]) -> bool:
         return False
 
 
+def _restore_fixed_size_columns(
+    path: Path,
+    embedding_columns: dict[str, int],
+) -> None:
+    """Restore Arrow fixed-size-list metadata stripped by DuckDB's Parquet writer."""
+    table = pq.read_table(path)  # pyright: ignore[reportUnknownMemberType]
+    changed = False
+    for column, dimension in embedding_columns.items():
+        index = table.schema.get_field_index(column)
+        if index < 0:
+            continue
+        field = cast("Any", table.schema.field(index))
+        expected_type = pa.list_(pa.float32(), dimension)
+        if field.type.equals(expected_type):
+            continue
+        cast_column = table.column(index).cast(expected_type)
+        expected_field = pa.field(
+            field.name,
+            expected_type,
+            nullable=field.nullable,
+            metadata=field.metadata,
+        )
+        table = table.set_column(index, expected_field, cast_column)
+        changed = True
+    if changed:
+        pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+            table,
+            path,
+            compression="zstd",
+        )
+
+
 def ensure_cached_partition(
     source_uri: str,
     cache_root: Path,
@@ -251,6 +296,7 @@ def ensure_cached_partition(
     needed_columns: list[str],
     con: duckdb.DuckDBPyConnection,
     filters_sql: str | None = None,
+    embedding_columns: dict[str, int] | None = None,
 ) -> Path:
     """Ensure a partition contains the cumulative requested projection."""
     local_target = _rooted_path(cache_root, relative_path)
@@ -288,6 +334,8 @@ def ensure_cached_partition(
 
         try:
             con.execute(copy_query)
+            if embedding_columns:
+                _restore_fixed_size_columns(temp_target, embedding_columns)
             os.replace(temp_target, local_target)
             if metrics is not None:
                 metrics["partition_transfer_bytes"] = (
@@ -403,6 +451,7 @@ def materialize_feature_source(
                 relative_path,
                 list(source.needed_columns),
                 con,
+                embedding_columns=dict(source.embedding_columns),
             ).resolve()
         )
         for relative_path in relative_paths

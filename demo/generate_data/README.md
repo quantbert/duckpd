@@ -20,14 +20,16 @@ make data
 
 The `data` target runs the `generate` and `upload` targets. They do these steps:
 
-1. Generates yearly OHLCV Parquet partitions.
-2. Generates SMA10, SMA20, SMA50, and SMA200 partitions.
-3. Generates monthly news partitions with BGE embeddings.
-4. Builds catalog version 1, dataset metadata, and the Hugging Face dataset card.
-5. Creates or updates the configured private Hugging Face bucket or dataset.
+1. Generates one OHLCV Parquet partition per UTC day.
+2. Generates matching daily SMA10, SMA20, SMA50, and SMA200 partitions.
+3. Generates daily news partitions with BGE embeddings.
+4. Writes schema-bearing empty partitions for non-trading calendar days.
+5. Builds catalog version 1, dataset metadata, and the Hugging Face dataset card.
+6. Creates or updates the configured private Hugging Face bucket or dataset.
 
-By default, generation does not replace existing yearly files. It generates the same
-data for the same date range, ticker range, and seed.
+By default, generation does not replace existing daily files. It generates the same
+data for the same date range, ticker range, and seed. Time-series paths use
+`<dataset>/year=YYYY/month=MM/day=DD/part.parquet`.
 
 ## Configuration
 
@@ -49,7 +51,7 @@ Generation and run controls are Make variables with defaults:
 | `TICKER_START` | First numeric ticker identifier. |
 | `TICKER_COUNT` | Number of sequential tickers to generate. |
 | `SEED` | Seed used for deterministic generation. |
-| `OVERWRITE` | Controls replacement of existing yearly partitions. |
+| `OVERWRITE` | Controls replacement of existing daily partitions. |
 | `DRY_RUN` | Prevents the Hugging Face upload when set to `true`. |
 | `NEWS_SOURCE` | Local pinned AlphaDojo news Parquet source. |
 | `EMBEDDING_BATCH_SIZE` | Number of articles embedded per model call. |
@@ -67,6 +69,19 @@ make data TICKER_COUNT=10 DRY_RUN=true
 
 Use `make generate OVERWRITE=true` to replace existing partitions. Use `make upload`
 to rebuild metadata and upload an already generated store.
+
+Existing generated stores using yearly OHLCV/SMA files or monthly news files can
+be rewritten without regenerating prices or embeddings:
+
+```bash
+make migrate-daily
+```
+
+The migration stages each dataset, writes one `part.parquet` per UTC day,
+creates schema-bearing empty calendar days, verifies aggregate row counts, and
+only then replaces the legacy dataset directory and rebuilds its metadata. Run
+`make upload` afterward to synchronize the daily layout; dataset-repository
+uploads also delete the obsolete yearly/monthly Parquet paths.
 
 ## Embedded News Stress Data
 
@@ -173,8 +188,8 @@ uv run --group generation python gendata.py \
 	--markets-output data/markets/data.parquet
 ```
 
-Use `--overwrite` to replace partitions that an older version generated. Catalog
-version 1 accepts only Parquet time columns with the Arrow timezone `UTC`.
+Use `--overwrite` to replace existing daily partitions. Catalog version 1
+accepts only Parquet time columns with the Arrow timezone `UTC`.
 
 Use this command to build catalog metadata and read Parquet partition statistics:
 

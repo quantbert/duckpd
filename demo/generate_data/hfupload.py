@@ -54,6 +54,15 @@ def _upload_exclusions() -> tuple[str, ...]:
     return (".cache/**", "**/.cache/**", ".news-staging/**", "**/.news-staging/**")
 
 
+def _legacy_partition_patterns() -> tuple[str, ...]:
+    """Return obsolete coarse partitions removed during a dataset-repo upload."""
+    return (
+        "ohlcv/year=*/data.parquet",
+        "sma/year=*/data.parquet",
+        "news/year=*/month=*/data.parquet",
+    )
+
+
 def upload_data(
     data_directory: Path,
     destination: str,
@@ -109,6 +118,7 @@ def upload_data(
         folder_path=data_directory,
         repo_type="dataset",
         ignore_patterns=list(_upload_exclusions()),
+        delete_patterns=list(_legacy_partition_patterns()),
         token=token,
     )
 

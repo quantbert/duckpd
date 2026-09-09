@@ -96,10 +96,7 @@ def parse_timestamp(value: Any) -> datetime:
     return timestamp.astimezone(UTC)
 
 
-def parse_availability_delay(value: Any, reference: str) -> timedelta:
-    """Parse a non-negative, calendar-independent ISO 8601 duration."""
-    if not isinstance(value, str):
-        raise ValueError(f"Feature {reference} must define availability_delay")
+def _parse_duration(value: str, *, field: str, owner: str) -> timedelta:
     match = re.fullmatch(
         r"P(?:(?P<days>\d+)D)?"
         r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
@@ -107,7 +104,7 @@ def parse_availability_delay(value: Any, reference: str) -> timedelta:
         value,
     )
     if match is None or value.endswith("T") or not any(part is not None for part in match.groups()):
-        raise ValueError(f"Invalid availability_delay for {reference}: {value!r}")
+        raise ValueError(f"Invalid {field} for {owner}: {value!r}")
     parts = match.groupdict(default="0")
     return timedelta(
         days=int(parts["days"]),
@@ -115,6 +112,20 @@ def parse_availability_delay(value: Any, reference: str) -> timedelta:
         minutes=int(parts["minutes"]),
         seconds=float(parts["seconds"]),
     )
+
+
+def parse_availability_delay(value: Any, reference: str) -> timedelta:
+    """Parse a non-negative, calendar-independent ISO 8601 duration."""
+    if not isinstance(value, str):
+        raise ValueError(f"Feature {reference} must define availability_delay")
+    return _parse_duration(value, field="availability_delay", owner=reference)
+
+
+def parse_history_lookback(value: Any, dataset: str) -> timedelta:
+    """Parse a catalog promise bounding predecessor history needed at query start."""
+    if not isinstance(value, str):
+        raise ValueError(f"Dataset {dataset!r} history_lookback must be an ISO 8601 duration")
+    return _parse_duration(value, field="history_lookback", owner=f"dataset {dataset!r}")
 
 
 def validate_catalog(
@@ -159,6 +170,32 @@ def validate_catalog(
             series_keys = cast("list[Any]", series_keys_raw)
             if not all(isinstance(key, str) and key for key in series_keys):
                 raise ValueError(f"Timeseries dataset {name!r} requires series_keys")
+            partitioning_raw = entry.get("partitioning")
+            if partitioning_raw is not None:
+                if not isinstance(partitioning_raw, Mapping):
+                    raise ValueError(f"Timeseries dataset {name!r} partitioning must be a mapping")
+                partitioning = cast("Mapping[str, Any]", partitioning_raw)
+                if partitioning.get("column") != time_col:
+                    raise ValueError(
+                        f"Timeseries dataset {name!r} partitioning column must match time_column"
+                    )
+                if partitioning.get("unit") not in {"year", "month", "day"}:
+                    raise ValueError(
+                        f"Timeseries dataset {name!r} partitioning unit must be "
+                        "'year', 'month', or 'day'"
+                    )
+                if partitioning.get("timezone") != "UTC":
+                    raise ValueError(
+                        f"Timeseries dataset {name!r} partitioning timezone must be 'UTC'"
+                    )
+            history_lookback_raw = entry.get("history_lookback")
+            if history_lookback_raw is not None:
+                entry = {
+                    **entry,
+                    "_history_lookback": parse_history_lookback(history_lookback_raw, name),
+                }
+        elif "history_lookback" in entry:
+            raise ValueError(f"Table dataset {name!r} cannot define history_lookback")
         columns_raw = entry.get("columns")
         if columns_raw is not None:
             if kind != "table" or not isinstance(columns_raw, Mapping):

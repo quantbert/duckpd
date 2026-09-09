@@ -65,11 +65,11 @@ request that device explicitly and fail rather than falling back to CPU.
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
 - `market_data_demo.py` benchmarks and compares execution time and memory usage
-  between DuckPD and standard pandas across OHLC market datasets. Running with
-  `smoke` executes in ~3 seconds on a 4.99 MB file.
 - `generate_data/` contains the deterministic Nasdaq Stockholm feature-store
-  generator. It writes yearly OHLCV and simple-moving-average Parquet partitions,
-  reference tables, catalog metadata, and a Hugging Face dataset card.
+  generator. It writes one OHLCV, simple-moving-average, and news Parquet file
+  per UTC day under `year=YYYY/month=MM/day=DD/part.parquet`, including
+  schema-bearing empty non-trading days, plus reference tables, catalog
+  metadata, and a Hugging Face dataset card.
 - `DuckPD_Quickstart.ipynb` is a 5-minute interactive Jupyter Notebook
   demonstrating remote data loading, column reductions, string transformations,
   `groupby` aggregations, query plans, and Parquet exports on the Goodreads
@@ -101,11 +101,12 @@ request that device explicitly and fail rather than falling back to CPU.
   FeatureStore walkthrough.
 
 - `featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb` covers remote
-  catalog inspection, exact and point-in-time alignment, reference tables,
-  Arrow batch streaming, and catalog-inferred semantic search. Its embedding
-  workflow inspects the catalog model, plans without side effects, demonstrates
-  bounded automatic preparation, compares cold and warm profile metrics, and
-  shows explicit prewarming with automatic preparation disabled.
+  catalog inspection, production UTC-day partition validation, exact and
+  point-in-time alignment, partition-mirrored caching, reference tables, Arrow
+  batch streaming, and catalog-inferred semantic search. Its embedding workflow
+  inspects the catalog model, plans without side effects, demonstrates bounded
+  automatic preparation, compares cold and warm profile metrics, and shows
+  explicit prewarming with automatic preparation disabled.
 
 ## Generate Feature-Store Data
 

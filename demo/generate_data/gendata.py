@@ -1,8 +1,9 @@
 """Generate deterministic time-series and table datasets for a synthetic store.
 
 The default invocation writes data for tickers ``000`` through ``099`` from
-2010-01-01 (inclusive) to 2025-01-01 (exclusive). Output is partitioned by
-UTC year so a partial run can be generated, inspected, or resumed. It also
+2010-01-01 (inclusive) to 2025-01-01 (exclusive). Time-series output uses one
+Parquet file per UTC day under ``year=YYYY/month=MM/day=DD/part.parquet`` so
+bounded DuckPD queries mirror the production feature-store layout. It also
 writes keyed symbology and non-keyed market-hours tables.
 """
 
@@ -36,6 +37,20 @@ import duckpd as pd
 MARKET_TIMEZONE = ZoneInfo("Europe/Stockholm")
 MARKET_OPEN = time(9, 0)
 MARKET_CLOSE = time(17, 30)
+
+DAILY_PARTITION_LAYOUT = "utc-day-v1"
+
+
+def daily_partition_path(root: Path, value: date) -> Path:
+    """Return the canonical UTC-day Parquet path below one dataset root."""
+    return root / f"year={value:%Y}" / f"month={value:%m}" / f"day={value:%d}" / "part.parquet"
+
+
+def calendar_days(start: date, end: date) -> list[date]:
+    """Return every date in a half-open calendar interval."""
+    return [start + timedelta(days=offset) for offset in range((end - start).days)]
+
+
 SMA_WINDOWS = (10, 20, 50, 200)
 MARKET_CALENDAR = xcals.get_calendar("XSTO")
 SCHEMA = pa.schema(
@@ -206,6 +221,7 @@ def _news_generation_identity(
         "end": end.isoformat(),
         "ticker_start": ticker_start,
         "ticker_count": ticker_count,
+        "partition_layout": DAILY_PARTITION_LAYOUT,
     }
 
 
@@ -342,40 +358,64 @@ def generate_news_dataset(
         source_row += batch_rows
         print(f"Embedded {source_row:,}/{row_count:,} news rows")
 
-    writers: dict[tuple[int, int], pq.ParquetWriter] = {}
-    temporary_paths: dict[tuple[int, int], Path] = {}
+    active_partition: date | None = None
+    active_writer: pq.ParquetWriter | None = None
+    active_temporary: Path | None = None
     try:
         for chunk_path in chunk_paths:
             table = pq.read_table(chunk_path)
             datetimes = table["datetime"].to_pylist()
             offset = 0
             while offset < table.num_rows:
-                partition = (datetimes[offset].year, datetimes[offset].month)
+                current_datetime = datetimes[offset]
+                assert current_datetime is not None
+                partition = current_datetime.date()
                 end_offset = offset + 1
                 while end_offset < table.num_rows:
-                    candidate = datetimes[end_offset]
-                    if (candidate.year, candidate.month) != partition:
+                    candidate_datetime = datetimes[end_offset]
+                    assert candidate_datetime is not None
+                    if candidate_datetime.date() != partition:
                         break
                     end_offset += 1
-                if partition not in writers:
-                    year, month = partition
-                    destination = output / f"year={year}" / f"month={month:02d}" / "data.parquet"
+                if partition != active_partition:
+                    if active_writer is not None:
+                        active_writer.close()
+                        assert active_temporary is not None and active_partition is not None
+                        active_temporary.replace(daily_partition_path(output, active_partition))
+                    destination = daily_partition_path(output, partition)
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    temporary_path = destination.with_suffix(".parquet.tmp")
-                    temporary_path.unlink(missing_ok=True)
-                    temporary_paths[partition] = temporary_path
-                    writers[partition] = pq.ParquetWriter(
-                        temporary_path, NEWS_SCHEMA, compression="zstd"
+                    active_temporary = destination.with_suffix(".parquet.tmp")
+                    active_temporary.unlink(missing_ok=True)
+                    active_writer = pq.ParquetWriter(
+                        active_temporary,
+                        NEWS_SCHEMA,
+                        compression="zstd",
                     )
-                writers[partition].write_table(table.slice(offset, end_offset - offset))
+                    active_partition = partition
+                assert active_writer is not None
+                active_writer.write_table(table.slice(offset, end_offset - offset))
                 offset = end_offset
-    finally:
-        for writer in writers.values():
-            writer.close()
+        if active_writer is not None:
+            active_writer.close()
+            active_writer = None
+            assert active_temporary is not None and active_partition is not None
+            active_temporary.replace(daily_partition_path(output, active_partition))
+    except BaseException:
+        if active_writer is not None:
+            active_writer.close()
+        if active_temporary is not None:
+            active_temporary.unlink(missing_ok=True)
+        raise
 
-    for partition, temporary_path in temporary_paths.items():
-        year, month = partition
-        temporary_path.replace(output / f"year={year}" / f"month={month:02d}" / "data.parquet")
+    empty_news = pa.Table.from_batches([], schema=NEWS_SCHEMA)
+    for partition in calendar_days(start, end):
+        destination = daily_partition_path(output, partition)
+        if destination.is_file():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(".parquet.tmp")
+        pq.write_table(empty_news, temporary, compression="zstd")
+        temporary.replace(destination)
     completion_path.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
     shutil.rmtree(staging, ignore_errors=True)
     print(f"Wrote {row_count:,} embedded news rows to {output}")
@@ -486,36 +526,63 @@ def generate_dataset(
     seed: int,
     overwrite: bool,
 ) -> None:
-    """Write one yearly file, streaming one ticker at a time to bound memory use."""
+    """Write atomic UTC-day files while generating one bounded year at a time."""
     if end <= start:
         raise ValueError("end must be later than start")
     tickers = ticker_values(ticker_start, ticker_count)
 
     for year, year_start, year_end in years_in_range(start, end):
-        timestamps = session_minutes(trading_days(year_start, year_end))
-        if not timestamps:
-            print(f"Skipping {year}: no XSTO trading sessions in requested range")
-            continue
-        destination = output / f"year={year}" / "data.parquet"
-        if destination.exists() and not overwrite:
-            print(f"Skipping existing {destination}")
+        days = calendar_days(year_start, year_end)
+        market_days = trading_days(year_start, year_end)
+        timestamps = session_minutes(market_days)
+        offsets: dict[date, tuple[int, int]] = {}
+        offset = 0
+        for market_day in market_days:
+            next_offset = offset + len(session_minutes([market_day]))
+            offsets[market_day] = (offset, next_offset)
+            offset = next_offset
+
+        destinations = {day: daily_partition_path(output, day) for day in days}
+        missing = {
+            day: destination
+            for day, destination in destinations.items()
+            if overwrite or not destination.exists()
+        }
+        if not missing:
+            print(f"Skipping {year}: all daily partitions already exist")
             continue
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary_destination = destination.with_suffix(".parquet.tmp")
-        temporary_destination.unlink(missing_ok=True)
+        writers: dict[date, pq.ParquetWriter] = {}
+        temporary_paths: dict[date, Path] = {}
         try:
-            with pq.ParquetWriter(temporary_destination, SCHEMA, compression="zstd") as writer:
-                for ticker in tickers:
-                    bars = generate_bars(ticker, year, timestamps, seed)
-                    writer.write_table(bars, row_group_size=250_000)
-            temporary_destination.replace(destination)
+            for day, destination in missing.items():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary = destination.with_suffix(".parquet.tmp")
+                temporary.unlink(missing_ok=True)
+                temporary_paths[day] = temporary
+                writers[day] = pq.ParquetWriter(temporary, SCHEMA, compression="zstd")
+
+            for ticker in tickers:
+                bars = generate_bars(ticker, year, timestamps, seed)
+                for market_day, (day_start, day_end) in offsets.items():
+                    writer = writers.get(market_day)
+                    if writer is not None:
+                        writer.write_table(bars.slice(day_start, day_end - day_start))
         except BaseException:
-            temporary_destination.unlink(missing_ok=True)
+            for writer in writers.values():
+                writer.close()
+            for temporary in temporary_paths.values():
+                temporary.unlink(missing_ok=True)
             raise
+        else:
+            for writer in writers.values():
+                writer.close()
+            for day, temporary in temporary_paths.items():
+                temporary.replace(destinations[day])
+
         print(
-            f"Wrote {len(timestamps) * ticker_count:,} rows for {ticker_count:,} tickers "
-            f"to {destination}"
+            f"Wrote {len(missing):,} daily partitions for {ticker_count:,} tickers "
+            f"under {output / f'year={year}'}"
         )
 
 
@@ -536,64 +603,58 @@ def simple_moving_averages(close: np.ndarray, history: np.ndarray) -> dict[int, 
 
 
 def generate_sma_dataset(ohlcv_root: Path, output: Path, overwrite: bool) -> None:
-    """Generate SMA10, SMA20, SMA50, and SMA200 datasets from yearly OHLCV files."""
+    """Generate SMA10, SMA20, SMA50, and SMA200 datasets from daily OHLCV files."""
     close_history: dict[str, np.ndarray] = {}
-    source_files = sorted(ohlcv_root.glob("year=*/data.parquet"))
+    source_files = sorted(ohlcv_root.glob("year=*/month=*/day=*/part.parquet"))
     if not source_files:
-        raise FileNotFoundError(f"No yearly OHLCV files found under {ohlcv_root}")
+        raise FileNotFoundError(f"No daily OHLCV files found under {ohlcv_root}")
 
     for source in source_files:
-        year_directory = source.parent.name
-        destination = output / year_directory / "data.parquet"
+        relative_path = source.relative_to(ohlcv_root)
+        destination = output / relative_path
         write_output = overwrite or not destination.exists()
-        writer: pq.ParquetWriter | None = None
-        temporary_destination = destination.with_suffix(".parquet.tmp")
-        rows_written = 0
-        try:
+        table = pq.read_table(source)
+        tickers = table["ticker"].to_numpy(zero_copy_only=False)
+        close = table["close"].to_numpy(zero_copy_only=False)
+        output_tables: list[pa.Table] = []
+        for ticker in np.unique(tickers):
+            ticker_mask = tickers == ticker
+            ticker_close = close[ticker_mask]
+            history = close_history.get(ticker, np.array([], dtype=np.float64))
             if write_output:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                temporary_destination.unlink(missing_ok=True)
-                writer = pq.ParquetWriter(temporary_destination, SMA_SCHEMA, compression="zstd")
-            for batch in pq.ParquetFile(source).iter_batches(batch_size=250_000):
-                table = pa.Table.from_batches([batch])
-                tickers = table["ticker"].to_numpy(zero_copy_only=False)
-                close = table["close"].to_numpy(zero_copy_only=False)
-                for ticker in np.unique(tickers):
-                    ticker_mask = tickers == ticker
-                    ticker_close = close[ticker_mask]
-                    history = close_history.get(ticker, np.array([], dtype=np.float64))
-                    if writer is not None:
-                        averages = simple_moving_averages(ticker_close, history)
-                        writer.write_table(
-                            pa.table(
-                                {
-                                    "datetime": table["datetime"].filter(pa.array(ticker_mask)),
-                                    "ticker": pa.array(
-                                        [ticker] * len(ticker_close), type=pa.string()
-                                    ),
-                                    **{
-                                        f"sma{window}": pa.array(averages[window])
-                                        for window in SMA_WINDOWS
-                                    },
-                                },
-                                schema=SMA_SCHEMA,
-                            ),
-                            row_group_size=250_000,
-                        )
-                    close_history[ticker] = np.concatenate((history, ticker_close))[-199:]
-                    rows_written += len(ticker_close)
-            if writer is not None:
-                writer.close()
-                writer = None
-                temporary_destination.replace(destination)
-                print(f"Wrote {rows_written:,} SMA rows to {destination}")
-            else:
-                print(f"Loaded history from existing {destination}")
+                averages = simple_moving_averages(ticker_close, history)
+                output_tables.append(
+                    pa.table(
+                        {
+                            "datetime": table["datetime"].filter(pa.array(ticker_mask)),
+                            "ticker": pa.array([ticker] * len(ticker_close), type=pa.string()),
+                            **{
+                                f"sma{window}": pa.array(averages[window]) for window in SMA_WINDOWS
+                            },
+                        },
+                        schema=SMA_SCHEMA,
+                    )
+                )
+            close_history[ticker] = np.concatenate((history, ticker_close))[-199:]
+
+        if not write_output:
+            print(f"Loaded history from existing {destination}")
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(".parquet.tmp")
+        temporary.unlink(missing_ok=True)
+        output_table = (
+            pa.concat_tables(output_tables)
+            if output_tables
+            else pa.Table.from_batches([], schema=SMA_SCHEMA)
+        )
+        try:
+            pq.write_table(output_table, temporary, compression="zstd", row_group_size=250_000)
+            temporary.replace(destination)
         except BaseException:
-            if writer is not None:
-                writer.close()
-            temporary_destination.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
             raise
+        print(f"Wrote {output_table.num_rows:,} SMA rows to {destination}")
 
 
 def arguments() -> argparse.Namespace:
@@ -636,7 +697,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument(
         "--generate-sma",
         action="store_true",
-        help="Generate data/sma from the yearly OHLCV Parquet files after generating OHLCV.",
+        help="Generate data/sma from the daily OHLCV Parquet files after generating OHLCV.",
     )
     parser.add_argument(
         "--sma-output",

@@ -17,10 +17,16 @@ and quantitative researchers working with massive, structured Parquet datasets.
 DuckPD unifies feature stores into its native relational plan architecture using three simple ideas:
 
 1. **Partition-Mirrored Cache Layout (Zero Fragments, Zero Overlaps):**
-   Instead of inventing arbitrary date-sliced files, the local cache **mirrors the native partition layout of the source dataset** (e.g., `ohlcv/year=2024/data.parquet`).
-   - **Partition Pruning:** If a user requests 2024 data, 2018–2023 partitions are never fetched.
-   - **Column Projection:** Only the specific requested columns (e.g., `close`) are extracted from the multi-gigabyte remote partition. A 20 GB partition downloads as a clean ~300 MB partition file locally.
-   - **Standard Parquet:** The resulting cache is simply a valid, standard Parquet dataset that any tool (DuckDB CLI, Polars, pandas) can query directly. No custom manifests or fragment reconciliation needed.
+   The local cache mirrors the native source layout. Production-style stores use
+   one atomic Parquet file per UTC day, for example
+   `ohlcv/year=2024/month=01/day=02/part.parquet`.
+   - **Partition Pruning:** Exact queries fetch only intersecting days.
+     Point-in-time queries additionally fetch the catalog-declared predecessor
+     lookback.
+   - **Column Projection:** Only requested columns are copied into each local
+     daily partition.
+   - **Standard Parquet:** The cache remains directly queryable by DuckDB,
+     Polars, pandas, and other Parquet readers.
 2. **Metadata-Only Setup:**
    Creating a `FeatureStore` validates `catalog.json`; remote construction may fetch that
    metadata. Building a feature selection creates an immutable logical plan without downloading
@@ -64,50 +70,57 @@ Large quantitative and event-driven feature datasets often span multiple terabyt
    directly queryable partitioned Parquet dataset.
 
 ### 2.2 The Partition-Mirrored Solution
-Structured feature datasets already adhere to a clean, canonical directory partitioning (e.g., yearly partitions):
+Structured feature pipelines commonly publish one independently replaceable
+file per family, timeframe, and UTC day:
 
 ```text
-Remote Source (Hugging Face / S3):
+Remote Source:
 store/
 ├── catalog.json
 ├── ohlcv/
-│   ├── year=2020/data.parquet   (100 columns, 15 GB)
-│   ├── year=2021/data.parquet   (100 columns, 18 GB)
-│   ├── ...
-│   └── year=2024/data.parquet   (100 columns, 22 GB)
+│   └── year=2024/
+│       └── month=01/
+│           ├── day=01/part.parquet
+│           ├── day=02/part.parquet
+│           └── day=03/part.parquet
 └── signals/
-    └── year=2024/data.parquet   (500 indicators, 45 GB)
+    └── year=2024/month=01/day=02/part.parquet
 ```
 
-When a researcher asks for:
-```python
-features = store.features(
-    features={"price": "ohlcv:close", "rsi": "signals:rsi14"},
-    start="2024-01-01T00:00:00Z",
-    end="2025-01-01T00:00:00Z",
-    alignment="point_in_time",
-    spine="ohlcv",
-)
+The prefix is catalog-defined and may instead include production dimensions
+such as `family=ohlcv/timeframe=1m`. DuckPD interprets only the declared path
+template; it does not hard-code dataset directory names.
+
+When a researcher requests six minutes on 2024-01-02, exact alignment resolves
+only `day=02`. Point-in-time alignment also needs observations preceding the
+left boundary. A timeseries catalog may declare:
+
+```json
+{
+  "partitioning": {
+    "column": "datetime",
+    "unit": "day",
+    "timezone": "UTC"
+  },
+  "history_lookback": "P7D"
+}
 ```
 
-DuckPD executes **Partition Pruning + Column Projection**:
-1. **Partition Pruning:** Years 2020–2023 are never touched. Terabytes of history are excluded immediately.
-2. **Column Projection:** For partition `year=2024`, DuckPD requests **only** `[datetime, ticker, close]` from `ohlcv` and `[datetime, ticker, rsi14]` from `signals`.
-3. **Mirrored Storage:** The local cache writes:
-   ```text
-   ~/.cache/fdb/
-   ├── catalog.json
-   ├── ohlcv/
-   │   └── year=2024/data.parquet   (~350 MB instead of 22 GB!)
-   └── signals/
-       └── year=2024/data.parquet   (~280 MB instead of 45 GB!)
-   ```
+`history_lookback` is a publisher promise that this bounded interval contains
+all predecessor state required at the query start. DuckPD prunes earlier
+partitions. If the field is absent, DuckPD retains the conservative legacy
+behavior and resolves complete history back to `min_time`.
 
 ### 2.3 Operational Advantages
-- **1:1 File Mapping:** There are no fragments or UUID files. Partition `ohlcv/year=2024/data.parquet` either exists locally or it does not.
-- **Zero File Overlaps:** Queries covering Jan–Feb and Mar–Apr simply read the same clean 2024 partition file. No interval subtraction math, and no duplicate-hiding `MAX()` SQL hacks.
-- **Multi-Worker Safety:** Per-partition file locks serialize cache expansion, while unique temporary files and atomic replacement ensure multi-process training workers always observe a complete immutable Parquet file. Existing cached columns are retained when a later request expands the projection.
-- **Zero Magic:** The local cache directory is just a standard Parquet dataset.
+- **1:1 File Mapping:** Every source day maps to one deterministic cache path.
+- **Bounded Small Queries:** Minute-scale queries no longer project multi-GB
+  annual files.
+- **Schema-Bearing Empty Days:** Weekends and closures may have empty Parquet
+  files, keeping date-path resolution deterministic.
+- **Multi-Worker Safety:** Per-partition locks, unique temporary files, and
+  atomic replacement prevent partial cache observations.
+- **Zero Magic:** The local cache remains a standard partitioned Parquet
+  dataset.
 
 ---
 
@@ -247,7 +260,7 @@ flowchart TD
     subgraph ExecutionLayer [Execution & Cache Engine]
         I{Partition in Local Cache?}
         J[JIT Partition Fetcher: Projection + Pruning]
-        K[Atomic Local Mirror: year=YYYY/data.parquet]
+        K[Atomic Daily Mirror: year=YYYY/month=MM/day=DD/part.parquet]
         L[DuckDB Compiler: Vectorized ASOF Engine]
         M[Stream to Arrow / Collect to Pandas]
     end
@@ -273,7 +286,11 @@ flowchart TD
 2. **Catalog v1 Specification:**
    Validates `catalog.json` at store initialization. Reads `timeseries` and `table` specifications, time columns, series keys, and feature definitions.
 3. **Partition-Mirrored Cache Manager:**
-   Determines the set of yearly/monthly partition paths required by `[start, end)`. Checks if local files exist and contain the required column subset. If missing or incomplete, streams the partition from the remote provider, projects only requested columns, and writes atomically to `cache_dir/<dataset>/<partition_path>`.
+   Resolves production UTC-day paths required by `[start, end)`. Point-in-time
+   plans add optional `history_lookback` days. Missing or incomplete remote
+   partitions are column-projected and atomically written to the corresponding
+   daily cache path. Legacy yearly and monthly catalog templates remain readable
+   for compatibility, but are not the publishing layout.
 4. **Typed `AsOfJoinPlan` in DuckPD Core:**
    Adds native relational ASOF join representation to DuckPD's logical plan IR.
    - Equi-join keys: `series_keys` (e.g., `ticker`).
@@ -299,9 +316,12 @@ To prevent data leakage during backtesting and training:
 - Features missing `availability_delay` or marked `lookahead_safe: false` fail fast during planning.
 
 ### 5.3 Sparse History & Predecessors
-If a technical indicator or economic signal updates infrequently (e.g., once a day or once a week), a model running at 10:00 on Monday must see Friday's signal.
-- Slicing queries strictly to `start - max_delay` is incorrect for sparse series.
-- DuckPD's partition resolver ensures that the partition containing the **latest eligible predecessor before `start`** is accessible, preventing artificial null gaps at the start of backtests.
+If a technical indicator or economic signal updates infrequently, the catalog
+publisher must choose a `history_lookback` long enough to include the latest
+eligible predecessor at any query boundary. DuckPD uses that duration only to
+bound partition discovery; it does not manufacture or forward-fill values.
+Omitting the declaration preserves complete-history resolution for sparse
+datasets whose predecessor horizon cannot be bounded safely.
 
 ---
 
@@ -314,9 +334,11 @@ DuckPD 0.1.4 ships the complete feature-store path described above:
 - point-in-time alignment through typed `AsOfJoinPlan` nodes and DuckDB native
   `ASOF LEFT JOIN`;
 - local, Hugging Face, and HTTP(S) sources;
-- yearly and monthly partition pruning;
-- cumulative column-projected remote caches with per-partition coordination,
-  unique staging files, and atomic replacement;
+- production daily partition pruning with optional bounded point-in-time
+  predecessor history;
+- read compatibility for legacy yearly and monthly catalog templates;
+- cumulative column-projected daily remote caches with per-partition
+  coordination, unique staging files, and atomic replacement;
 - lazy `store.table()`, `store.features()`, and `store.feature_batches()` APIs;
 - explicit cache pre-warming through `store.sync()`;
 - an end-to-end notebook and a cold-versus-warm FeatureStore benchmark.

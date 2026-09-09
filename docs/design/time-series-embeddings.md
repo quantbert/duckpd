@@ -1102,7 +1102,7 @@ A deterministic example is:
       "partitioning": {
         "column": "available_at",
         "timezone": "UTC",
-        "unit": "year"
+        "unit": "day"
       }
     },
     {
@@ -1113,7 +1113,7 @@ A deterministic example is:
       "partitioning": {
         "column": "available_at",
         "timezone": "UTC",
-        "unit": "year"
+        "unit": "day"
       }
     }
   ],
@@ -1136,11 +1136,12 @@ A deterministic example is:
 }
 ```
 
-This is the semantic catalog portion; deployment-specific source paths and
-partition layout continue to follow the feature-store source contract. The
-`lookahead_safe` claims are valid only if the publisher actually timestamps each
-complete representation at its availability and preserves the required data
-history. They are not made true by the JSON field.
+This is the semantic catalog portion; deployment-specific source prefixes
+remain catalog-defined. Published time-series datasets follow the feature-store
+UTC-day contract: `year=YYYY/month=MM/day=DD/part.parquet`. The
+`lookahead_safe` claims are valid only if the publisher actually timestamps
+each complete representation at its availability and preserves the required
+data history. They are not made true by the JSON field.
 
 A learned recipe sets `encoder` to a registry key in `series_embedding_models`.
 Canonical `SeriesRepresentationSpec.to_dict()` instead embeds the resolved model

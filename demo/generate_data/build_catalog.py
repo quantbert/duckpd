@@ -26,7 +26,9 @@ DATASETS: dict[str, dict[str, Any]] = {
         "kind": "timeseries",
         "description": "Synthetic minute OHLCV bars for Nasdaq Stockholm sessions.",
         "directory": "ohlcv",
-        "path_template": "ohlcv/year={year}/data.parquet",
+        "path_template": "ohlcv/year={year}/month={month:02d}/day={day:02d}/part.parquet",
+        "partition_unit": "day",
+        "history_lookback": "P7D",
         "time_column": "datetime",
         "series_keys": ["ticker"],
         "features": {
@@ -58,7 +60,9 @@ DATASETS: dict[str, dict[str, Any]] = {
         "kind": "timeseries",
         "description": "Simple moving averages calculated from minute close prices.",
         "directory": "sma",
-        "path_template": "sma/year={year}/data.parquet",
+        "path_template": "sma/year={year}/month={month:02d}/day={day:02d}/part.parquet",
+        "partition_unit": "day",
+        "history_lookback": "P7D",
         "time_column": "datetime",
         "series_keys": ["ticker"],
         "features": {
@@ -78,8 +82,9 @@ DATASETS: dict[str, dict[str, Any]] = {
         "kind": "timeseries",
         "description": "News text and embeddings assigned to synthetic market coordinates.",
         "directory": "news",
-        "path_template": "news/year={year}/month={month:02d}/data.parquet",
-        "partition_unit": "month",
+        "path_template": "news/year={year}/month={month:02d}/day={day:02d}/part.parquet",
+        "partition_unit": "day",
+        "history_lookback": "PT0S",
         "time_column": "datetime",
         "series_keys": ["ticker"],
         "optional": True,
@@ -274,7 +279,10 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
     for index, metadata in enumerate(dataset_metadata):
         dataset_name = metadata["dataset"]
         data_path = (
-            metadata["storage"]["path_template"].replace("{year}", "*").replace("{month:02d}", "*")
+            metadata["storage"]["path_template"]
+            .replace("{year}", "*")
+            .replace("{month:02d}", "*")
+            .replace("{day:02d}", "*")
         )
         config_lines.extend(
             [
@@ -297,11 +305,12 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
             for name, definition in definitions.items()
         ]
         if metadata["kind"] == "timeseries":
-            minimum = min(partition["min_time"] for partition in partitions)
-            maximum = max(partition["max_time"] for partition in partitions)
+            populated = [partition for partition in partitions if "min_time" in partition]
+            minimum = min(partition["min_time"] for partition in populated)
+            maximum = max(partition["max_time"] for partition in populated)
             coverage = (
                 f"Coverage: `{minimum}` through `{maximum}`. "
-                f"{row_count:,} rows across {len(partitions)} UTC-year partitions "
+                f"{row_count:,} rows across {len(partitions)} UTC-day partitions "
                 f"({human_size(byte_count)} compressed)."
             )
         else:
@@ -360,11 +369,11 @@ def render_store_readme(dataset_metadata: list[dict[str, Any]], source: str) -> 
         "trading or investment decisions.\n\n"
         "## Store Structure\n\n"
         "Datasets have independent schemas and may be time series or general tables. "
-        "Time-series data is partitioned by UTC year.\n\n"
+        "Time-series data uses one Parquet file per UTC day.\n\n"
         + "\n\n".join(sections)
         + "\n\n## Loading\n\n"
         "The project feature-store wrapper resolves features through `catalog.json`, "
-        "downloads only relevant yearly partitions, and joins datasets locally with "
+        "downloads only relevant daily partitions, and joins datasets locally with "
         "DuckDB:\n\n"
         "```python\n"
         "from os import getenv\n"
@@ -417,12 +426,7 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
     for dataset_name, definition in DATASETS.items():
         dataset_root = data_root / definition["directory"]
         if definition["kind"] == "timeseries":
-            partition_glob = (
-                "year=*/month=*/*.parquet"
-                if definition.get("partition_unit") == "month"
-                else "year=*/*.parquet"
-            )
-            paths = sorted(dataset_root.glob(partition_glob))
+            paths = sorted(dataset_root.glob("year=*/month=*/day=*/*.parquet"))
         else:
             paths = [data_root / definition["path_template"]]
             paths = [path for path in paths if path.is_file()]
@@ -462,16 +466,19 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
                 "format": "parquet",
                 "path_template": definition["path_template"],
                 "partition_columns": (
-                    ["year", "month"]
-                    if definition.get("partition_unit") == "month"
-                    else ["year"]
-                    if definition["kind"] == "timeseries"
-                    else []
+                    ["year", "month", "day"] if definition["kind"] == "timeseries" else []
                 ),
             },
             "partitions": partitions,
         }
-        for field in ("time_column", "series_keys", "primary_key", "features", "columns"):
+        for field in (
+            "time_column",
+            "series_keys",
+            "primary_key",
+            "features",
+            "columns",
+            "history_lookback",
+        ):
             if field in definition:
                 metadata[field] = definition[field]
         if "provenance" in definition:
@@ -485,17 +492,20 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
             "description": definition["description"],
             "metadata": metadata_path.relative_to(data_root).as_posix(),
         }
-        for field in ("time_column", "series_keys", "primary_key"):
+        for field in ("time_column", "series_keys", "primary_key", "history_lookback"):
             if field in definition:
                 entry[field] = definition[field]
         if definition["kind"] == "timeseries":
             entry["partitioning"] = {
                 "column": definition["time_column"],
-                "unit": definition.get("partition_unit", "year"),
+                "unit": definition.get("partition_unit", "day"),
                 "timezone": "UTC",
             }
-            entry["min_time"] = min(partition["min_time"] for partition in partitions)
-            entry["max_time"] = max(partition["max_time"] for partition in partitions)
+            populated = [partition for partition in partitions if "min_time" in partition]
+            if not populated:
+                raise ValueError(f"Timeseries dataset {dataset_name!r} has no populated partitions")
+            entry["min_time"] = min(partition["min_time"] for partition in populated)
+            entry["max_time"] = max(partition["max_time"] for partition in populated)
             for feature_name, feature_definition in definition["features"].items():
                 feature_reference = f"{dataset_name}:{feature_name}"
                 feature_index[feature_reference] = {

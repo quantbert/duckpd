@@ -883,10 +883,11 @@ transient-search path, while keeping model runtimes optional.
       normalized `float32[384]` output, CPU/GPU parity, bounded batches, and
       verified immutable model artifacts.
 - [x] Generate and validate the complete 388,491,746-row feature-store corpus,
-      including 3,951,636 GPU-embedded news rows in 180 monthly partitions.
-- [x] Publish the validated 212-Parquet-file private feature store, verify its
-      catalog and dataset card remotely, and exercise bounded exact-alignment
-      queries and streamed batches against the published source.
+      including 3,951,636 GPU-embedded news rows and schema-bearing empty days
+      across 5,475 daily partitions per time-series dataset.
+- [x] Publish the validated 16,427-Parquet-file private feature store, verify
+      its catalog and dataset card remotely, and exercise daily partition
+      pruning, bounded point-in-time history, and streamed batches.
 - [x] Update embedding scripts and notebooks for explicit GPU provider
       registration, named ROCm kernels, dependency preflight, and
       backend-specific persisted vector files.

@@ -362,6 +362,48 @@ def test_point_in_time_alignment(feature_store_fixture: Path) -> None:
     assert res["close_val"].iloc[2] == 101.5
 
 
+def test_point_in_time_alignment_honors_catalog_history_lookback(
+    feature_store_fixture: Path,
+) -> None:
+    from unittest.mock import patch
+
+    catalog_path = feature_store_fixture / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    for dataset in catalog["datasets"]:
+        if dataset["kind"] == "timeseries":
+            dataset["min_time"] = "2020-01-01T00:00:00Z"
+            dataset["history_lookback"] = "P7D"
+    catalog_path.write_text(json.dumps(catalog))
+
+    store = duckpd.FeatureStore(feature_store_fixture)
+    calls: list[tuple[str, datetime]] = []
+    original = store._timeseries_frame
+
+    def capture(
+        dataset: str,
+        start: datetime,
+        end: datetime,
+        needed_features: Sequence[str],
+    ) -> duckpd.DataFrame:
+        calls.append((dataset, start))
+        return original(dataset, start, end, needed_features)
+
+    query_start = datetime(2024, 1, 2, 8, tzinfo=UTC)
+    with patch.object(store, "_timeseries_frame", side_effect=capture):
+        store.features(
+            features={"close": "ohlcv:close", "sma": "sma:sma10"},
+            start=query_start.isoformat(),
+            end="2024-01-02T08:03:00Z",
+            alignment="point_in_time",
+            spine="ohlcv",
+        )
+
+    bounded_start = query_start - timedelta(days=7)
+    assert ("sma", bounded_start) in calls
+    assert calls.count(("ohlcv", bounded_start)) == 1
+    assert all(start >= bounded_start for _, start in calls)
+
+
 def test_feature_batches_iterator(feature_store_fixture: Path) -> None:
     store = duckpd.FeatureStore(
         source=feature_store_fixture,
@@ -496,6 +538,46 @@ def test_catalog_validation_and_errors() -> None:
                 "features": {"tbl:f1": {"dataset": "tbl", "name": "f1"}},
             }
         )
+
+
+def test_daily_partition_and_history_lookback_validation() -> None:
+    from duckpd._feature_catalog import parse_history_lookback, validate_catalog
+
+    assert parse_history_lookback("P7D", "prices") == timedelta(days=7)
+    valid = {
+        "catalog_version": 1,
+        "datasets": [
+            {
+                "name": "prices",
+                "kind": "timeseries",
+                "time_column": "datetime",
+                "series_keys": ["ticker"],
+                "partitioning": {
+                    "column": "datetime",
+                    "unit": "day",
+                    "timezone": "UTC",
+                },
+                "history_lookback": "P7D",
+            }
+        ],
+    }
+    datasets, _, _ = validate_catalog(valid)
+    assert datasets["prices"]["_history_lookback"] == timedelta(days=7)
+
+    for field, value, message in (
+        ("column", "event_time", "column must match"),
+        ("unit", "hour", "unit must be"),
+        ("timezone", "Europe/Stockholm", "timezone must be"),
+    ):
+        invalid = json.loads(json.dumps(valid))
+        invalid["datasets"][0]["partitioning"][field] = value
+        with pytest.raises(ValueError, match=message):
+            validate_catalog(invalid)
+
+    invalid_history = json.loads(json.dumps(valid))
+    invalid_history["datasets"][0]["history_lookback"] = "P1Y"
+    with pytest.raises(ValueError, match="Invalid history_lookback"):
+        validate_catalog(invalid_history)
 
 
 def test_feature_resolution_and_filters() -> None:
@@ -902,13 +984,16 @@ def test_session_feature_store_method(feature_store_fixture: Path) -> None:
         )
 
 
-def test_remote_feature_store_validation() -> None:
+def test_remote_feature_store_validation(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Invalid HTTP feature store URI"):
         FeatureStore(source="http:///data", cache="/tmp/cache")
 
     # Remote hf without cache directory
     with pytest.raises(ValueError, match="local cache directory is required"):
         FeatureStore(source="hf://datasets/test/store")
+
+    with pytest.raises(FileNotFoundError, match="Catalog not found:"):
+        FeatureStore(source=tmp_path, catalog_path=tmp_path / "missing.json")
 
 
 def test_ensure_cached_partition_and_table(feature_store_fixture: Path) -> None:
@@ -970,6 +1055,37 @@ def test_ensure_cached_partition_and_table(feature_store_fixture: Path) -> None:
             con,
         )
         assert cached_part_2 == cached_part
+
+
+def test_cached_embedding_partition_preserves_fixed_size_schema(tmp_path: Path) -> None:
+    import duckdb
+
+    from duckpd._feature_sources import ensure_cached_partition
+
+    source = tmp_path / "source"
+    relative_path = "news/year=2024/month=01/day=02/part.parquet"
+    partition = source / relative_path
+    partition.parent.mkdir(parents=True)
+    embedding_type = pa.list_(pa.float32(), 2)
+    schema = pa.schema([pa.field("embedding", embedding_type)])
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        pa.Table.from_arrays(
+            [pa.array([[1.0, 2.0]], type=embedding_type)],
+            schema=schema,
+        ),
+        partition,
+    )
+
+    cached = ensure_cached_partition(
+        str(source),
+        tmp_path / "cache",
+        relative_path,
+        ["embedding"],
+        duckdb.connect(),
+        embedding_columns={"embedding": 2},
+    )
+
+    assert pq.ParquetFile(cached).schema_arrow.equals(schema)
 
 
 def test_remote_feature_store_mock_flow(feature_store_fixture: Path) -> None:
@@ -1078,7 +1194,7 @@ def test_spine_dataset_errors(feature_store_fixture: Path) -> None:
         )
 
 
-def test_remote_missing_catalog_raises() -> None:
+def test_remote_missing_catalog_raises(feature_store_fixture: Path) -> None:
     """Test remote feature store where remote catalog does not exist."""
     with tempfile.TemporaryDirectory() as cache_tmp:
         cache_path = Path(cache_tmp)
@@ -1101,6 +1217,34 @@ def test_remote_missing_catalog_raises() -> None:
                 cache=cache_path,
             )
 
+        cached = cache_path / "catalog.json"
+        cached.write_text(
+            (feature_store_fixture / "catalog.json").read_text(),
+            encoding="utf-8",
+        )
+        with patch("huggingface_hub.HfFileSystem", return_value=EmptyHfFileSystem()):
+            store = FeatureStore(
+                source="hf://datasets/unavailable/fdb",
+                cache=cache_path,
+            )
+        assert store.catalog()["name"] == "test/store"
+
+        # Failed cache replacement removes its temporary file.
+
+        class CatalogHfFileSystem:
+            def open(self, path: str, mode: str = "r"):
+                return (feature_store_fixture / "catalog.json").open(mode)
+
+        with (
+            patch("huggingface_hub.HfFileSystem", return_value=CatalogHfFileSystem()),
+            patch("duckpd.featurestore.os.replace", side_effect=OSError("cache write failed")),
+            pytest.raises(OSError, match="cache write failed"),
+        ):
+            FeatureStore(
+                source="hf://datasets/test/fdb",
+                cache=cache_path,
+            )
+        assert not list(cache_path.glob(".catalog.json.*.tmp"))
         # Test ImportError when huggingface_hub is missing
         with (
             patch.dict("sys.modules", {"huggingface_hub": None}),
@@ -1234,6 +1378,7 @@ def test_remote_feature_planning_defers_partition_fetch(
         needed_columns: list[str],
         con: Any,
         filters_sql: str | None = None,
+        embedding_columns: dict[str, int] | None = None,
     ) -> Path:
         calls.append(source_uri)
         return ensure_cached_partition(
@@ -1243,6 +1388,7 @@ def test_remote_feature_planning_defers_partition_fetch(
             needed_columns,
             con,
             filters_sql,
+            embedding_columns,
         )
 
     with (
@@ -1467,6 +1613,7 @@ def test_remote_timeseries_uses_metadata_path_template(tmp_path: Path) -> None:
         needed_columns: list[str],
         con: Any,
         filters_sql: str | None = None,
+        embedding_columns: dict[str, int] | None = None,
     ) -> Path:
         requested_paths.append(relative_path)
         return ensure_cached_partition(
@@ -1476,6 +1623,7 @@ def test_remote_timeseries_uses_metadata_path_template(tmp_path: Path) -> None:
             needed_columns,
             con,
             filters_sql,
+            embedding_columns,
         )
 
     with (
@@ -1547,6 +1695,43 @@ def test_monthly_partition_paths_obey_half_open_interval(tmp_path: Path) -> None
     ] == expected
 
 
+def test_daily_partition_paths_obey_half_open_interval(tmp_path: Path) -> None:
+    from duckpd._feature_sources import get_dataset_path_template, partition_paths_for_interval
+
+    entry = {
+        "name": "prices",
+        "kind": "timeseries",
+        "partitioning": {"unit": "day"},
+        "time_column": "datetime",
+        "series_keys": ["ticker"],
+    }
+    path_template = get_dataset_path_template(tmp_path, entry)
+    assert path_template == ("prices/year={year}/month={month:02d}/day={day:02d}/part.parquet")
+    assert partition_paths_for_interval(
+        entry,
+        path_template,
+        datetime(2024, 12, 31, 23, 59, tzinfo=UTC),
+        datetime(2025, 1, 2, tzinfo=UTC),
+    ) == [
+        "prices/year=2024/month=12/day=31/part.parquet",
+        "prices/year=2025/month=01/day=01/part.parquet",
+    ]
+    bounded_entry = {
+        **entry,
+        "min_time": "2025-01-01T00:00:00Z",
+        "max_time": "2025-01-02T00:00:00Z",
+    }
+    assert (
+        partition_paths_for_interval(
+            bounded_entry,
+            path_template,
+            datetime(2024, 12, 1, tzinfo=UTC),
+            datetime(2024, 12, 2, tzinfo=UTC),
+        )
+        == []
+    )
+
+
 def test_http_monthly_store_fetches_only_intersecting_partitions(tmp_path: Path) -> None:
     from unittest.mock import patch
 
@@ -1598,6 +1783,7 @@ def test_http_monthly_store_fetches_only_intersecting_partitions(tmp_path: Path)
         needed_columns: list[str],
         con: Any,
         filters_sql: str | None = None,
+        embedding_columns: dict[str, int] | None = None,
     ) -> Path:
         calls.append((source_uri, relative_path))
         return ensure_cached_partition(
@@ -1607,6 +1793,7 @@ def test_http_monthly_store_fetches_only_intersecting_partitions(tmp_path: Path)
             needed_columns,
             con,
             filters_sql,
+            embedding_columns,
         )
 
     with patch(

@@ -20,7 +20,7 @@ NEWS_SOURCE_SHA256 := f8586e5a3515937da130b708006197652fd1560c2058d0dcd0134af5eb
 OVERWRITE_FLAG := $(if $(filter true 1 yes,$(OVERWRITE)),--overwrite,)
 DRY_RUN_FLAG := $(if $(filter true 1 yes,$(DRY_RUN)),--dry-run,)
 
-.PHONY: help data generate download-news generate-news upload demo clean
+.PHONY: help data generate download-news generate-news migrate-daily upload demo clean
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -59,6 +59,9 @@ generate-news: download-news ## Generate the embedded news stress dataset
 		--embedding-backend "$(EMBEDDING_BACKEND)" \
 		--embedding-device "$(EMBEDDING_DEVICE)" \
 		--transformer-batch-size "$(TRANSFORMER_BATCH_SIZE)" $(OVERWRITE_FLAG)
+
+migrate-daily: ## Rewrite legacy yearly/monthly files into verified UTC-day partitions
+	uv run --group generation python migrate_daily.py --data "$(DATA_DIRECTORY)"
 
 upload: ## Upload the generated feature store to Hugging Face
 	env -u HF_TOKEN -u HF_DESTINATION uv run --extra featurestore --env-file .env python hfupload.py \

@@ -152,8 +152,9 @@ typed lazy plan.
   feature's declared `availability_delay`, preventing observations from
   becoming visible before they would have been known.
 * **Transparent remote caching:** Local, Hugging Face (`hf://`), and HTTP(S)
-  stores use the same API. Remote yearly or monthly partitions are fetched
-  just in time and mirrored into a local cache.
+  stores use the same API. Production stores use one atomic Parquet file per UTC
+  day under `year=YYYY/month=MM/day=DD/part.parquet`; DuckPD fetches only
+  intersecting days plus any declared point-in-time history lookback.
 * **Projection-aware storage:** The cache retains the cumulative union of
   requested columns instead of repeatedly downloading full feature families.
 * **Safe concurrent workers:** Per-partition coordination, unique staging
