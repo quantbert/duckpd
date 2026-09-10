@@ -21,6 +21,7 @@ from duckpd._logical import (
     IndexUniqueness,
     LiteralValue,
     NamedExpression,
+    Nullability,
     NullPlacement,
     OrderSpec,
     ProjectPlan,
@@ -42,6 +43,7 @@ from duckpd._metadata import (
 from duckpd._reductions import expression_type, is_numeric_type
 from duckpd._temporal import fixed_duration_ns
 from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
+from duckpd.series_embeddings import SeriesWindowSpec
 
 if TYPE_CHECKING:
     from duckpd._logical import LogicalPlan
@@ -362,6 +364,138 @@ class Rolling(WindowBase):
             ),
         )
 
+    def _array_expression(self, series: Series) -> tuple[Expression, SeriesWindowSpec]:
+        if type(self._window) is not int:
+            raise UnsupportedOperationError("to_array() supports only fixed-count rolling windows")
+        if self._min_periods != self._window:
+            raise UnsupportedOperationError(
+                "to_array() requires complete windows; use min_periods=window"
+            )
+        input_type = expression_type(series._plan, series._expression)
+        if not is_numeric_type(input_type) or input_type == "BOOLEAN":
+            raise UnsupportedOperationError(
+                "to_array() supports only numeric data; "
+                f"column {series.name!r} has DuckDB type {input_type}"
+            )
+        order_keys = self._require_order()
+        value = CastExpression(series._expression, "FLOAT")
+        finite_value = CaseWhen(
+            FunctionCall("isfinite", (value,)),
+            value,
+            FunctionCall(
+                "error",
+                (LiteralValue("DuckPD rolling arrays require finite FLOAT values"),),
+                return_type="FLOAT",
+            ),
+        )
+        checked = CaseWhen(
+            FunctionCall("isnull", (series._expression,)),
+            LiteralValue(None),
+            finite_value,
+        )
+        values = WindowExpression(
+            function="list",
+            arguments=(checked,),
+            partition_by=self._partition_by,
+            order_by=order_keys,
+            frame=self._frame,
+        )
+        present = WindowExpression(
+            function="count",
+            arguments=(series._expression,),
+            partition_by=self._partition_by,
+            order_by=order_keys,
+            frame=self._frame,
+        )
+        complete_values = CaseWhen(
+            BinaryExpression(
+                present,
+                BinaryOperator.EQUAL,
+                LiteralValue(self._window),
+            ),
+            values,
+            LiteralValue(None),
+        )
+        expression = FunctionCall(
+            "__duckpd_try_cast_array",
+            (complete_values, LiteralValue(self._window)),
+            return_type=f"FLOAT[{self._window}]",
+        )
+        specification = SeriesWindowSpec(
+            self._window,
+            order_by=order_keys,
+            partition_by=self._partition_by,
+        )
+        return expression, specification
+
+    def to_array(self) -> DataFrame | Series:
+        """Collect each complete fixed-count window into a nullable FLOAT[n] value."""
+        from duckpd.frame import DataFrame
+        from duckpd.series import Series
+
+        if isinstance(self._parent, Series):
+            expression, specification = self._array_expression(self._parent)
+            output = Column(
+                ColumnId.create(),
+                self._parent.name or "0",
+                expression_type(self._parent._plan, expression),
+                nullable=Nullability.NULLABLE,
+                series_window=specification,
+            )
+            protected = tuple(
+                column for column in self._parent._plan.metadata.columns if column.hidden
+            )
+            projections = (
+                NamedExpression(output, expression),
+                *(NamedExpression(column, ColumnRef(column.id)) for column in protected),
+            )
+            metadata = after_projection(
+                self._parent._plan.metadata,
+                tuple(projection.column for projection in projections),
+            )
+            plan = ProjectPlan(self._parent._plan, projections, metadata)
+            return Series(
+                self._parent._session,
+                plan,
+                ColumnRef(output.id),
+                self._parent.name,
+                alignment_source=self._parent._plan,
+                alignment_expression=expression,
+            )
+
+        outputs: list[NamedExpression] = []
+        for column in self._parent._plan.metadata.visible_columns:
+            series = Series(
+                self._parent._session,
+                self._parent._plan,
+                ColumnRef(column.id),
+                column.label,
+            )
+            expression, specification = self._array_expression(series)
+            output = Column(
+                ColumnId.create(),
+                column.label,
+                expression_type(self._parent._plan, expression),
+                nullable=Nullability.NULLABLE,
+                series_window=specification,
+            )
+            outputs.append(NamedExpression(output, expression))
+        if not outputs:
+            raise UnsupportedOperationError("No numeric columns are available for to_array()")
+        outputs.extend(
+            NamedExpression(column, ColumnRef(column.id))
+            for column in self._parent._plan.metadata.columns
+            if column.hidden
+        )
+        metadata = after_projection(
+            self._parent._plan.metadata,
+            tuple(projection.column for projection in outputs),
+        )
+        return DataFrame(
+            self._parent._session,
+            ProjectPlan(self._parent._plan, tuple(outputs), metadata),
+        )
+
     def count(self, numeric_only: bool = False) -> DataFrame | Series:
         from duckpd.series import Series
 
@@ -467,9 +601,13 @@ class GroupedRolling(Rolling):
     def var(self, ddof: int = 1, numeric_only: bool = False) -> DataFrame | Series:
         return self._calculate("var", numeric_only=numeric_only, ddof=ddof)
 
+    def to_array(self) -> DataFrame | Series:
+        """Collect complete fixed-count windows independently within each group."""
+        return self._calculate("to_array", numeric_only=False)
+
     def _calculate(
         self,
-        func: Literal["count", "sum", "mean", "min", "max", "std", "var"],
+        func: Literal["count", "sum", "mean", "min", "max", "std", "var", "to_array"],
         *,
         numeric_only: bool,
         ddof: int = 1,
@@ -480,17 +618,29 @@ class GroupedRolling(Rolling):
         source_plan = self._parent._plan
         order_keys = self._require_order()
         key_ids = {column.id for column in self._key_columns}
-        calculations: list[tuple[str, Expression, str]] = []
+        calculations: list[tuple[str, Expression, str, SeriesWindowSpec | None]] = []
 
         if isinstance(self._parent, Series):
-            result = self._apply_series_agg(self._parent, func, ddof=ddof)
-            calculations.append(
-                (
-                    self._parent.name or "0",
-                    result._expression,
-                    expression_type(source_plan, result._expression),
+            if func == "to_array":
+                expression, specification = self._array_expression(self._parent)
+                calculations.append(
+                    (
+                        self._parent.name or "0",
+                        expression,
+                        expression_type(source_plan, expression),
+                        specification,
+                    )
                 )
-            )
+            else:
+                result = self._apply_series_agg(self._parent, func, ddof=ddof)
+                calculations.append(
+                    (
+                        self._parent.name or "0",
+                        result._expression,
+                        expression_type(source_plan, result._expression),
+                        None,
+                    )
+                )
         else:
             for column in source_plan.metadata.visible_columns:
                 if column.id in key_ids:
@@ -501,6 +651,7 @@ class GroupedRolling(Rolling):
                             column.label,
                             ColumnRef(column.id),
                             column.duckdb_type,
+                            None,
                         )
                     )
                     continue
@@ -512,14 +663,26 @@ class GroupedRolling(Rolling):
                     ColumnRef(column.id),
                     column.label,
                 )
-                result = self._apply_series_agg(series, func, ddof=ddof)
-                calculations.append(
-                    (
-                        column.label,
-                        result._expression,
-                        expression_type(source_plan, result._expression),
+                if func == "to_array":
+                    expression, specification = self._array_expression(series)
+                    calculations.append(
+                        (
+                            column.label,
+                            expression,
+                            expression_type(source_plan, expression),
+                            specification,
+                        )
                     )
-                )
+                else:
+                    result = self._apply_series_agg(series, func, ddof=ddof)
+                    calculations.append(
+                        (
+                            column.label,
+                            result._expression,
+                            expression_type(source_plan, result._expression),
+                            None,
+                        )
+                    )
 
         if not calculations:
             raise UnsupportedOperationError(f"No valid columns for grouped rolling {func}")
@@ -622,8 +785,14 @@ class GroupedRolling(Rolling):
 
         data_outputs: list[Column] = []
         alignment_expressions: list[Expression] = []
-        for label, expression, duckdb_type in calculations:
-            output = Column(ColumnId.create(), label, duckdb_type)
+        for label, expression, duckdb_type, series_window in calculations:
+            output = Column(
+                ColumnId.create(),
+                label,
+                duckdb_type,
+                nullable=(Nullability.NULLABLE if func == "to_array" else Nullability.UNKNOWN),
+                series_window=series_window,
+            )
             data_outputs.append(output)
             projections.append(NamedExpression(output, expression))
             alignment_expressions.append(

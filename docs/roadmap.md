@@ -972,19 +972,19 @@ Exit gate:
 Goal: ship useful, model-free time-series similarity on the existing exact
 vector engine before evaluating learned encoders.
 
-- [ ] Add immutable series window/representation specifications, canonical
+- [x] Add immutable series window/representation specifications, canonical
       fingerprints, typed queries, and additive column metadata without
       changing text embedding fingerprints.
-- [ ] Define propagation and invalidation through projection, rename,
+- [x] Define propagation and invalidation through projection, rename,
       assignment, joins, ASOF payloads, concatenation, and persistence.
-- [ ] Add fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` with
+- [x] Add fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` with
       explicit ordering, complete-window, finite-float32, and group-boundary
       contracts.
-- [ ] Add native `DataFrame.embed_series()` for declared centering,
+- [x] Add native `DataFrame.embed_series()` for declared centering,
       normalization, channel ordering, flattening, and zero-scale policy.
 - [ ] Add exact `search_series()` and typed-query support in vector distance and
       search, rejecting equal-dimension but incompatible representation spaces.
-- [ ] Persist and restore series metadata for local Parquet and session-owned
+- [x] Persist and restore series metadata for local Parquet and session-owned
       tables; keep planning free of full-file integrity scans.
 - [ ] Differential-test ordered windows and exact retrieval against independent
       array and brute-force distance oracles; prove direct sinks avoid pandas

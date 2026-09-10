@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace as dataclass_replace
 from datetime import timedelta
 from decimal import Decimal
@@ -53,6 +53,7 @@ from duckpd._metadata import (
     find_column,
     projection_columns,
     protected_column_ids,
+    series_metadata_for_expression,
 )
 from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._metadata import set_index as set_index_metadata
@@ -90,6 +91,10 @@ if TYPE_CHECKING:
     from duckpd.groupby import DataFrameGroupBy
     from duckpd.indexing import ILocIndexer, LocIndexer
     from duckpd.series import Series
+    from duckpd.series_embeddings import (
+        SeriesNullPolicy,
+        SeriesRepresentationSpec,
+    )
     from duckpd.session import Session
     from duckpd.vector import VectorFrameMethods
     from duckpd.window import Expanding, Rolling
@@ -183,6 +188,27 @@ class DataFrame:
             model=model,
             batch_size=batch_size,
             separator=separator,
+            null_policy=null_policy,
+        )
+
+    def embed_series(
+        self,
+        *,
+        columns: Mapping[str, str],
+        into: str,
+        representation: SeriesRepresentationSpec,
+        batch_size: int = 256,
+        null_policy: SeriesNullPolicy = "propagate",
+    ) -> DataFrame:
+        """Append a deterministic native time-series representation lazily."""
+        from duckpd.series_embeddings import embed_series
+
+        return embed_series(
+            self,
+            columns=columns,
+            into=into,
+            representation=representation,
+            batch_size=batch_size,
             null_policy=null_policy,
         )
 
@@ -1324,6 +1350,19 @@ class DataFrame:
                 existing = None
             if existing is not None and existing.id in protected_column_ids(frame._plan.metadata):
                 raise ValueError("Cannot replace an index or ordering column; reset metadata first")
+            series, series_window = series_metadata_for_expression(
+                frame._plan.metadata,
+                expression,
+            )
+            from duckpd.series import Series
+
+            if isinstance(resolved, Series):
+                resolved_series, resolved_window = series_metadata_for_expression(
+                    resolved._plan.metadata,
+                    resolved._expression,
+                )
+                series = resolved_series or series
+                series_window = resolved_window or series_window
             output = Column(
                 ColumnId.create(),
                 label,
@@ -1332,6 +1371,8 @@ class DataFrame:
                 categorical=expression_categorical(frame._plan, expression),
                 timezone=expression_timezone(frame._plan, expression),
                 alias_of=(expression.column_id if isinstance(expression, ColumnRef) else None),
+                series=series,
+                series_window=series_window,
             )
             if existing is not None:
                 # Replace column in-place to preserve original column order

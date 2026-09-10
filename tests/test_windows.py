@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 import duckpd as dp
-from duckpd.errors import UnorderedOperationError, UnsupportedOperationError
+from duckpd.errors import MaterializationError, UnorderedOperationError, UnsupportedOperationError
 
 
 def test_series_cumsum_skipna_differential() -> None:
@@ -699,3 +699,108 @@ def test_order_independent_duplicate_removal_accepts_unordered_input(
         result.reset_index(drop=True),
         source.drop_duplicates(keep=False).reset_index(drop=True),
     )
+
+
+def test_fixed_count_rolling_to_array_is_lazy_typed_and_complete() -> None:
+    session = dp.connect()
+    frame = session.from_pandas(
+        pd.DataFrame({"row": [0, 1, 2, 3], "value": [1.0, 2.0, 3.0, 4.0]}),
+        index="row",
+        order_by="row",
+    )
+
+    result = cast("dp.Series", frame["value"].rolling(3).to_array())
+    frame_result = cast("dp.DataFrame", frame[["value"]].rolling(3).to_array())
+
+    assert session.execution_count == 0
+    output = result.to_frame()._column("value")
+    assert output.duckdb_type == "FLOAT[3]"
+    assert output.series_window is not None
+    assert output.series_window.window == 3
+    assert frame_result._column("value").duckdb_type == "FLOAT[3]"
+    collected = result.collect()
+    assert collected.iloc[:2].isna().all()
+    np.testing.assert_array_equal(collected.iloc[2], np.array([1, 2, 3], dtype=np.float32))
+    np.testing.assert_array_equal(collected.iloc[3], np.array([2, 3, 4], dtype=np.float32))
+    assert session.execution_count == 1
+
+
+def test_grouped_rolling_to_array_never_crosses_group_boundaries() -> None:
+    source = pd.DataFrame(
+        {
+            "row": [0, 1, 2, 3, 4],
+            "group": ["B", "A", "B", "A", "B"],
+            "sequence": [1, 1, 2, 2, 3],
+            "value": [10.0, 1.0, 20.0, 2.0, 30.0],
+        }
+    )
+    frame = dp.from_pandas(source, index="row", order_by=["sequence", "group"])
+
+    result = cast(
+        "dp.Series",
+        frame.groupby("group")["value"].rolling(2).to_array(),
+    ).collect()
+
+    assert result.index.tolist() == [("A", 1), ("A", 3), ("B", 0), ("B", 2), ("B", 4)]
+    assert pd.isna(result.iloc[0])
+    np.testing.assert_array_equal(result.iloc[1], np.array([1, 2], dtype=np.float32))
+    assert pd.isna(result.iloc[2])
+    np.testing.assert_array_equal(result.iloc[3], np.array([10, 20], dtype=np.float32))
+    np.testing.assert_array_equal(result.iloc[4], np.array([20, 30], dtype=np.float32))
+
+
+def test_rolling_to_array_rejects_invalid_contracts_before_execution() -> None:
+    session = dp.connect()
+    frame = session.from_pandas(
+        pd.DataFrame(
+            {
+                "row": [0, 1],
+                "value": [1.0, 2.0],
+                "label": ["a", "b"],
+            }
+        ),
+        order_by="row",
+    )
+
+    with pytest.raises(UnsupportedOperationError, match="complete windows"):
+        frame["value"].rolling(2, min_periods=1).to_array()
+    with pytest.raises(UnsupportedOperationError, match="fixed-count"):
+        session.from_pandas(
+            pd.DataFrame(
+                {
+                    "ts": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+                    "value": [1.0, 2.0],
+                }
+            ),
+            order_by="ts",
+        ).rolling("1D", on="ts").to_array()
+    with pytest.raises(UnsupportedOperationError, match="numeric data"):
+        frame["label"].rolling(2).to_array()
+    with pytest.raises(UnsupportedOperationError, match="numeric data"):
+        frame["row"].astype("boolean").rolling(2).to_array()
+    with pytest.raises(UnorderedOperationError):
+        session.sql("SELECT 1.0 AS value")["value"].rolling(2).to_array()
+    assert session.execution_count == 0
+
+
+@pytest.mark.parametrize("invalid", ["NaN", "Infinity", "-Infinity"])
+def test_rolling_to_array_rejects_non_finite_window_values(invalid: str) -> None:
+    frame = dp.connect().sql(
+        f"SELECT * FROM (VALUES (1, 1.0::DOUBLE), (2, '{invalid}'::DOUBLE)) AS t(row, value)",
+        order_by="row",
+    )
+
+    with pytest.raises(MaterializationError):
+        cast("dp.Series", frame["value"].rolling(2).to_array()).collect()
+
+
+def test_rolling_to_array_turns_null_containing_windows_into_null() -> None:
+    frame = dp.connect().sql(
+        "SELECT * FROM (VALUES (1, 1.0), (2, NULL), (3, 3.0), (4, 4.0), (5, 5.0)) AS t(row, value)",
+        order_by="row",
+    )
+
+    result = cast("dp.Series", frame["value"].rolling(3).to_array()).collect()
+
+    assert result.iloc[:4].isna().all()
+    np.testing.assert_array_equal(result.iloc[4], np.array([3, 4, 5], dtype=np.float32))

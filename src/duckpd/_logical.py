@@ -10,6 +10,12 @@ from uuid import UUID, uuid4
 
 from duckpd._typing import ScalarValue
 from duckpd.embeddings import EmbeddingColumnSpec, EmbeddingModelSpec, NullTextPolicy
+from duckpd.series_embeddings import (
+    SeriesColumnSpec,
+    SeriesNullPolicy,
+    SeriesRepresentationSpec,
+    SeriesWindowSpec,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,8 @@ class Column:
     categorical: CategoricalSpec | None = None
     timezone: str | None = None
     embedding: EmbeddingColumnSpec | None = None
+    series: SeriesColumnSpec | None = None
+    series_window: SeriesWindowSpec | None = None
 
 
 def sanitize_source_location(location: str) -> str:
@@ -741,6 +749,19 @@ class EmbeddingPlan(LogicalPlanBase):
 
 
 @dataclass(frozen=True)
+class SeriesRepresentationPlan(LogicalPlanBase):
+    """Row-preserving native time-series representation projection."""
+
+    input: LogicalPlan
+    channels: tuple[tuple[str, ColumnId], ...]
+    output_column: Column
+    representation: SeriesRepresentationSpec
+    batch_size: int
+    null_policy: SeriesNullPolicy
+    metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
 class SemanticSearchPlan(LogicalPlanBase):
     """Exact text-query retrieval over persisted or transient embeddings."""
 
@@ -866,6 +887,7 @@ LogicalPlan: TypeAlias = (
     ScanPlan
     | FilterPlan
     | EmbeddingPlan
+    | SeriesRepresentationPlan
     | ProjectPlan
     | SortPlan
     | TopKPlan

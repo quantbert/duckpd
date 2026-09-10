@@ -28,6 +28,8 @@ from news_config import NEWS_MODEL, NEWS_TRANSFORMERS_MODEL
 
 import duckpd as pd
 
+# pyright: reportUnknownMemberType=false
+
 
 class UploadConfigurationTests(unittest.TestCase):
     def test_parses_supported_destinations(self) -> None:

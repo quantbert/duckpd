@@ -34,6 +34,8 @@ from news_config import (
 
 import duckpd as pd
 
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
+
 MARKET_TIMEZONE = ZoneInfo("Europe/Stockholm")
 MARKET_OPEN = time(9, 0)
 MARKET_CLOSE = time(17, 30)
@@ -623,18 +625,12 @@ def generate_sma_dataset(ohlcv_root: Path, output: Path, overwrite: bool) -> Non
             history = close_history.get(ticker, np.array([], dtype=np.float64))
             if write_output:
                 averages = simple_moving_averages(ticker_close, history)
-                output_tables.append(
-                    pa.table(
-                        {
-                            "datetime": table["datetime"].filter(pa.array(ticker_mask)),
-                            "ticker": pa.array([ticker] * len(ticker_close), type=pa.string()),
-                            **{
-                                f"sma{window}": pa.array(averages[window]) for window in SMA_WINDOWS
-                            },
-                        },
-                        schema=SMA_SCHEMA,
-                    )
-                )
+                arrays: list[pa.Array[Any] | pa.ChunkedArray[Any]] = [
+                    table["datetime"].filter(pa.array(ticker_mask)),
+                    pa.array([ticker] * len(ticker_close), type=pa.string()),
+                    *(pa.array(averages[window]) for window in SMA_WINDOWS),
+                ]
+                output_tables.append(pa.Table.from_arrays(arrays, schema=SMA_SCHEMA))
             close_history[ticker] = np.concatenate((history, ticker_close))[-199:]
 
         if not write_output:

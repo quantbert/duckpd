@@ -82,7 +82,7 @@ The following are source observations, not proposed additions.
 | Area | Current behavior | Consequence for this design |
 | --- | --- | --- |
 | Architecture | Immutable logical plans and metadata; compilation and execution are separate. No silent pandas fallback. | Add typed nodes and expressions, not SQL stored on public objects. |
-| Windows | Integer and fixed-duration rolling aggregates exist; `to_array()` does not. | Add fixed-count array output without changing scalar rolling semantics. |
+| Windows | Integer and fixed-duration rolling aggregates exist; fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` emit typed, nullable `FLOAT[n]` windows. | Reuse the series-window metadata and grouped alignment path when implementing representations. |
 | Text embeddings | `EmbeddingModelSpec`, providers, explicit preparation, Arrow inference, `embed_text()`, and fingerprint-checked `search_text()` exist. | Reuse the lifecycle pattern, not text-specific preprocessing or fingerprints. |
 | Numeric vectors | Exact cosine, L2, and negative-inner-product ranking exist. Numeric queries are currently plain sequences. | Reuse distance/top-k lowering and add typed-query acceptance explicitly. |
 | Approximate search | Requires a compatible session-owned HNSW index and a plain local table scan. Upstream filters and tie-breakers are rejected. | Do not promise filtered event ANN retrieval or a new automatic search mode. |
@@ -216,9 +216,7 @@ prices = session.read_parquet(
 )
 windows = prices.assign(
     return_window=lambda df: (
-        df.groupby("ticker")["return_1m"]
-        .rolling(60, min_periods=60)
-        .to_array()
+        df.groupby("ticker")["return_1m"].rolling(60, min_periods=60).to_array()
     ),
 )
 ```
@@ -775,17 +773,13 @@ eligible = event_bank[
     & (event_bank["event_observation_id"] != query_event_id)
 ]
 scored = eligible.assign(
-    text_distance=lambda df: df["news_embedding"].vector.distance(
-        q_text, metric="cosine"
-    ),
+    text_distance=lambda df: df["news_embedding"].vector.distance(q_text, metric="cosine"),
     reaction_distance=lambda df: df["reaction_embedding"].vector.distance(
         q_reaction, metric="cosine"
     ),
 )
 scored = scored.assign(
-    combined_distance=lambda df: (
-        0.4 * df["text_distance"] + 0.6 * df["reaction_distance"]
-    ),
+    combined_distance=lambda df: 0.4 * df["text_distance"] + 0.6 * df["reaction_distance"],
 )
 matches = scored.sort_values("event_observation_id").nsmallest(
     50, ["combined_distance", "event_observation_id"]

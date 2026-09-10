@@ -42,6 +42,7 @@ from duckpd._logical import (
     SamplePlan,
     ScanPlan,
     SemanticSearchPlan,
+    SeriesRepresentationPlan,
     SortDirection,
     SortKey,
     SortPlan,
@@ -191,6 +192,8 @@ class DuckDBCompiler:
             return self._compile_vector_search(plan)
         if isinstance(plan, EmbeddingPlan):
             return self._compile_embedding(plan)
+        if isinstance(plan, SeriesRepresentationPlan):
+            return self._compile_series_representation(plan)
         if isinstance(plan, SemanticSearchPlan):
             return self._compile_semantic_search(plan)
 
@@ -349,6 +352,17 @@ class DuckDBCompiler:
             if not isinstance(timezone, LiteralValue) or not isinstance(timezone.value, str):
                 raise AssertionError("Timezone delocalization requires a timezone literal")
             return f"timezone({quote_literal(timezone.value)}, {value})"
+        if name == "__duckpd_try_cast_array":
+            if (
+                len(expression.arguments) != 2
+                or not isinstance(expression.arguments[1], LiteralValue)
+                or type(expression.arguments[1].value) is not int
+                or expression.arguments[1].value <= 0
+                or expression.return_type != f"FLOAT[{expression.arguments[1].value}]"
+            ):
+                raise AssertionError("Fixed array casts require a positive declared dimension")
+            value = self._expression_to_sql(expression.arguments[0], bindings)
+            return f"TRY_CAST(({value}) AS {expression.return_type})"
         if name != "__duckpd_temporal_round":
             return None
 
@@ -465,6 +479,89 @@ class DuckDBCompiler:
         relation = compiled.relation.project(*projections)
         return CompiledFrame(
             relation,
+            {
+                **compiled.bindings,
+                plan.output_column.id: plan.output_column.label,
+            },
+        )
+
+    def _compile_series_representation(
+        self,
+        plan: SeriesRepresentationPlan,
+    ) -> CompiledFrame:
+        """Lower one native representation to deterministic DuckDB list expressions."""
+        compiled = self._compile(plan.input)
+        dimension = plan.representation.dimension
+        normalized: list[str] = []
+        null_checks: list[str] = []
+        invalid_checks: list[str] = []
+        zero_checks: list[str] = []
+
+        for _, column_id in plan.channels:
+            source = quote_identifier(compiled.bindings[column_id])
+            null_checks.append(f"({source}) IS NULL")
+            invalid_checks.append(
+                "list_contains("
+                f"list_transform({source}, value -> "
+                "value IS NULL OR NOT isfinite(CAST(value AS FLOAT))), TRUE)"
+            )
+            doubles = f"list_transform({source}, value -> CAST(value AS DOUBLE))"
+            if plan.representation.normalization == "none":
+                channel = doubles
+            elif plan.representation.normalization == "center":
+                mean = f"list_avg({doubles})"
+                channel = f"list_transform({doubles}, value -> value - ({mean}))"
+            else:
+                mean = f"list_avg({doubles})"
+                scale = f"list_stddev_pop({doubles})"
+                zero_checks.append(f"({scale}) = 0")
+                channel = f"list_transform({doubles}, value -> (value - ({mean})) / ({scale}))"
+            normalized.append(channel)
+
+        flattened = normalized[0]
+        for channel in normalized[1:]:
+            flattened = f"list_concat({flattened}, {channel})"
+
+        if plan.representation.unit_norm:
+            fixed = f"CAST(({flattened}) AS DOUBLE[{dimension}])"
+            norm = f"sqrt(array_inner_product({fixed}, {fixed}))"
+            zero_checks.append(f"({norm}) = 0")
+            flattened = f"list_transform({flattened}, value -> value / ({norm}))"
+
+        float_values = f"list_transform({flattened}, value -> CAST(value AS FLOAT))"
+        invalid_output = (
+            "list_contains("
+            f"list_transform({float_values}, value -> "
+            "value IS NULL OR NOT isfinite(value)), TRUE)"
+        )
+        error = quote_literal(
+            "DuckPD native series representations require complete finite vectors"
+        )
+        clauses: list[str] = []
+        any_null = " OR ".join(null_checks)
+        if plan.null_policy == "propagate":
+            clauses.append(f"WHEN {any_null} THEN NULL")
+        else:
+            clauses.append(f"WHEN {any_null} THEN error({error})")
+        clauses.append(f"WHEN {' OR '.join(invalid_checks)} THEN error({error})")
+        if zero_checks:
+            zero_result = "NULL" if plan.representation.zero_scale == "null" else f"error({error})"
+            clauses.append(f"WHEN {' OR '.join(zero_checks)} THEN {zero_result}")
+        clauses.append(f"WHEN {invalid_output} THEN error({error})")
+        expression = (
+            f"TRY_CAST((CASE {' '.join(clauses)} ELSE {float_values} END) AS FLOAT[{dimension}])"
+        )
+        projections = [
+            *(
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
+                    column.label
+                )
+                for column in plan.input.metadata.columns
+            ),
+            duckdb.SQLExpression(expression).alias(plan.output_column.label),
+        ]
+        return CompiledFrame(
+            compiled.relation.project(*projections),
             {
                 **compiled.bindings,
                 plan.output_column.id: plan.output_column.label,

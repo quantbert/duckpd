@@ -18,6 +18,7 @@ from duckpd._logical import (
     SortKey,
     SourceProvenance,
 )
+from duckpd.series_embeddings import SeriesColumnSpec, SeriesWindowSpec
 
 
 def find_column(metadata: FrameMetadata, label: str, *, include_hidden: bool = False) -> Column:
@@ -26,6 +27,41 @@ def find_column(metadata: FrameMetadata, label: str, *, include_hidden: bool = F
         if column.label == label and (include_hidden or not column.hidden):
             return column
     raise KeyError(label)
+
+
+def series_metadata_for_expression(
+    metadata: FrameMetadata,
+    expression: object,
+) -> tuple[SeriesColumnSpec | None, SeriesWindowSpec | None]:
+    """Copy series metadata only for an unchanged direct column reference."""
+    if not isinstance(expression, ColumnRef):
+        return None, None
+    source = next(
+        (column for column in metadata.columns if column.id == expression.column_id),
+        None,
+    )
+    if source is None:
+        return None, None
+    return source.series, source.series_window
+
+
+def reconcile_series_metadata(
+    columns: tuple[Column, ...],
+    *,
+    label: str,
+) -> tuple[SeriesColumnSpec | None, SeriesWindowSpec | None]:
+    """Reconcile typed series metadata for row-wise concatenation."""
+    series_specs = tuple(column.series for column in columns if column.series is not None)
+    if len(set(series_specs)) > 1:
+        raise ValueError(f"Cannot concatenate incompatible series representations for {label!r}")
+    window_specs = tuple(
+        column.series_window for column in columns if column.series_window is not None
+    )
+    if len(set(window_specs)) > 1:
+        raise ValueError(f"Cannot concatenate incompatible series windows for {label!r}")
+    series = series_specs[0] if series_specs and len(series_specs) == len(columns) else None
+    window = window_specs[0] if window_specs and len(window_specs) == len(columns) else None
+    return series, window
 
 
 def source_metadata(
@@ -288,14 +324,19 @@ def after_reindex(
     return result
 
 
-def after_embedding(metadata: FrameMetadata, output: Column) -> FrameMetadata:
+def after_embedding(
+    metadata: FrameMetadata,
+    output: Column,
+    *,
+    operation: str = "embed_text",
+) -> FrameMetadata:
     """Append a verified embedding while preserving row identity and order."""
     result = replace(
         metadata,
         columns=(*metadata.columns, output),
         provenance=replace(
             metadata.provenance,
-            transformations=(*metadata.provenance.transformations, "embed_text"),
+            transformations=(*metadata.provenance.transformations, operation),
         ),
     )
     validate_metadata(result)

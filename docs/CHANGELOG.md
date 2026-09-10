@@ -10,6 +10,13 @@ the [release policy](RELEASES.md).
 
 ### Added
 
+- Native `DataFrame.embed_series()` appends lazy `FLOAT[n]` representations
+  from verified fixed-count series windows, with representation-declared
+  channel ordering, centering or population z-score normalization, optional
+  unit normalization, null handling, and zero-scale policy.
+- Fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` produce lazy,
+  nullable `FLOAT[n]` observation windows with explicit ordering, group
+  isolation, finite-float32 validation, and preserved series-window metadata.
 - Fixed-duration `DataFrame.rolling(..., on=...)`,
   `DataFrameGroupBy.rolling(..., on=...)`, and datetime-indexed Series rolling
   windows with pandas-compatible `min_periods` defaults and
@@ -72,6 +79,13 @@ the [release policy](RELEASES.md).
 - Daily Hive-style feature-store partitions with arbitrary catalog path
   templates, plus catalog-validated `history_lookback` bounds for point-in-time
   predecessor scans.
+- Immutable, canonically fingerprinted native and learned time-series
+  representation contracts, typed series queries, and additive column metadata.
+  Direct aliases, joins, ASOF payloads, and compatible concatenation preserve
+  representation identity; value transforms invalidate it, while conflicting
+  concatenations fail before execution.
+- Managed Parquet sidecars and session-owned DuckDB tables persist and restore
+  series representation metadata alongside existing text embedding metadata.
 
 ### Changed
 

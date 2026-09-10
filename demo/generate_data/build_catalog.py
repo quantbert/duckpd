@@ -20,6 +20,8 @@ from news_config import (
     news_model,
 )
 
+# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
+
 CATALOG_VERSION = 1
 DATASETS: dict[str, dict[str, Any]] = {
     "ohlcv": {

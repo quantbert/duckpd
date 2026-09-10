@@ -72,6 +72,7 @@ from duckpd.errors import (
     SessionClosedError,
     UnsupportedOperationError,
 )
+from duckpd.series_embeddings import SeriesColumnSpec, SeriesRepresentationSpec
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -258,6 +259,7 @@ class Session:
         self._embedding_queries: dict[str, tuple[str, str]] = {}
         self._embedded_queries: dict[str, EmbeddedQuery] = {}
         self._table_embedding_specs: dict[tuple[str, str], object] = {}
+        self._table_series_specs: dict[tuple[str, str], SeriesColumnSpec] = {}
         self._last_materialization_report: MaterializationReport | None = None
         self._closed = False
         self._execution_count = 0
@@ -454,17 +456,31 @@ class Session:
         return key
 
     def _write_embedding_manifest(self, plan: LogicalPlan, path: str) -> None:
-        specs = {
+        text_specs = {
             column.label: column.embedding.model.to_dict()
             for column in plan.metadata.visible_columns
             if column.embedding is not None
         }
+        series_specs = {
+            column.label: column.series.representation.to_dict()
+            for column in plan.metadata.visible_columns
+            if column.series is not None
+        }
         manifest = Path(f"{path}.duckpd-embeddings.json")
-        if not specs:
+        if not text_specs and not series_specs:
             manifest.unlink(missing_ok=True)
             return
         staging = manifest.with_suffix(f"{manifest.suffix}.tmp-{uuid4().hex}")
-        staging.write_text(json.dumps({"version": 1, "columns": specs}, sort_keys=True))
+        staging.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "text_columns": text_specs,
+                    "series_columns": series_specs,
+                },
+                sort_keys=True,
+            )
+        )
         os.replace(staging, manifest)
 
     def _restore_parquet_embedding_metadata(
@@ -482,26 +498,51 @@ class Session:
         if not manifests or any(not manifest.is_file() for manifest in manifests):
             return plan
         try:
-            manifest_columns = [
-                cast(
-                    "dict[str, dict[str, object]]",
-                    cast("dict[str, object]", json.loads(manifest.read_text()))["columns"],
-                )
+            raw_manifests = [
+                cast("dict[str, object]", json.loads(manifest.read_text()))
                 for manifest in manifests
             ]
-            raw_columns = manifest_columns[0]
-            if any(columns != raw_columns for columns in manifest_columns[1:]):
+            first_manifest = raw_manifests[0]
+            if any(candidate != first_manifest for candidate in raw_manifests[1:]):
                 raise ValueError("embedding manifests disagree")
+            version = first_manifest.get("version")
+            if version == 1:
+                text_columns = cast(
+                    "dict[str, dict[str, object]]",
+                    first_manifest["columns"],
+                )
+                series_columns: dict[str, dict[str, object]] = {}
+            elif version == 2:
+                text_columns = cast(
+                    "dict[str, dict[str, object]]",
+                    first_manifest["text_columns"],
+                )
+                series_columns = cast(
+                    "dict[str, dict[str, object]]",
+                    first_manifest["series_columns"],
+                )
+            else:
+                raise ValueError("unsupported embedding manifest version")
             columns = tuple(
                 replace(
                     column,
-                    embedding=EmbeddingColumnSpec(
-                        EmbeddingModelSpec(**raw_columns[column.label]),  # type: ignore[arg-type]
-                        origin="sidecar",
+                    embedding=(
+                        EmbeddingColumnSpec(
+                            EmbeddingModelSpec(**text_columns[column.label]),  # type: ignore[arg-type]
+                            origin="sidecar",
+                        )
+                        if column.label in text_columns
+                        else column.embedding
+                    ),
+                    series=(
+                        SeriesColumnSpec(
+                            SeriesRepresentationSpec.from_dict(series_columns[column.label]),
+                            origin="sidecar",
+                        )
+                        if column.label in series_columns
+                        else column.series
                     ),
                 )
-                if column.label in raw_columns
-                else column
                 for column in plan.metadata.columns
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -522,19 +563,34 @@ class Session:
             for column in metadata.visible_columns
             if column.embedding is not None
         }
+        incoming_series = {
+            column.label: replace(column.series, origin="table")
+            for column in metadata.visible_columns
+            if column.series is not None
+        }
         existing = {
             label: spec
             for (table, label), spec in self._table_embedding_specs.items()
             if table == name
         }
-        if mode == "append" and existing != incoming:
-            raise ValueError("Appended embedding columns must have matching model metadata")
+        existing_series = {
+            label: spec
+            for (table, label), spec in self._table_series_specs.items()
+            if table == name
+        }
+        if mode == "append" and (existing != incoming or existing_series != incoming_series):
+            raise ValueError(
+                "Appended embedding columns must have matching representation metadata"
+            )
         if mode != "append":
-            for key in tuple(self._table_embedding_specs):
-                if key[0] == name:
-                    del self._table_embedding_specs[key]
+            for registry in (self._table_embedding_specs, self._table_series_specs):
+                for key in tuple(registry):
+                    if key[0] == name:
+                        del registry[key]
         for label, spec in incoming.items():
             self._table_embedding_specs[(name, label)] = spec
+        for label, spec in incoming_series.items():
+            self._table_series_specs[(name, label)] = spec
 
     def _restore_table_embedding_metadata(
         self,
@@ -548,6 +604,7 @@ class Session:
                     "EmbeddingColumnSpec | None",
                     self._table_embedding_specs.get((name, column.label)),
                 ),
+                series=self._table_series_specs.get((name, column.label)),
             )
             for column in plan.metadata.columns
         )

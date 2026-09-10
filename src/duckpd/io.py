@@ -28,6 +28,8 @@ from duckpd._metadata import (
     after_projection,
     after_union,
     projection_columns,
+    reconcile_series_metadata,
+    series_metadata_for_expression,
 )
 from duckpd._reductions import expression_type
 from duckpd._typing import common_union_type
@@ -180,10 +182,18 @@ def concat(
                 axis1_output_columns = [
                     (str(i), expr) for i, (_, expr) in enumerate(axis1_output_columns)
                 ]
-            out_cols = [
-                Column(ColumnId.create(), lbl, expression_type(first_plan, expr))
-                for lbl, expr in axis1_output_columns
-            ]
+            out_cols: list[Column] = []
+            for lbl, expr in axis1_output_columns:
+                series, series_window = series_metadata_for_expression(first_plan.metadata, expr)
+                out_cols.append(
+                    Column(
+                        ColumnId.create(),
+                        lbl,
+                        expression_type(first_plan, expr),
+                        series=series,
+                        series_window=series_window,
+                    )
+                )
             all_cols = projection_columns(first_plan.metadata, tuple(out_cols))
             out_col_map = {
                 col.label: expr
@@ -335,6 +345,10 @@ def concat(
             and all(column.embedding == first_embedding for column in source_columns)
             else None
         )
+        series, series_window = reconcile_series_metadata(
+            tuple(source_columns),
+            label=label,
+        )
         output_columns.append(
             Column(
                 ColumnId.create(),
@@ -344,6 +358,8 @@ def concat(
                 categorical=categorical,
                 timezone=timezone,
                 embedding=embedding,
+                series=series,
+                series_window=series_window,
             )
         )
     output_columns.extend(hidden_index_cols)

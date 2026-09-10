@@ -630,6 +630,8 @@ class FeatureStore:
                 nullable=source_column.nullable,
                 alias_of=source_column.id,
                 embedding=source_column.embedding,
+                series=source_column.series,
+                series_window=source_column.series_window,
             )
             projections.append(NamedExpression(output_column, ColumnRef(source_column.id)))
             output_columns.append(output_column)
@@ -797,6 +799,8 @@ class FeatureStore:
                     nullable=Nullability.NULLABLE,
                     alias_of=right_columns[output_name].alias_of,
                     embedding=right_columns[output_name].embedding,
+                    series=right_columns[output_name].series,
+                    series_window=right_columns[output_name].series_window,
                 )
                 for output_name, _ in features
             )

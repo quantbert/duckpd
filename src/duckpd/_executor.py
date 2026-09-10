@@ -52,6 +52,7 @@ from duckpd._logical import (
     SamplePlan,
     ScanPlan,
     SemanticSearchPlan,
+    SeriesRepresentationPlan,
     SortKey,
     SortPlan,
     SourceCapabilities,
@@ -336,6 +337,7 @@ def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
             SamplePlan,
             LocIndexPlan,
             EmbeddingPlan,
+            SeriesRepresentationPlan,
             VectorSearchPlan,
             SemanticSearchPlan,
         ),
@@ -454,6 +456,22 @@ def _embedding_operations(
                     "persistence": "lazy",
                 }
             )
+        elif isinstance(node, SeriesRepresentationPlan):
+            operations.append(
+                {
+                    "operation": "embed_series",
+                    "backend": "native",
+                    "representation_fingerprint": node.representation.fingerprint,
+                    "dimension": node.representation.dimension,
+                    "normalization": node.representation.normalization,
+                    "unit_norm": node.representation.unit_norm,
+                    "batch_size": node.batch_size,
+                    "null_policy": node.null_policy,
+                    "channels": [channel for channel, _ in node.channels],
+                    "boundary": "duckdb_native_expression",
+                    "persistence": "lazy",
+                }
+            )
         elif isinstance(node, SemanticSearchPlan):
             operations.append(
                 {
@@ -544,7 +562,10 @@ def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
                     return None
                 total_rows += pq.ParquetFile(path).metadata.num_rows
             return total_rows
-        if isinstance(node, (FilterPlan, ProjectPlan, SortPlan, EmbeddingPlan)):
+        if isinstance(
+            node,
+            (FilterPlan, ProjectPlan, SortPlan, EmbeddingPlan, SeriesRepresentationPlan),
+        ):
             return row_upper_bound(node.input)
         if isinstance(node, (LimitPlan, TopKPlan)):
             input_rows = row_upper_bound(node.input)
@@ -694,7 +715,7 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
             operations.add(SourceOperation.LIMIT)
         elif isinstance(node, TopKPlan):
             operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
-        elif isinstance(node, EmbeddingPlan):
+        elif isinstance(node, (EmbeddingPlan, SeriesRepresentationPlan)):
             operations.add(SourceOperation.PROJECTION)
             blocked_operations.add(SourceOperation.PROJECTION)
         elif isinstance(node, (VectorSearchPlan, SemanticSearchPlan)):
@@ -1251,6 +1272,7 @@ class Executor:
                     TopKPlan,
                     VectorSearchPlan,
                     EmbeddingPlan,
+                    SeriesRepresentationPlan,
                     SemanticSearchPlan,
                     AggregatePlan,
                     SamplePlan,
@@ -1845,6 +1867,7 @@ class Executor:
                 TopKPlan,
                 VectorSearchPlan,
                 EmbeddingPlan,
+                SeriesRepresentationPlan,
                 SemanticSearchPlan,
                 LimitPlan,
                 AggregatePlan,

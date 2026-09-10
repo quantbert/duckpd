@@ -40,7 +40,12 @@ from duckpd._logical import (
     WindowFrameKind,
     expression_nullability,
 )
-from duckpd._metadata import after_aggregate, after_filter, after_sort
+from duckpd._metadata import (
+    after_aggregate,
+    after_filter,
+    after_sort,
+    series_metadata_for_expression,
+)
 from duckpd._metadata import reset_index as reset_index_metadata
 from duckpd._reductions import (
     aggregate_plan,
@@ -183,6 +188,10 @@ class Series:
         from duckpd.frame import DataFrame
 
         out_label = name if name is not None else (self.name or "0")
+        series, series_window = series_metadata_for_expression(
+            self._plan.metadata,
+            self._expression,
+        )
         out_col = Column(
             ColumnId.create(),
             out_label,
@@ -193,6 +202,8 @@ class Series:
             alias_of=(
                 self._expression.column_id if isinstance(self._expression, ColumnRef) else None
             ),
+            series=series,
+            series_window=series_window,
         )
         all_cols = projection_columns(self._plan.metadata, (out_col,))
         projections = [

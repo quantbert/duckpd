@@ -10,6 +10,7 @@ uv run python demo/parquet_pipeline.py
 uv run python demo/reduction_pipeline.py
 uv run python demo/generate_market_data.py
 uv run python demo/market_data_demo.py smoke
+uv run python demo/time_series_embeddings.py
 ```
 
 The embedding tutorials use an explicit PyTorch GPU provider. First create the
@@ -61,6 +62,12 @@ request that device explicitly and fail rather than falling back to CPU.
   dataset directly, perform exact `vector.search_text()` retrieval, and report
   the selected PyTorch runtime plus model-preparation and query-to-response
   timings.
+- `time_series_embeddings.py` uses the generated market-data smoke Parquet file
+  to build lazy per-ticker return and intrabar-range windows, then compiles a
+  centered, unit-normalized native representation with `embed_series()`. It
+  selects one complete NVDA representation as a query and retrieves the five
+  nearest vectors through exact native search. No model runtime or optional
+  embedding dependency is required.
 - `generate_market_data.py` calibrates compressed bytes per row, then streams a
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
@@ -91,6 +98,11 @@ request that device explicitly and fail rather than falling back to CPU.
   ceil, round, and timezone conversions, timestamp/duration arithmetic, lazy
   `.cat` metadata accessors, ordered comparisons, and `groupby(observed=False)`
   unused-category expansion.
+- `DuckPD_Time_Series_Embeddings.ipynb` is a self-contained offline walkthrough
+  of deterministic multi-channel series representations. It covers explicit
+  order, grouped fixed-count arrays, native `embed_series()` normalization,
+  typed exact retrieval, incompatible-space rejection, and metadata-preserving
+  Parquet persistence without a model runtime.
 - `DuckPD_Vector_Search.ipynb` is an interactive GPU tutorial demonstrating
   explicit `TransformersEmbeddingProvider` registration, pinned PyTorch model
   preparation, lazy remote Parquet streaming, in-engine batch embedding via

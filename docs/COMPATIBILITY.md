@@ -102,6 +102,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `duckpd.from_pandas(df, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a snapshot into a session, tracking hidden source row identity. |
 | `duckpd.from_arrow(table, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with an appended hidden stable row identity column. |
 | `duckpd.concat(objs, ...)` | **`[Intentional Deviation]`** | `objs`, `axis=0\|1`, `join='outer'\|'inner'`, `ignore_index=False`, `sort=False` | Supports `axis=0` (row-wise union) and `axis=1` (column-wise concatenation). Axis 0 preserves matching categorical universes/order and timezone metadata. Axis 1 optimizes same-plan Series into a single projection and aligns multi-frame inputs via explicit index joins. Rejects duplicate column labels when `ignore_index=False`. |
+| `duckpd.series_representation(...)` / `duckpd.series_embedding_model(...)` | **`[DuckPD Extension]`** | Immutable window, channel, sampling, data-contract, normalization, and optional learned-encoder declarations | `SeriesRepresentationSpec` / `SeriesEmbeddingModelSpec` | Builds canonical, side-effect-free representation identities. Planning performs no model preparation or inference. Native representations execute through `DataFrame.embed_series()`; learned encoders and `search_series()` remain under implementation. |
 | `duckpd.merge_asof(left, right, ...)` | **`[Pandas-API Subset]`** | `on` or `left_on`/`right_on`; `by` or `left_by`/`right_by`; `suffixes`; `allow_exact_matches`; `direction='backward'` | `DataFrame` | Builds a typed lazy backward ASOF left join. Both timestamp keys must have identical dtypes/timezones and both frames must be ordered ascending by their timestamp key. Null timestamp keys fail at execution. `tolerance`, `forward`, and `nearest` are rejected before execution. |
 
 ---
@@ -141,10 +142,10 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `df.diff(periods=1)` | **`[Intentional Deviation]`** | `periods`, `axis=0` | Discrete difference between current and prior row (requires `OrderSpec`). |
 | `df.pct_change(periods=1)` | **`[Intentional Deviation]`** | `periods`, `axis=0` | Percentage change between rows (requires `OrderSpec`). |
 | `df.rank(...)` | **`[Intentional Deviation]`** | `method`, `na_option`, `ascending`, `pct` | Numerical ranking (average, min, max, first, dense) (requires `OrderSpec`). |
-| `df.rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False`, `on`, `closed` | Row-count windows accept positive integers. Fixed-duration windows accept strings or `datetime.timedelta`, default `min_periods` to 1, require `on=` for DataFrames, and use the explicit datetime index for Series. Supports `closed='right'\|'left'\|'both'\|'neither'` and all rolling reductions listed above. |
+| `df.rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False`, `on`, `closed` | Row-count windows accept positive integers. Fixed-duration windows accept strings or `datetime.timedelta`, default `min_periods` to 1, require `on=` for DataFrames, and use the explicit datetime index for Series. Supports `closed='right'\|'left'\|'both'\|'neither'` and all rolling reductions listed above. DuckPD's `to_array()` extension requires a fixed count and `min_periods=window`; it emits nullable, oldest-first `FLOAT[window]` values and rejects nonnumeric or nonfinite observations. |
 | `df.expanding(...)` | **`[Intentional Deviation]`** | `min_periods` | Expanding window object (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`) (requires `OrderSpec`). |
 | `df.groupby(by, ...)` | **`[Pandas-API Subset]`** | `by`, `as_index`, `sort`, `dropna`, `observed` | Creates `DataFrameGroupBy` builder. `observed=False` expands unused values for one categorical key when `sort=True` and `dropna=True`; unsupported multi-key, `sort=False`, and `dropna=False` variants reject before execution. |
-| `df.groupby(...).rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False`, `on`, `closed` | Row-count and fixed-duration `DataFrameGroupBy` and `SeriesGroupBy` windows (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`). Group keys compile to window partitions; source `OrderSpec` defines order within each group. DataFrame duration windows use `on=`; Series duration windows use the explicit datetime index. Results preserve pandas grouped index layout, and direct assignment to the originating frame uses row-preserving lazy alignment. |
+| `df.groupby(...).rolling(window, ...)` | **`[Pandas-API Subset]`** | `window`, `min_periods`, `center=False`, `on`, `closed` | Row-count and fixed-duration `DataFrameGroupBy` and `SeriesGroupBy` windows (`sum`, `mean`, `min`, `max`, `std`, `var`, `count`). Group keys compile to window partitions; source `OrderSpec` defines order within each group. The fixed-count `to_array()` extension preserves those partitions and the grouped index/alignment contract. DataFrame duration windows use `on=`; Series duration windows use the explicit datetime index. |
 | `df.merge(right, ...)` | **`[Intentional Deviation]`** | `how`, `on`, `left_on`, `right_on`, `left_index`, `right_index`, `suffixes`, `sort`, `validate` | Relational join with pandas null-key semantics (`IS NOT DISTINCT FROM`) and lazy cardinality validation. Clears total ordering guarantees. |
 | `df.join(other, ...)` | **`[Intentional Deviation]`** | `how`, `lsuffix`, `rsuffix`, `sort`, `validate` | Index-based join convenience method supporting cardinality validation. Clears total ordering guarantees. |
 | `df.collect()` / `to_pandas()` | **`[DuckPD Extension]`** | None | Executes plan and returns pandas DataFrame. |
@@ -172,6 +173,12 @@ keys. Null timestamps and duplicate timestamps within one group fail at the
 execution boundary: DuckDB `RANGE` frames treat equal timestamp peers as one
 frame, while pandas advances through duplicate rows sequentially. Rejecting
 that ambiguous case prevents silently different results.
+
+Fixed-count `to_array()` requires an explicit selected numeric Series or
+DataFrame, a guaranteed order, and `min_periods=window`. Warm-up windows and
+windows containing SQL nulls produce a whole null value. Every non-null result
+is an oldest-first fixed-size float32 array with no null children; nonfinite
+values and float32 overflow fail during execution.
 
 ---
 
@@ -300,10 +307,24 @@ environment-specific runtime. Hosted providers, hybrid retrieval, reranking,
 quantized/sparse vectors, automatic refresh, and distributed inference remain
 deferred.
 
+## 11. Native Time-Series Representations
+
+| Method | Classification | Parameters | Execution | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `DataFrame.embed_series()` | **`[DuckPD Native]`** | channel-to-column mapping, output label, representation, batch size, null policy | Lazy | Appends a nullable fixed-size `FLOAT[n]` vector without Python row execution. Requires verified fixed-count `Rolling.to_array()` inputs sharing one order/partition contract. Native recipes support channel-major oldest-first flattening, centering, population z-score normalization, optional final unit normalization, and explicit zero-scale behavior. Learned encoders are rejected before execution. |
+
+Mapping order is ignored; `SeriesRepresentationSpec.channels` defines vector
+layout. A null input window propagates to a null output by default, while
+`null_policy="error"` aborts. Nonfinite values, null array children, incompatible
+window metadata, and wrong array widths fail rather than changing representation
+identity. Representation metadata survives direct Parquet and session-table
+persistence.
+
+
 ---
 
 
-## 11. Narwhals Interoperability
+## 12. Narwhals Interoperability
 
 DuckPD ships an experimental
 [Narwhals plugin](https://narwhals-dev.github.io/narwhals/extending/).

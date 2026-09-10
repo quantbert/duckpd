@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from duckpd._logical import (
     Column,
     ColumnId,
+    ColumnRef,
     FrameMetadata,
     Nullability,
     SemanticSearchPlan,
@@ -22,7 +23,9 @@ from duckpd._logical import (
 )
 from duckpd._metadata import after_vector_search, find_column
 from duckpd._reductions import expression_type
+from duckpd.embeddings import EmbeddedQuery
 from duckpd.errors import UnsupportedOperationError
+from duckpd.series_embeddings import EmbeddedSeriesQuery
 
 if TYPE_CHECKING:
     from duckpd.embeddings import EmbeddingModelSpec
@@ -67,6 +70,30 @@ def _vector_type(dtype: str) -> tuple[Literal["FLOAT", "DOUBLE"], int | None]:
     if dimension == 0:
         raise UnsupportedOperationError("Vector columns must have a positive dimension")
     return element_type, dimension
+
+
+def _typed_query_values(query: object, column: Column | None) -> object:
+    if isinstance(query, EmbeddedQuery):
+        if column is None or column.embedding is None:
+            raise UnsupportedOperationError(
+                "typed text queries require a direct column with text embedding metadata"
+            )
+        if query.model_fingerprint != column.embedding.fingerprint:
+            raise UnsupportedOperationError(
+                "typed text query fingerprint does not match the column embedding"
+            )
+        return query.values
+    if isinstance(query, EmbeddedSeriesQuery):
+        if column is None or column.series is None:
+            raise UnsupportedOperationError(
+                "typed series queries require a direct column with series representation metadata"
+            )
+        if query.representation_fingerprint != column.series.fingerprint:
+            raise UnsupportedOperationError(
+                "typed series query fingerprint does not match the column representation"
+            )
+        return query.values
+    return query
 
 
 def _query_vector(
@@ -138,6 +165,17 @@ class VectorMethods:
         from duckpd.series import Series
 
         dtype = expression_type(self._series._plan, self._series._expression)
+        source_column = None
+        if isinstance(self._series._expression, ColumnRef):
+            source_column = next(
+                (
+                    column
+                    for column in self._series._plan.metadata.columns
+                    if column.id == self._series._expression.column_id
+                ),
+                None,
+            )
+        query = _typed_query_values(query, source_column)
         element_type, dimension = _vector_type(dtype)
         vector_metric = _metric(metric)
         vector_query = _query_vector(
@@ -297,6 +335,7 @@ class VectorFrameMethods:
             raise ValueError(f"distance column {distance_column!r} already exists")
 
         vector_column = find_column(self._frame._plan.metadata, column)
+        query = _typed_query_values(query, vector_column)
         element_type, dimension = _vector_type(vector_column.duckdb_type)
         vector_metric = _metric(metric)
         vector_query = _query_vector(

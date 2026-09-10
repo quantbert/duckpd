@@ -304,8 +304,7 @@ then retains an exact top-k result:
 
 ```python
 eligible = documents[
-    (documents["language"] == "en")
-    & (documents["available_at"] <= observation_time)
+    (documents["language"] == "en") & (documents["available_at"] <= observation_time)
 ]
 
 matches = eligible.semantic.search(
