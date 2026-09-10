@@ -14,6 +14,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 - [Vector search and text embeddings](api/vector-search-and-embeddings.md) —
   progressive examples, workflow selection, requirements, validation, and
   exact and experimental approximate retrieval constraints.
+- [Time-series representations and similarity search](api/time-series-embeddings.md) —
+  model-free window embeddings, representation semantics, practical tradeoffs,
+  and the path toward qualified learned encoders.
 - [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
   supported arguments, intentional deviations, and unsupported behavior.
 
