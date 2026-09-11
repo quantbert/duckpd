@@ -68,15 +68,19 @@ def main() -> None:
         print(f"Output type: FLOAT[{representation.dimension}]")
         print(f"Executions after planning: {session.execution_count}")
 
-        # Warm-up rows have null representations. Use the first complete NVDA
-        # vector as a concrete query for exact nearest-neighbor retrieval.
+        # Warm-up rows have null representations. Use the raw channel windows
+        # behind the first complete NVDA representation as a query-by-example.
         candidates = embedded[(embedded["ticker"] == TICKER) & embedded["market_shape"].notna()]
-        query_row = candidates[["datetime", "market_shape"]].head(1)
-        query = query_row.iloc[0]["market_shape"].tolist()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        query_row = candidates[["datetime", "return_window", "range_window"]].head(1)
+        query = {
+            "bar_return": tuple(float(value) for value in query_row.iloc[0]["return_window"]),
+            "intrabar_range": tuple(float(value) for value in query_row.iloc[0]["range_window"]),
+        }
 
-        nearest = candidates.vector.search(
+        nearest = candidates.vector.search_series(
             query,
             column="market_shape",
+            representation=representation,
             metric="l2",
             k=MATCHES,
             tie_breaker="datetime",
@@ -93,7 +97,7 @@ def main() -> None:
 
         print(f"\nQuery: first complete {TICKER} {WINDOW}-bar market-shape window")
         print(f"Query endpoint: {query_row.iloc[0]['datetime']}")  # pyright: ignore[reportUnknownMemberType]
-        print(f"Query vector: {query}")
+        print(f"Query observations: {query}")
         print("\nNearest exact representations:")
         print(nearest.collect().to_string(index=False))  # pyright: ignore[reportUnknownMemberType]
         print(f"\nTotal executions: {session.execution_count}")

@@ -63,11 +63,10 @@ request that device explicitly and fail rather than falling back to CPU.
   the selected PyTorch runtime plus model-preparation and query-to-response
   timings.
 - `time_series_embeddings.py` uses the generated market-data smoke Parquet file
-  to build lazy per-ticker return and intrabar-range windows, then compiles a
-  centered, unit-normalized native representation with `embed_series()`. It
-  selects one complete NVDA representation as a query and retrieves the five
-  nearest vectors through exact native search. No model runtime or optional
-  embedding dependency is required.
+  to build lazy per-ticker return and intrabar-range windows, compiles a
+  centered, unit-normalized native representation with `embed_series()`, and
+  submits raw channel windows through exact `search_series()`. No model runtime
+  or optional embedding dependency is required.
 - `generate_market_data.py` calibrates compressed bytes per row, then streams a
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
@@ -101,8 +100,8 @@ request that device explicitly and fail rather than falling back to CPU.
 - `DuckPD_Time_Series_Embeddings.ipynb` is a self-contained offline walkthrough
   of deterministic multi-channel series representations. It covers explicit
   order, grouped fixed-count arrays, native `embed_series()` normalization,
-  typed exact retrieval, incompatible-space rejection, and metadata-preserving
-  Parquet persistence without a model runtime.
+  raw-window `search_series()`, reusable `Session.embed_series_query()` values,
+  incompatible-space rejection, and metadata-preserving Parquet persistence.
 - `DuckPD_Vector_Search.ipynb` is an interactive GPU tutorial demonstrating
   explicit `TransformersEmbeddingProvider` registration, pinned PyTorch model
   preparation, lazy remote Parquet streaming, in-engine batch embedding via
