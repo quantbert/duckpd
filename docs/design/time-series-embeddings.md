@@ -97,15 +97,13 @@ These observations are grounded in the architecture decisions and source for
 [feature-store planning][src-store]. The design follows the existing
 [architecture directives][adr-architecture].
 
-Source review also identified integration details that require deliberate work:
-`assign()` constructs replacement columns; feature-store alias and ASOF payload
-construction also reconstruct columns. Their metadata propagation cannot be
-assumed to preserve new representation fields. The current optimizer recursively
-handles named binary plans and otherwise assumes a unary `input`; an event-window
-node therefore needs explicit traversal support. The current embedding progress
-path counts its input before processing it; that is unsuitable as an automatic
-extra scan of an expensive series-window pipeline. These are implementation
-requirements below, not claims that they have already been fixed.
+Source review identified integration details that required deliberate work:
+`assign()`, feature-store aliases, and ASOF payload construction reconstruct
+columns, so series metadata propagation is explicit. The optimizer and executor
+handle the binary `EventWindowPlan` through named observation and event branches
+rather than assuming a unary `input`. Embedding progress still counts only text
+`EmbeddingPlan` inputs, avoiding an automatic extra scan of an event-window
+pipeline.
 [Sources: frame][src-frame], [feature store][src-store],
 [optimizer][src-optimizer], [executor][src-executor].
 
@@ -581,11 +579,11 @@ negative inner product so all distances sort ascending.
 
 ## Event-aligned windows
 
-Event alignment is a separate, later implementation phase built on the same
-array and representation contracts. It is included here because pairing the
-wrong windows with news would invalidate the main use case.
+Event alignment is built on the same array and representation contracts. Pairing
+the wrong windows with news would invalidate the main use case, so its exact grid
+and availability semantics are part of the public contract.
 
-### Proposed API
+### Public API
 
 ```python
 reactions = prices.event_windows(
@@ -609,7 +607,7 @@ reactions = prices.event_windows(
 )
 ```
 
-Proposed signature:
+Signature:
 
 ```text
 DataFrame.event_windows(
@@ -772,8 +770,8 @@ the same minute require explicit application decisions.
 
 ### Exact joint scoring
 
-The following is a proposed-API usage example. `q_text` and `q_reaction` are typed
-queries produced by the existing text and proposed series query encoders:
+The following uses the shipped API composition. `q_text` and `q_reaction` are
+typed queries produced by the text and series query encoders:
 
 ```python
 q_text = session.embed_query(query_news, model=text_model)
@@ -1483,7 +1481,7 @@ schema][src-logical], and [metadata transition helpers][src-metadata].
 | File | Planned changes |
 | --- | --- |
 | `src/duckpd/series_embeddings.py` (new) | Specs, canonicalization, typed queries, provider protocol, validation, public constructors |
-| `src/duckpd/event_windows.py` (new) | Event-window API validation and plan construction; no model dependency |
+| `src/duckpd/event_windows.py` | Event-window API validation and plan construction; no model dependency |
 | `src/duckpd/window.py` | Fixed-count `to_array()` for selected/grouped receivers; preserve grouped assignment alignment |
 | `src/duckpd/_logical.py` | Array-window expression, four new plans, additive column metadata, expression/plan unions |
 | `src/duckpd/_metadata.py` | Row-preserving representation transitions and explicit metadata propagation helpers |
@@ -1771,8 +1769,9 @@ without pandas materialization. This phase is independently useful and shippable
 
 ### Phase 2: event windows and event similarity
 
-Implement fixed-grid `event_windows()`, explicit availability metadata, exact
-late-fusion examples, and event-join/overlap tests. No joint model is introduced.
+Implemented as roadmap Phase 17: fixed-grid `event_windows()`, explicit
+availability metadata, exact late-fusion examples, and event-join/overlap tests.
+No joint model is introduced.
 
 **Exit gate:** boundary, missing-bar, duplicate-key, and availability cases are
 correct; fused ranking is distinguished from candidate reranking. This completes

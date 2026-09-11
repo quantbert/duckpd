@@ -24,6 +24,7 @@ from duckpd._logical import (
     ColumnRef,
     CsvSource,
     EmbeddingPlan,
+    EventWindowPlan,
     Expression,
     FeatureParquetSource,
     FilterPlan,
@@ -183,6 +184,8 @@ class DuckDBCompiler:
             return self._compile_join(plan)
         if isinstance(plan, AsOfJoinPlan):
             return self._compile_asof_join(plan)
+        if isinstance(plan, EventWindowPlan):
+            return self._compile_event_windows(plan)
 
         if isinstance(plan, UnionPlan):
             return self._compile_union(plan)
@@ -1258,6 +1261,324 @@ class DuckDBCompiler:
             invalid,
             duckdb.ConstantExpression(None),
         ).otherwise(value)
+
+    def _compile_event_windows(self, plan: EventWindowPlan) -> CompiledFrame:
+        events = self._compile(plan.events)
+        observations = self._compile(plan.observations)
+
+        event_bindings: dict[ColumnId, str] = {}
+        event_projection: list[duckdb.Expression] = []
+        for column in plan.events.columns:
+            temporary = f"e_{column.id.value.hex}"
+            event_bindings[column.id] = temporary
+            event_projection.append(
+                duckdb.SQLExpression(quote_identifier(events.bindings[column.id])).alias(temporary)
+            )
+        event_relation = events.relation.project(*event_projection)
+
+        observation_ids = {
+            plan.observation_time,
+            plan.observation_available_at,
+            *plan.observation_keys,
+            *(source_id for source_id, _ in plan.channels),
+        }
+        observation_bindings: dict[ColumnId, str] = {}
+        observation_projection: list[duckdb.Expression] = []
+        for column in plan.observations.columns:
+            if column.id not in observation_ids:
+                continue
+            temporary = f"o_{column.id.value.hex}"
+            observation_bindings[column.id] = temporary
+            observation_projection.append(
+                duckdb.SQLExpression(quote_identifier(observations.bindings[column.id])).alias(
+                    temporary
+                )
+            )
+        observation_relation = observations.relation.project(*observation_projection)
+
+        def ref(alias: str, binding: str) -> str:
+            return f"{alias}.{quote_identifier(binding)}"
+
+        event_time = ref("e", event_bindings[plan.event_time])
+        event_available = ref("e", event_bindings[plan.event_available_at])
+        step_ns = plan.step_ns
+        step_us = step_ns // 1_000
+        remainder = f"((epoch_ns({event_time}) % {step_ns} + {step_ns}) % {step_ns})"
+        floor_anchor = f"(epoch_ns({event_time}) - {remainder})"
+        anchor = (
+            floor_anchor
+            if plan.anchor == "floor"
+            else f"(CASE WHEN {remainder} = 0 THEN {floor_anchor} "
+            f"ELSE {floor_anchor} + {step_ns} END)"
+        )
+        event_required = (
+            *plan.event_ids,
+            *plan.event_keys,
+            plan.event_time,
+            plan.event_available_at,
+        )
+        event_invalid = " OR ".join(
+            f"{ref('e', event_bindings[column_id])} IS NULL"
+            for column_id in dict.fromkeys(event_required)
+        )
+        event_invalid = (
+            f"({event_invalid} OR {event_available} < {event_time} "
+            f"OR epoch_ns({event_time}) % 1000 != 0)"
+        )
+        event_id_partition = ", ".join(
+            ref("e", event_bindings[column_id]) for column_id in plan.event_ids
+        )
+        event_type = next(
+            column.duckdb_type for column in plan.events.columns if column.id == plan.event_time
+        )
+        event_columns = ", ".join(
+            ref("e", event_bindings[column.id]) for column in plan.events.columns
+        )
+        window_start = (
+            f"CAST(make_timestamp_ns({anchor} + ({plan.start_offset}) * {step_ns}) AS {event_type})"
+        )
+        window_end = (
+            f"CAST(make_timestamp_ns({anchor} + ({plan.end_offset}) * {step_ns}) AS {event_type})"
+        )
+
+        key_membership = " AND ".join(
+            f"{ref('o', observation_bindings[observation_id])} = "
+            f"{ref('i', event_bindings[event_id])}"
+            for observation_id, event_id in zip(
+                plan.observation_keys,
+                plan.event_keys,
+                strict=True,
+            )
+        )
+        observation_time = ref(
+            "o",
+            observation_bindings[plan.observation_time],
+        )
+        interval_start = ref("i", "__duckpd_window_start")
+        interval_end = ref("i", "__duckpd_window_end")
+        exact_match = " AND ".join(
+            (
+                *(
+                    f"{ref('o', observation_bindings[observation_id])} = "
+                    f"{ref('g', event_bindings[event_id])}"
+                    for observation_id, event_id in zip(
+                        plan.observation_keys,
+                        plan.event_keys,
+                        strict=True,
+                    )
+                ),
+                f"{observation_time} = {ref('g', '__duckpd_expected_time')}",
+            )
+        )
+        observation_partition = ", ".join(
+            (
+                *(ref("o", observation_bindings[column_id]) for column_id in plan.observation_keys),
+                observation_time,
+            )
+        )
+        observation_available = ref(
+            "r",
+            observation_bindings[plan.observation_available_at],
+        )
+        relevant_time = ref(
+            "r",
+            observation_bindings[plan.observation_time],
+        )
+        invalid_values = " OR ".join(
+            f"{ref('r', observation_bindings[source_id])} IS NULL OR "
+            f"NOT isfinite(CAST({ref('r', observation_bindings[source_id])} AS FLOAT))"
+            for source_id, _ in plan.channels
+        )
+        observation_validation = (
+            f"coalesce(bool_or(epoch_ns({relevant_time}) % {step_ns} != 0 "
+            f"OR epoch_ns({relevant_time}) % 1000 != 0), FALSE) "
+            "AS __duckpd_off_grid, "
+            "coalesce(bool_or(__duckpd_slot_count > 1), FALSE) "
+            "AS __duckpd_duplicate_slot, "
+            f"coalesce(bool_or({observation_available} IS NULL OR "
+            f"{observation_available} < {relevant_time} "
+            f"+ INTERVAL {step_us} MICROSECOND), FALSE) "
+            "AS __duckpd_invalid_observation_availability, "
+            f"coalesce(bool_or({invalid_values}), FALSE) "
+            "AS __duckpd_invalid_values"
+        )
+
+        grouped_event_columns = ", ".join(
+            f"first({ref('g', binding)} ORDER BY "
+            f"{ref('g', '__duckpd_offset')}) AS {quote_identifier(binding)}"
+            for binding in event_bindings.values()
+        )
+        channel_aggregates: list[str] = []
+        channel_lists: dict[ColumnId, str] = {}
+        for source_id, output in plan.channels:
+            aggregate_label = f"__duckpd_channel_{output.id.value.hex}"
+            channel_lists[output.id] = aggregate_label
+            channel_aggregates.append(
+                f"list(CAST({ref('o', observation_bindings[source_id])} AS FLOAT) "
+                f"ORDER BY {ref('g', '__duckpd_offset')}) "
+                f"AS {quote_identifier(aggregate_label)}"
+            )
+        observation_match_time = ref(
+            "o",
+            observation_bindings[plan.observation_time],
+        )
+        observation_match_available = ref(
+            "o",
+            observation_bindings[plan.observation_available_at],
+        )
+
+        query = (
+            "WITH __duckpd_events_source AS ("
+            f"{event_relation.sql_query()}"
+            "), __duckpd_observations_source AS ("
+            f"{observation_relation.sql_query()}"
+            "), __duckpd_events_prepared AS ("
+            f"SELECT {event_columns}, "
+            "row_number() OVER () AS __duckpd_event_row, "
+            f"count(*) OVER (PARTITION BY {event_id_partition}) "
+            "AS __duckpd_event_id_count, "
+            f"{anchor} AS __duckpd_anchor_ns, "
+            f"{event_invalid} AS __duckpd_invalid_event "
+            "FROM __duckpd_events_source AS e"
+            "), __duckpd_intervals AS ("
+            "SELECT p.*, "
+            f"{window_start.replace('e.', 'p.')} AS __duckpd_window_start, "
+            f"{window_end.replace('e.', 'p.')} AS __duckpd_window_end "
+            "FROM __duckpd_events_prepared AS p"
+            "), __duckpd_relevant_observations AS ("
+            "SELECT o.* FROM __duckpd_observations_source AS o "
+            "WHERE EXISTS (SELECT 1 FROM __duckpd_intervals AS i WHERE "
+            f"{key_membership} AND {observation_time} >= {interval_start} "
+            f"AND {observation_time} < {interval_end})"
+            "), __duckpd_relevant_tagged AS ("
+            "SELECT o.*, "
+            f"count(*) OVER (PARTITION BY {observation_partition}) "
+            "AS __duckpd_slot_count "
+            "FROM __duckpd_relevant_observations AS o"
+            "), __duckpd_observation_validation AS ("
+            f"SELECT {observation_validation} "
+            "FROM __duckpd_relevant_tagged AS r"
+            "), __duckpd_grid AS ("
+            "SELECT i.*, offsets.range AS __duckpd_offset, "
+            "CAST(make_timestamp_ns(i.__duckpd_anchor_ns + "
+            f"offsets.range * {step_ns}) AS {event_type}) "
+            "AS __duckpd_expected_time "
+            "FROM __duckpd_intervals AS i "
+            f"CROSS JOIN range({plan.start_offset}, {plan.end_offset}) AS offsets"
+            "), __duckpd_aggregated AS ("
+            "SELECT "
+            f"{ref('g', '__duckpd_event_row')} AS __duckpd_event_row, "
+            f"{grouped_event_columns}, "
+            f"first({ref('g', '__duckpd_event_id_count')}) "
+            "AS __duckpd_event_id_count, "
+            f"first({ref('g', '__duckpd_invalid_event')}) "
+            "AS __duckpd_invalid_event, "
+            f"first({ref('g', '__duckpd_window_start')}) "
+            "AS __duckpd_window_start, "
+            f"first({ref('g', '__duckpd_window_end')}) "
+            "AS __duckpd_window_end, "
+            f"count({observation_match_time}) AS __duckpd_window_count, "
+            f"max({observation_match_available}) AS __duckpd_source_available_at, "
+            f"{', '.join(channel_aggregates)} "
+            "FROM __duckpd_grid AS g LEFT JOIN __duckpd_relevant_tagged AS o "
+            f"ON {exact_match} "
+            f"GROUP BY {ref('g', '__duckpd_event_row')}"
+            ") "
+        )
+
+        invalid_event_error = quote_literal(
+            "event_windows requires non-null keys and times, "
+            "microsecond-representable event times, and event availability at "
+            "or after event time"
+        )
+        duplicate_event_error = quote_literal("event_windows event_id values must be unique")
+        off_grid_error = quote_literal(
+            "event_windows source bar starts must align to the declared fixed grid"
+        )
+        duplicate_slot_error = quote_literal(
+            "event_windows source keys and bar starts must be unique"
+        )
+        availability_error = quote_literal(
+            "event_windows bar availability must be non-null and no earlier than "
+            "the complete bar end"
+        )
+        invalid_values_error = quote_literal(
+            "event_windows source values must be finite and non-null"
+        )
+        validation_cases = (
+            "WHEN a.__duckpd_invalid_event THEN "
+            f"error({invalid_event_error}) "
+            "WHEN a.__duckpd_event_id_count > 1 THEN "
+            f"error({duplicate_event_error}) "
+            "WHEN v.__duckpd_off_grid THEN "
+            f"error({off_grid_error}) "
+            "WHEN v.__duckpd_duplicate_slot THEN "
+            f"error({duplicate_slot_error}) "
+            "WHEN v.__duckpd_invalid_observation_availability THEN "
+            f"error({availability_error}) "
+            "WHEN v.__duckpd_invalid_values THEN "
+            f"error({invalid_values_error}) "
+        )
+        if plan.incomplete == "error":
+            incomplete_error = quote_literal(
+                "event_windows encountered an incomplete fixed-grid window"
+            )
+            validation_cases += (
+                f"WHEN a.__duckpd_window_count != "
+                f"{plan.end_offset - plan.start_offset} "
+                f"THEN error({incomplete_error}) "
+            )
+
+        def checked(expression: str) -> str:
+            return f"CASE {validation_cases}ELSE {expression} END"
+
+        output_expressions: list[str] = []
+        output_bindings: dict[ColumnId, str] = {}
+        for column in plan.events.columns:
+            expression = checked(f"a.{quote_identifier(event_bindings[column.id])}")
+            output_expressions.append(f"{expression} AS {quote_identifier(column.label)}")
+            output_bindings[column.id] = column.label
+
+        complete = f"a.__duckpd_window_count = {plan.end_offset - plan.start_offset}"
+        for _, output in plan.channels:
+            values = f"a.{quote_identifier(channel_lists[output.id])}"
+            represented = f"CAST({values} AS {output.duckdb_type})"
+            if plan.incomplete == "null":
+                represented = f"CASE WHEN {complete} THEN {represented} ELSE NULL END"
+            output_expressions.append(f"{checked(represented)} AS {quote_identifier(output.label)}")
+            output_bindings[output.id] = output.label
+
+        metadata_values = (
+            (plan.window_start, "a.__duckpd_window_start"),
+            (plan.window_end, "a.__duckpd_window_end"),
+            (plan.window_count, "a.__duckpd_window_count"),
+            (plan.window_complete, complete),
+            (
+                plan.window_available_at,
+                (
+                    "greatest("
+                    f"a.{quote_identifier(event_bindings[plan.event_available_at])}, "
+                    "a.__duckpd_source_available_at)"
+                    if plan.incomplete == "error"
+                    else (
+                        f"CASE WHEN {complete} THEN greatest("
+                        f"a.{quote_identifier(event_bindings[plan.event_available_at])}, "
+                        "a.__duckpd_source_available_at) ELSE NULL END"
+                    )
+                ),
+            ),
+        )
+        for column, expression in metadata_values:
+            output_expressions.append(f"{checked(expression)} AS {quote_identifier(column.label)}")
+            output_bindings[column.id] = column.label
+
+        query += (
+            f"SELECT {', '.join(output_expressions)} "
+            "FROM __duckpd_aggregated AS a "
+            "CROSS JOIN __duckpd_observation_validation AS v "
+            "ORDER BY a.__duckpd_event_row"
+        )
+        return CompiledFrame(self._session._connection.sql(query), output_bindings)
 
     def _compile_asof_join(self, plan: AsOfJoinPlan) -> CompiledFrame:
         left_compiled = self._compile(plan.left)

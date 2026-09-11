@@ -826,6 +826,34 @@ class AggregatePlan(LogicalPlanBase):
     sort: bool = True
 
 
+@dataclass(frozen=True)
+class EventWindowPlan(LogicalPlanBase):
+    """Build exact fixed-grid observation arrays for event rows."""
+
+    observations: LogicalPlan
+    events: LogicalPlan
+    observation_time: ColumnId
+    event_time: ColumnId
+    observation_keys: tuple[ColumnId, ...]
+    event_keys: tuple[ColumnId, ...]
+    event_ids: tuple[ColumnId, ...]
+    channels: tuple[tuple[ColumnId, Column], ...]
+    start_offset: int
+    end_offset: int
+    step_ns: int
+    anchor: Literal["floor", "ceil"]
+    observation_available_at: ColumnId
+    event_available_at: ColumnId
+    incomplete: Literal["null", "error"]
+    bar_label: Literal["start"]
+    window_start: Column
+    window_end: Column
+    window_count: Column
+    window_complete: Column
+    window_available_at: Column
+    metadata: FrameMetadata
+
+
 class JoinType(Enum):
     """Supported join types."""
 
@@ -911,6 +939,7 @@ LogicalPlan: TypeAlias = (
     | SeriesSearchPlan
     | LimitPlan
     | AggregatePlan
+    | EventWindowPlan
     | JoinPlan
     | AsOfJoinPlan
     | UnionPlan

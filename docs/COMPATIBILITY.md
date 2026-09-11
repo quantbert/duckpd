@@ -311,6 +311,7 @@ deferred.
 
 | Method | Classification | Parameters | Execution | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| `DataFrame.event_windows()` | **`[DuckPD Native]`** | event frame, observation/event times, entity and event keys, output mapping, integer offset interval, fixed step, floor/ceil anchor, availability columns, incomplete policy, metadata prefix | Lazy | Builds exact UTC epoch-grid arrays by entity while retaining event rows. Start-labeled complete bars are required. Missing slots yield whole-null arrays or an execution error; relevant off-grid rows, duplicates, null/nonfinite values, and impossible availability timestamps fail. Complete-window availability is the maximum event/bar availability. The binary plan is an optimizer barrier and never loops through events in Python. |
 | `DataFrame.embed_series()` | **`[DuckPD Native]`** | channel-to-column mapping, output label, representation, batch size, null policy | Lazy | Appends a nullable fixed-size `FLOAT[n]` vector without Python row execution. Requires verified fixed-count `Rolling.to_array()` inputs sharing one order/partition contract. Native recipes support channel-major oldest-first flattening, centering, population z-score normalization, optional final unit normalization, and explicit zero-scale behavior. Learned encoders are rejected before execution. |
 | `DataFrame.vector.search_series()` | **`[DuckPD Native]`** | raw channel mapping, vector column, optional representation assertion, exact metric, `k`, distance label, tie-breaker | Lazy | Resolves verified series metadata, freezes raw query observations during planning, applies the native corpus recipe during execution, and runs exact top-k retrieval. Equal-width incompatible spaces fail during planning. |
 | `Session.embed_series_query()` | **`[DuckPD Native]`** | raw channel mapping, representation | Eager | Returns a reusable `EmbeddedSeriesQuery` after applying the same native representation recipe. Invalid, nonfinite, wrong-width, zero-scale, and learned queries fail explicitly. |
@@ -319,8 +320,9 @@ Mapping order is ignored; `SeriesRepresentationSpec.channels` defines vector
 layout. A null input window propagates to a null output by default, while
 `null_policy="error"` aborts. Nonfinite values, null array children, incompatible
 window metadata, and wrong array widths fail rather than changing representation
-identity. Representation metadata survives direct Parquet and session-table
-persistence.
+identity. Event-window `event_id` may be composite for revisions, and source
+observations must be unique on `(by, on)` inside the bounded event intervals.
+Representation metadata survives direct Parquet and session-table persistence.
 
 
 ---

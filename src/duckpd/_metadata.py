@@ -239,6 +239,20 @@ def sort_keys_for_labels(metadata: FrameMetadata, labels: tuple[str, ...]) -> tu
     )
 
 
+def after_event_windows(
+    events: FrameMetadata,
+    columns: tuple[Column, ...],
+) -> FrameMetadata:
+    """Preserve event-row identity and order while adding fixed-grid windows."""
+    result = replace(
+        events,
+        columns=columns,
+        provenance=_after_transform(events.provenance, "event_windows"),
+    )
+    validate_metadata(result)
+    return result
+
+
 def after_join(
     columns: tuple[Column, ...],
     *,

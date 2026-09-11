@@ -1001,20 +1001,20 @@ Exit gate:
 Goal: support news-plus-market-reaction analysis without implying causality or
 introducing a joint multimodal model.
 
-- [ ] Add typed fixed-grid `event_windows()` with explicit event/entity keys,
+- [x] Add typed fixed-grid `event_windows()` with explicit event/entity keys,
       bar labeling, availability timestamps, missing-bar policy, and duplicate
       handling.
-- [ ] Preserve optimizer barriers so filters cannot change contributing window
+- [x] Preserve optimizer barriers so filters cannot change contributing window
       rows or move across exact top-k boundaries.
-- [ ] Support exact text-first, reaction-first, and full eligible-set
+- [x] Support exact text-first, reaction-first, and full eligible-set
       late-fusion workflows using stable event observation keys.
-- [ ] Test grid boundaries, revisions, late bars, overlap exclusions,
+- [x] Test grid boundaries, revisions, late bars, overlap exclusions,
       availability cutoffs, and the distinction between exact fusion and
       candidate-limited reranking.
 
 Exit gate:
 
-- [ ] Event windows are complete, ordered, availability-correct, and exact fused
+- [x] Event windows are complete, ordered, availability-correct, and exact fused
       rankings score the full eligible population.
 
 ### Phase 18 — Priority 3: feature-store series declarations
@@ -1171,7 +1171,7 @@ decomposed into independently testable milestones below.
         model-identity hardening, and controlled automatic preparation in Phase 15.
 31. [x] Ship model-free native time-series representations and exact retrieval
         through Phase 16.
-32. [ ] Add availability-correct event windows and exact event-score fusion
+32. [x] Add availability-correct event windows and exact event-score fusion
         through Phase 17.
 33. [ ] Integrate deterministic series representations into the single catalog
         version 1 schema through Phase 18.

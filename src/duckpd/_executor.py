@@ -36,6 +36,7 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     EmbeddingPlan,
+    EventWindowPlan,
     Expression,
     FeatureParquetSource,
     FilterPlan,
@@ -323,6 +324,9 @@ def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
     if isinstance(plan, (JoinPlan, AsOfJoinPlan)):
         yield from _plan_nodes(plan.left)
         yield from _plan_nodes(plan.right)
+    elif isinstance(plan, EventWindowPlan):
+        yield from _plan_nodes(plan.observations)
+        yield from _plan_nodes(plan.events)
     elif isinstance(plan, UnionPlan):
         for input_plan in plan.inputs:
             yield from _plan_nodes(input_plan)
@@ -455,6 +459,30 @@ def _embedding_operations(
                         if column.id in node.text_columns
                     ],
                     "boundary": "arrow_embedding_provider",
+                    "persistence": "lazy",
+                }
+            )
+        elif isinstance(node, EventWindowPlan):
+            observation_labels = {
+                column.id: column.label for column in node.observations.metadata.columns
+            }
+            operations.append(
+                {
+                    "operation": "event_windows",
+                    "backend": "native",
+                    "window": [node.start_offset, node.end_offset],
+                    "length": node.end_offset - node.start_offset,
+                    "pre_aggregation_cardinality": {
+                        "factor": "event_rows",
+                        "multiplier": node.end_offset - node.start_offset,
+                    },
+                    "step_ns": node.step_ns,
+                    "anchor": node.anchor,
+                    "bar_label": node.bar_label,
+                    "incomplete": node.incomplete,
+                    "keys": [observation_labels[column_id] for column_id in node.observation_keys],
+                    "boundary": "duckdb_native_exact_grid",
+                    "channels": [output.label for _, output in node.channels],
                     "persistence": "lazy",
                 }
             )
@@ -713,6 +741,18 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
                 )
             )
             return
+        if isinstance(node, EventWindowPlan):
+            branch_operations = requested | {
+                SourceOperation.JOIN,
+                SourceOperation.WINDOW,
+            }
+            branch_blocked = blocked | {
+                SourceOperation.JOIN,
+                SourceOperation.WINDOW,
+            }
+            visit(node.observations, branch_operations, branch_blocked)
+            visit(node.events, branch_operations, branch_blocked)
+            return
         if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             branch_operations = requested | {SourceOperation.JOIN}
             visit(node.left, branch_operations, blocked)
@@ -785,6 +825,8 @@ def _movement_plans(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
             )
         if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             return (*sources(node.left), *sources(node.right))
+        if isinstance(node, EventWindowPlan):
+            return (*sources(node.observations), *sources(node.events))
         if isinstance(node, UnionPlan):
             return tuple(item for child in node.inputs for item in sources(child))
         return sources(node.input)
@@ -811,6 +853,28 @@ def _movement_plans(plan: LogicalPlan) -> tuple[dict[str, object], ...]:
                 )
             visit(node.left)
             visit(node.right)
+        elif isinstance(node, EventWindowPlan):
+            observations = sources(node.observations)
+            events = sources(node.events)
+            if set(observations) != set(events):
+                movements.append(
+                    {
+                        "kind": "cross_source_event_windows",
+                        "strategy": "stream_inputs_to_duckdb",
+                        "observations": [
+                            {"kind": kind, "locations": list(locations)}
+                            for kind, locations in observations
+                        ],
+                        "events": [
+                            {"kind": kind, "locations": list(locations)}
+                            for kind, locations in events
+                        ],
+                        "estimated_transfer_bytes": None,
+                        "materializes_in_python": False,
+                    }
+                )
+            visit(node.observations)
+            visit(node.events)
         elif isinstance(node, UnionPlan):
             for item in node.inputs:
                 visit(item)
@@ -1077,6 +1141,8 @@ class Executor:
             left_dtypes = self._pandas_dtypes(plan.left)
             right_dtypes = self._pandas_dtypes(plan.right)
             return {**left_dtypes, **right_dtypes}
+        if isinstance(plan, EventWindowPlan):
+            return self._pandas_dtypes(plan.events)
         if isinstance(plan, UnionPlan):
             nullable_labels: set[str] = set()
             for input_plan in plan.inputs:
@@ -1311,6 +1377,10 @@ class Executor:
             if isinstance(p, (JoinPlan, AsOfJoinPlan)):
                 _walk(p.left)
                 _walk(p.right)
+                return
+            if isinstance(p, EventWindowPlan):
+                _walk(p.observations)
+                _walk(p.events)
                 return
             for inp in p.inputs:
                 _walk(inp)
@@ -1629,6 +1699,7 @@ class Executor:
             AggregatePlan,
             JoinPlan,
             AsOfJoinPlan,
+            EventWindowPlan,
             LocIndexPlan,
             VectorSearchPlan,
             EmbeddingPlan,
@@ -1852,6 +1923,10 @@ class Executor:
             self._validate_execution(plan.right)
             if plan.validate and plan.validate not in {"m:m", "many_to_many"}:
                 self._validate_join(plan)
+            return
+        if isinstance(plan, EventWindowPlan):
+            self._validate_execution(plan.observations)
+            self._validate_execution(plan.events)
             return
         if isinstance(plan, UnionPlan):
             for input_plan in plan.inputs:

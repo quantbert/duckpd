@@ -88,6 +88,7 @@ if TYPE_CHECKING:
         NullTextPolicy,
         SemanticMethods,
     )
+    from duckpd.event_windows import EventAnchor, IncompleteEventWindowPolicy
     from duckpd.groupby import DataFrameGroupBy
     from duckpd.indexing import ILocIndexer, LocIndexer
     from duckpd.series import Series
@@ -210,6 +211,48 @@ class DataFrame:
             representation=representation,
             batch_size=batch_size,
             null_policy=null_policy,
+        )
+
+    def event_windows(
+        self,
+        events: DataFrame,
+        *,
+        on: str,
+        bar_label: Literal["start"],
+        event_on: str,
+        by: str | Sequence[str],
+        event_id: str | Sequence[str],
+        columns: Mapping[str, str],
+        window: tuple[int, int],
+        step: str,
+        anchor: EventAnchor,
+        available_at: str,
+        event_available_at: str,
+        incomplete: IncompleteEventWindowPolicy = "null",
+        metadata_prefix: str = "window",
+    ) -> DataFrame:
+        """Build exact fixed-grid observation arrays for each event row."""
+        from duckpd.event_windows import plan_event_windows
+
+        return DataFrame(
+            self._session,
+            plan_event_windows(
+                self,
+                events,
+                on=on,
+                bar_label=bar_label,
+                event_on=event_on,
+                by=by,
+                event_id=event_id,
+                columns=columns,
+                window=window,
+                step=step,
+                anchor=anchor,
+                available_at=available_at,
+                event_available_at=event_available_at,
+                incomplete=incomplete,
+                metadata_prefix=metadata_prefix,
+            ),
         )
 
     def collect(self) -> pd.DataFrame:

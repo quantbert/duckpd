@@ -19,6 +19,7 @@ from duckpd._logical import (
     ColumnId,
     ColumnRef,
     CsvSource,
+    EventWindowPlan,
     Expression,
     FeatureParquetSource,
     FilterPlan,
@@ -231,6 +232,12 @@ def _rewrite_tree(plan: LogicalPlan, local: Rewrite) -> LogicalPlan:
             left=_rewrite_tree(plan.left, local),
             right=_rewrite_tree(plan.right, local),
         )
+    elif isinstance(plan, EventWindowPlan):
+        rewritten = replace(
+            plan,
+            observations=_rewrite_tree(plan.observations, local),
+            events=_rewrite_tree(plan.events, local),
+        )
     elif isinstance(plan, UnionPlan):
         rewritten = replace(
             plan,
@@ -437,6 +444,9 @@ def _common_subplan_recommendations(
         if isinstance(node, (JoinPlan, AsOfJoinPlan)):
             visit(node.left)
             visit(node.right)
+        elif isinstance(node, EventWindowPlan):
+            visit(node.observations)
+            visit(node.events)
         elif isinstance(node, UnionPlan):
             for item in node.inputs:
                 visit(item)

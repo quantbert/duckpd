@@ -10,6 +10,12 @@ the [release policy](RELEASES.md).
 
 ### Added
 
+- Typed `DataFrame.event_windows()` constructs lazy exact fixed-grid arrays for
+  event rows with explicit entity and revision-safe event keys, UTC floor/ceil
+  anchoring, missing-slot policy, availability propagation, bounded source
+  validation, optimizer barriers, and native DuckDB lowering. The resulting
+  fixed-grid metadata composes with native series representations for
+  reaction-first retrieval and full eligible-set text/reaction late fusion.
 - Native `DataFrame.embed_series()` appends lazy `FLOAT[n]` representations
   from verified fixed-count series windows, with representation-declared
   channel ordering, centering or population z-score normalization, optional

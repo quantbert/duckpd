@@ -305,9 +305,99 @@ or synthesize missing history.
 not prove those observations are equally spaced in wall-clock time. A nominal
 `step` documents expected cadence but does not fill gaps or validate a grid.
 
-Use upstream data preparation to establish a regular grid when elapsed-time
-comparability matters. Fully verified fixed-grid and event-window construction
-is part of the future time-series roadmap.
+Use `event_windows()` when elapsed-time comparability must be enforced rather
+than assumed. It validates a UTC epoch grid and retains missing slots as an
+incomplete window instead of compressing the next available observations.
+
+### Build event-aligned fixed-grid windows
+
+`DataFrame.event_windows()` pairs an observation frame with event rows through
+explicit entity and event-observation keys:
+
+```python
+reactions = prices.event_windows(
+    news,
+    on="bar_start",
+    bar_label="start",
+    event_on="published_at",
+    by="ticker",
+    event_id=("event_observation_id", "revision"),
+    columns={
+        "return_window": "return_1m",
+        "volatility_window": "abs_return_1m",
+    },
+    window=(0, 60),
+    step="PT1M",
+    anchor="ceil",
+    available_at="bar_available_at",
+    event_available_at="news_available_at",
+    incomplete="null",
+    metadata_prefix="reaction",
+)
+```
+
+The receiver supplies numeric observations. The result retains every event
+column, appends one `FLOAT[60]` array per mapping entry, and adds
+`reaction_window_start`, `reaction_window_end`, `reaction_window_count`,
+`reaction_window_complete`, and `reaction_window_available_at`.
+
+The grid is anchored to the Unix epoch in UTC. For offsets `[a, b)` and cadence
+`s`, DuckPD selects the exact timestamps `anchor_time + j * s` for every integer
+`j` in that interval. `floor` anchors at or before the event; `ceil` anchors at
+or after it, with both choosing the event timestamp when it is exactly on-grid.
+`bar_label="start"` is currently required, and each bar's availability must be
+at or after its complete bar end.
+
+Missing bars never cause a nearest-time match, forward fill, or compressed
+array. With `incomplete="null"`, the event row remains but every requested array
+and its window availability are null. With `"error"`, collection fails. Null or
+nonfinite values, off-grid rows inside the bounded event intervals, duplicate
+`(by, on)` observations, null keys, and duplicate `event_id` values are errors.
+Use a composite `event_id` when revisions are distinct observations.
+
+For a complete window, availability is:
+
+```text
+max(event_available_at, available_at for every required bar)
+```
+
+Filtering event rows before extraction is allowed. Filtering observation rows
+before extraction changes completeness. Output eligibility filters remain above
+the event-window optimizer barrier, so an availability cutoff cannot truncate
+the source history needed to build a window.
+
+The result's fixed-grid metadata composes directly with `embed_series()` by
+using a representation with the same window length and `step`:
+
+```python
+reaction_space = pd.series_representation(
+    window=60,
+    channels=("simple_return", "volatility"),
+    sampling="fixed_grid",
+    step="PT1M",
+    data_contract="market/reaction/v1",
+    normalization="center",
+    unit_norm=True,
+)
+
+event_bank = reactions.embed_series(
+    columns={
+        "simple_return": "return_window",
+        "volatility": "volatility_window",
+    },
+    into="reaction_vector",
+    representation=reaction_space,
+)
+```
+
+Text-first retrieval searches news before inspecting reactions. Reaction-first
+retrieval searches `reaction_vector` and keeps the event key for the news join.
+For exact late fusion, filter the full eligible event bank, compute both
+distances with `vector.distance()`, combine them under an explicit scoring rule,
+and only then apply `nsmallest()`. Searching one modality first and reranking
+that bounded result is candidate-limited; it is not an exact ranking of the
+combined score over the full eligible population. Exclude the query event and
+application-defined overlapping observations explicitly.
 
 ### Place filters relative to history and retrieval
 
@@ -465,6 +555,8 @@ transaction-cost assumptions, and a separately defined target.
 The following behavior is implemented now:
 
 - Fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` windows.
+- Exact UTC fixed-grid `DataFrame.event_windows()` with explicit entity,
+  event-identity, availability, duplicate, and missing-slot contracts.
 - Native `DataFrame.embed_series()` with `none`, `center`, or population
   `zscore` normalization and optional final unit normalization.
 - `SeriesRepresentationSpec`, representation fingerprints, and
@@ -476,16 +568,18 @@ The following behavior is implemented now:
 - Exact cosine, L2, and negative-inner-product retrieval.
 - Representation metadata preservation for supported projections, joins,
   local Parquet sidecars, and session-owned tables.
+- Exact text-first, reaction-first, and full eligible-set late fusion through
+  ordinary filters, typed distances, joins, and deterministic `nsmallest()`.
 
 The following behavior is not implemented yet:
 
 - Learned series-model preparation or inference.
 - A public `SeriesEmbeddingProvider` lifecycle.
 - Learned-query encoding through `search_series()`.
-- General verified fixed-grid rolling windows and event-aligned windows.
+- General verified fixed-grid rolling windows outside event alignment.
 - Feature-store declarations for series representations.
 - Automatic or general approximate series search.
-- Joint text-to-time-series retrieval.
+- A joint multimodal model or shared text-to-series representation space.
 
 `series_embedding_model()` already creates a side-effect-free learned-model
 specification so representation identity can stabilize before runtime support.
@@ -698,6 +792,7 @@ reference rather than a production commitment.
 
 - [Time-series embeddings and event similarity design](../design/time-series-embeddings.md)
 - [Implementation roadmap](../roadmap.md#phase-16--priority-1-native-time-series-representations)
+- [Event-window implementation roadmap](../roadmap.md#phase-17--priority-2-event-windows-and-exact-event-similarity)
 - [Vector search and text embeddings](vector-search-and-embeddings.md)
 - [API compatibility and semantic guide](../COMPATIBILITY.md#11-native-time-series-representations)
 - [Time-series notebook](../../demo/DuckPD_Time_Series_Embeddings.ipynb)
