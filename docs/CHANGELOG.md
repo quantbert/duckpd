@@ -16,6 +16,9 @@ the [release policy](RELEASES.md).
   validation, optimizer barriers, and native DuckDB lowering. The resulting
   fixed-grid metadata composes with native series representations for
   reaction-first retrieval and full eligible-set text/reaction late fusion.
+- A dedicated offline event-window notebook demonstrates grid boundaries,
+  revisions, late-bar cutoffs, incomplete windows, reaction-first retrieval,
+  overlap exclusion, and exact late fusion versus candidate-limited reranking.
 - Native `DataFrame.embed_series()` appends lazy `FLOAT[n]` representations
   from verified fixed-count series windows, with representation-declared
   channel ordering, centering or population z-score normalization, optional

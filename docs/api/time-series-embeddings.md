@@ -9,8 +9,10 @@ or run a learned model. Optional learned encoders are planned, but they will use
 the same window, representation, metadata, and retrieval contracts described in
 this guide.
 
-The complete runnable walkthrough is
-[`DuckPD_Time_Series_Embeddings.ipynb`](../../demo/DuckPD_Time_Series_Embeddings.ipynb).
+The rolling-window walkthrough is
+[`DuckPD_Time_Series_Embeddings.ipynb`](../../demo/DuckPD_Time_Series_Embeddings.ipynb);
+the dedicated event workflow is
+[`DuckPD_Event_Windows_and_Exact_Fusion.ipynb`](../../demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb).
 The lower-level architecture and proposed extensions are documented in the
 [time-series embedding design](../design/time-series-embeddings.md).
 
@@ -795,6 +797,7 @@ reference rather than a production commitment.
 - [Event-window implementation roadmap](../roadmap.md#phase-17--priority-2-event-windows-and-exact-event-similarity)
 - [Vector search and text embeddings](vector-search-and-embeddings.md)
 - [API compatibility and semantic guide](../COMPATIBILITY.md#11-native-time-series-representations)
+- [Event-window and exact-fusion notebook](../../demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb)
 - [Time-series notebook](../../demo/DuckPD_Time_Series_Embeddings.ipynb)
 - [Scripted time-series example](../../demo/time_series_embeddings.py)
 

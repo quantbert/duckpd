@@ -341,6 +341,8 @@ Check out the runnable tutorials and interactive notebooks in [demo/](demo/READM
 * 📈 [`demo/DuckPD_Features_Walkthrough.ipynb`](demo/DuckPD_Features_Walkthrough.ipynb) — Deep-dive across 3.9M rows of AlphaDojo stock news data.
 * 🔬 [`demo/DuckPD_Order_Index_Window_Workflows.ipynb`](demo/DuckPD_Order_Index_Window_Workflows.ipynb) — Differential walkthrough of rolling windows, `.loc`/`.iloc` mechanics, and persistence.
 * ⏱️ [`demo/DuckPD_Temporal_and_Categorical_Semantics.ipynb`](demo/DuckPD_Temporal_and_Categorical_Semantics.ipynb) — Fixed-duration rolling windows, `.dt` rounding & timezone conversions, and categorical semantics with `groupby(observed=False)`.
+* [`demo/DuckPD_Time_Series_Embeddings.ipynb`](demo/DuckPD_Time_Series_Embeddings.ipynb) — Native fixed-count series representations and exact reaction retrieval.
+* [`demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb`](demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb) — Exact event grids, availability cutoffs, revision-safe keys, and full-population late fusion.
 
 Runnable pipelines:
 ```bash

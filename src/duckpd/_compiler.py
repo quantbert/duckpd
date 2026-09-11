@@ -1529,13 +1529,10 @@ class DuckDBCompiler:
                 f"THEN error({incomplete_error}) "
             )
 
-        def checked(expression: str) -> str:
-            return f"CASE {validation_cases}ELSE {expression} END"
-
         output_expressions: list[str] = []
         output_bindings: dict[ColumnId, str] = {}
         for column in plan.events.columns:
-            expression = checked(f"a.{quote_identifier(event_bindings[column.id])}")
+            expression = f"a.{quote_identifier(event_bindings[column.id])}"
             output_expressions.append(f"{expression} AS {quote_identifier(column.label)}")
             output_bindings[column.id] = column.label
 
@@ -1544,8 +1541,10 @@ class DuckDBCompiler:
             values = f"a.{quote_identifier(channel_lists[output.id])}"
             represented = f"CAST({values} AS {output.duckdb_type})"
             if plan.incomplete == "null":
-                represented = f"CASE WHEN {complete} THEN {represented} ELSE NULL END"
-            output_expressions.append(f"{checked(represented)} AS {quote_identifier(output.label)}")
+                represented = (
+                    f"list_extract([{represented}], CASE WHEN {complete} THEN 1 ELSE 2 END)"
+                )
+            output_expressions.append(f"{represented} AS {quote_identifier(output.label)}")
             output_bindings[output.id] = output.label
 
         metadata_values = (
@@ -1569,13 +1568,14 @@ class DuckDBCompiler:
             ),
         )
         for column, expression in metadata_values:
-            output_expressions.append(f"{checked(expression)} AS {quote_identifier(column.label)}")
+            output_expressions.append(f"{expression} AS {quote_identifier(column.label)}")
             output_bindings[column.id] = column.label
 
         query += (
             f"SELECT {', '.join(output_expressions)} "
             "FROM __duckpd_aggregated AS a "
             "CROSS JOIN __duckpd_observation_validation AS v "
+            f"WHERE CASE {validation_cases}ELSE TRUE END "
             "ORDER BY a.__duckpd_event_row"
         )
         return CompiledFrame(self._session._connection.sql(query), output_bindings)

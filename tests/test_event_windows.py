@@ -157,7 +157,7 @@ def test_event_windows_enforce_bounded_source_contracts() -> None:
         """
     )
     with pytest.raises(MaterializationError):
-        _windows(off_grid, one_event, window=(-1, 1)).collect()
+        _windows(off_grid, one_event, window=(-1, 1))[["event_id"]].collect()
 
     early_availability = session.sql(
         """
@@ -360,16 +360,18 @@ def test_late_bar_availability_survives_output_cutoff_filter() -> None:
     assert eligible["window_window_available_at"].tolist() == [pd.Timestamp("2024-01-01 12:03:00")]
 
 
-def test_composite_event_identity_preserves_revisions() -> None:
+def test_composite_event_identity_preserves_revisions_and_incomplete_rows() -> None:
     session, observations, _ = _source_frames()
     revisions = session.sql(
         """
         SELECT * FROM (VALUES
           (10, 1, 'A', TIMESTAMP '2024-01-01 12:02:30',
-           TIMESTAMP '2024-01-01 12:02:31'),
+           TIMESTAMP '2024-01-01 12:02:31', 'initial'),
           (10, 2, 'A', TIMESTAMP '2024-01-01 12:02:30',
-           TIMESTAMP '2024-01-01 12:04:00')
-        ) AS t(event_id, revision, symbol, event_time, event_available_at)
+           TIMESTAMP '2024-01-01 12:04:00', 'corrected'),
+          (30, 1, 'A', TIMESTAMP '2024-01-01 12:05:30',
+           TIMESTAMP '2024-01-01 12:05:31', 'incomplete')
+        ) AS t(event_id, revision, symbol, event_time, event_available_at, headline)
         """
     )
 
@@ -388,11 +390,17 @@ def test_composite_event_identity_preserves_revisions() -> None:
         event_available_at="event_available_at",
     ).collect()
 
-    assert windows[["event_id", "revision"]].values.tolist() == [[10, 1], [10, 2]]
-    assert windows["window_window_available_at"].tolist() == [
+    assert windows[["event_id", "revision"]].values.tolist() == [
+        [10, 1],
+        [10, 2],
+        [30, 1],
+    ]
+    assert windows["window_window_available_at"].tolist()[:2] == [
         pd.Timestamp("2024-01-01 12:03:00"),
         pd.Timestamp("2024-01-01 12:04:00"),
     ]
+    assert pd.isna(windows.loc[2, "window_window_available_at"])
+    assert windows.loc[2, "ret_window"] is pd.NA
 
 
 def test_exact_late_fusion_scores_full_eligible_set() -> None:

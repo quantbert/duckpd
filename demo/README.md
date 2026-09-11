@@ -102,6 +102,11 @@ request that device explicitly and fail rather than falling back to CPU.
   order, grouped fixed-count arrays, native `embed_series()` normalization,
   raw-window `search_series()`, reusable `Session.embed_series_query()` values,
   incompatible-space rejection, and metadata-preserving Parquet persistence.
+- `DuckPD_Event_Windows_and_Exact_Fusion.ipynb` is a self-contained offline
+  walkthrough of exact UTC event grids, revision-safe event keys, late-bar
+  availability, incomplete-window handling, native reaction retrieval, explicit
+  overlap exclusion, and full-population late fusion versus candidate-limited
+  text-first reranking.
 - `DuckPD_Vector_Search.ipynb` is an interactive GPU tutorial demonstrating
   explicit `TransformersEmbeddingProvider` registration, pinned PyTorch model
   preparation, lazy remote Parquet streaming, in-engine batch embedding via
