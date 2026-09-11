@@ -486,6 +486,20 @@ and validated, not free-form options that change inference without changing the
 fingerprint. A model with internal normalization is not assumed to preserve
 absolute volatility simply because the outer recipe uses `"none"`.
 
+Forecasting foundation models distinguish target variates, past-only
+covariates, known-future covariates, and sometimes static covariates. The
+current `input_channels` tuple records order but not these roles. Before a
+Chronos-2 or TimesFM 3 adapter ships, the learned specification must gain a
+canonical ordered input-schema contract that records each channel's role,
+numeric or categorical encoding, availability rule, and whether future values
+are consumed. Corpus and query representations must enforce the same schema.
+
+Historical representations may consume only values available at the
+representation endpoint. Known-future calendar or schedule values are valid
+only when they were genuinely known then; revised observations or future market
+values are not. An adapter must not turn today's completed dataset into implicit
+look-ahead information.
+
 ### Query representation and exact retrieval
 
 A raw series query is a mapping of channel names to finite sequences. Its values
@@ -1569,17 +1583,18 @@ priorities; they are not retrieval-quality benchmarks on financial data.
 | Candidate | Verified interface or characteristic | Proposed treatment |
 | --- | --- | --- |
 | Native ordered vectors | Deterministic recipe defined here; no pretrained model | Required baseline and first release |
-| MOMENT | Explicit `embed()` returns representations; current implementation normalizes inputs internally and can average channels/patches | First built-in learned candidate, subject to context, masks, channel preservation, licensing, and task qualification |
+| Chronos-2 | Public multivariate `embed()` returns `(n_variates, num_patches + 2, d_model)` states with cross-variate information; `predict()` separately supports past and known-future covariates | Primary embedding-adapter candidate; pin variate/patch pooling and define how semantic covariate roles map into the embedding input |
+| TimesFM 3.0 | Targets, past-only covariates, and past/future covariates are mixed by variate attention; auxiliary transformer states exist below the public forecasting API | Primary covariate-aware research candidate; requires a pinned internal extraction adapter and weights with suitable usage rights |
+| MOMENT | Explicit `embed()` returns representations; current implementation normalizes inputs internally and can average channels/patches | Custom-provider and benchmark candidate, subject to context, masks, channel preservation, licensing, and task qualification |
 | TS2Vec | Explicit `encode()` supports full-series and other pooled representations | Support through the custom-provider contract; suitable for a separately trained/checkpointed encoder |
 | PatchTST | Official self-supervised implementation exposes an encoder architecture | Experimental adapter needs an exact checkpoint, extraction location, channel policy, and pooling contract |
 | Original Chronos-T5 | `ChronosPipeline.embed()` explicitly returns encoder states and tokenizer state | Valid experimental representation candidate; pool states with explicit padding/EOS handling and scale policy |
-| TimesFM 3.0 | Current official documentation is forecasting-first; released weights have a non-commercial license | Not the default production encoder; a qualified embedding adapter and compatible usage rights are separate requirements |
 | TRACE | Explicit time-series/text alignment and retrieval research workflow | Later shared-space research, not a baseline finance-ready provider |
 
 Sources: [MOMENT embedding implementation][model-moment], [TS2Vec encoder][model-ts2vec],
 [PatchTST self-supervised source][model-patchtst], [Chronos embedding implementation][model-chronos],
 [TimesFM official README][model-timesfm], [TimesFM 3.0 model card][model-timesfm-card],
-and [TRACE implementation][model-trace]. Model-source review date is 2026-09-07;
+and [TRACE implementation][model-trace]. Model-source review date is 2026-09-10;
 provider releases must pin their own immutable revisions rather than depend on
 these moving reference branches.
 
@@ -1591,11 +1606,16 @@ Important distinctions:
   multichannel feature family. A channel-preserving alternative changes the
   representation and potentially its dimension; specify it rather than assuming
   every `embed()` output is interchangeable.
-- Chronos-T5's explicit embedding method is different from accessing an arbitrary
-  forecasting model's hidden states. Its output is still a sequence of states,
-  not a prequalified fixed-length financial retrieval vector. Do not generalize
-  this particular method contract to Chronos-Bolt or Chronos-2 without inspecting
-  their own implementations.
+- Chronos-2's `embed()` accepts multivariate tensors and shares information
+  across variates, but it does not accept the named past/future-covariate input
+  dictionaries used by `predict()`. Its output is a variate-by-patch state tensor,
+  not a prequalified fixed-length retrieval vector. Pooling and channel-role
+  mapping belong to the adapter identity.
+- TimesFM 3 exposes multivariate and covariate-aware forecasting, and its model
+  has auxiliary transformer states, but its public forecaster has no fixed-vector
+  embedding API. An adapter must pin the internal extraction surface as well as
+  pooling. The released 3.0 weights are non-commercial and unsuitable as a
+  default production dependency under their current license.
 - Forecasting benchmarks are not evidence of nearest-neighbor relevance for
   price-shape or news-reaction matching. No "best model" claim is made here.
 
@@ -1606,11 +1626,11 @@ input length/channels, all internal normalization, mask/padding semantics, pooli
 output dimension, CPU/memory behavior, determinism tolerances, and retrieval
 benchmark results against native baselines.
 
-The first built-in MOMENT adapter should support only a context length actually
-qualified with its checkpoint. Do not copy a guessed embedding dimension or
-assume an arbitrary 60-sample input is supported because the desired user window
-has that length. Until qualified, the stable release can contain only native
-encoding plus a custom-provider protocol.
+The first built-in adapter should be selected between Chronos-2 and TimesFM 3
+only after a retrieval benchmark and licensing review. Do not copy a guessed
+embedding dimension or assume an arbitrary 60-sample input is supported because
+the desired user window has that length. Until qualified, the stable release can
+contain only native encoding plus a custom-provider protocol.
 
 ## Test plan
 
@@ -1769,9 +1789,10 @@ catalog call generates or refreshes corpus embeddings.
 ### Phase 4: optional learned inference
 
 Implement the provider lifecycle and Arrow execution path with custom providers,
-then qualify one built-in adapter, initially MOMENT if it passes. Include exact
-asset pinning, runtime isolation, mask/context/channel semantics, and benchmark
-reports. Add TS2Vec or other adapters without changing the DataFrame/search API.
+then evaluate Chronos-2 and TimesFM 3 as the first built-in adapters. Include
+exact asset pinning, runtime isolation, target/covariate roles,
+mask/context/channel semantics, pooling, licensing, and benchmark reports. Add
+MOMENT, TS2Vec, or other adapters without changing the DataFrame/search API.
 
 **Exit gate:** bounded provider calls, deterministic query/corpus agreement,
 accurate resource reporting, no hidden normalization, and a documented retrieval
@@ -1844,8 +1865,9 @@ implementation-specific links are attached to their corresponding sections above
 
 ### Model and database sources
 
-Primary implementation references are [MOMENT][model-moment], [TS2Vec][model-ts2vec],
-[PatchTST][model-patchtst], [Chronos][model-chronos], [TimesFM][model-timesfm], and
+Primary implementation references are [Chronos-2][model-chronos2],
+[TimesFM 3][model-timesfm3], [MOMENT][model-moment], [TS2Vec][model-ts2vec],
+[PatchTST][model-patchtst], [original Chronos][model-chronos], and
 [TRACE][model-trace]. The [TimesFM model card][model-timesfm-card] records its
 checkpoint license. Native lowering relies on documented [window][duckdb-windows]
 and [array][duckdb-arrays] operations; actual adapter/runtime revisions must be
@@ -1855,7 +1877,9 @@ pinned during implementation qualification.
 [model-ts2vec]: https://github.com/zhihanyue/ts2vec/blob/main/ts2vec.py
 [model-patchtst]: https://github.com/yuqinie98/PatchTST/blob/main/PatchTST_self_supervised/src/models/patchTST.py
 [model-chronos]: https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos.py
+[model-chronos2]: https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos2/pipeline.py
 [model-timesfm]: https://github.com/google-research/timesfm/blob/master/README.md
+[model-timesfm3]: https://github.com/google-research/timesfm/blob/master/src/timesfm3/torch/model.py
 [model-timesfm-card]: https://huggingface.co/google/timesfm-3.0-pytorch
 [model-trace]: https://github.com/Graph-and-Geometric-Learning/TRACE-Multimodal-TSEncoder
 [duckdb-windows]: https://duckdb.org/docs/stable/sql/functions/window_functions.html

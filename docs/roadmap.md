@@ -1046,11 +1046,12 @@ Goal: add learned inference only after the native representation and retrieval
 contracts are stable and independently useful.
 
 - [ ] Add a session-owned `SeriesEmbeddingProvider` lifecycle with explicit
-      preparation, bounded Arrow batches, masks, channel order, context length,
-      and output validation.
-- [ ] Qualify one immutable built-in checkpoint only if a reviewed retrieval
-      benchmark demonstrates value over native representations for a named
-      task; do not block native release on this result.
+      preparation, bounded Arrow batches, masks, ordered target/past-only/
+      known-future covariate roles, context length, pooling, and output validation.
+- [ ] Evaluate immutable Chronos-2 and TimesFM 3 adapters; qualify a built-in
+      checkpoint only if its license permits the intended use and a reviewed
+      retrieval benchmark demonstrates value over native representations for a
+      named task. Do not block native release on this result.
 - [ ] Record preparation, inference, memory, and cache metrics without hidden
       normalization, device fallback, or planning-time downloads.
 - [ ] Add further adapters without changing the DataFrame, typed-query, or exact

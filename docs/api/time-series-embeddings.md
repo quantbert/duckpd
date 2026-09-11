@@ -527,6 +527,32 @@ features, sampling, outer normalization, internal model normalization, channel
 order, context length, masks, pooling, output normalization, checkpoint, and
 adapter behavior all affect compatibility and must participate in identity.
 
+### Targets, variates, and covariates
+
+Chronos-2 and TimesFM 3 make a distinction that the native representation does
+not need:
+
+- **Target variates** are the series the forecasting model would predict.
+- **Past-only covariates** are observed through the representation endpoint but
+  are not known afterward.
+- **Known-future covariates** are available for both the context and forecast
+  horizon, such as a calendar or a published schedule.
+- **Static covariates** describe the entity rather than varying by timestamp.
+
+For native DuckPD representations, all numeric channels are simply ordered
+inputs to one deterministic vector. For a learned forecasting-model adapter,
+channel role can change attention, masking, normalization, and output. The
+future contract must therefore record more than `input_channels`: it needs an
+ordered input schema containing each channel's role, dtype or categorical
+encoding, availability rule, and whether future values are consumed.
+
+This distinction also prevents leakage. A historical window representation may
+only consume values that were available at its endpoint. A known-future
+calendar value can be valid if it was genuinely known then; a revised economic
+observation or future market value cannot be included merely because it exists
+in today's dataset. Corpus and query adapters must apply the same availability
+contract.
+
 ### Planned execution model
 
 The intended implementation follows the proven text-embedding lifecycle while
@@ -569,17 +595,37 @@ financial retrieval quality.
 
 | Candidate | Relevant capability | Main qualification questions |
 | --- | --- | --- |
+| [Chronos-2][chronos2] | Public multivariate `embed()` returns per-variate, per-patch encoder states; forecasting supports past and known-future covariates | Which patch/token and variate pooling produces one retrieval vector? Should covariates enter as ordinary variates or through a lower-level adapter? How are channel roles and availability recorded? |
+| [TimesFM 3][timesfm] | Native multivariate forecasting with past-only and past-and-future covariates mixed through variate attention | There is no public fixed-vector embedding API. Which pinned transformer output and pooling are stable enough for an adapter? Can restricted pretrained weights be used in the intended deployment? |
 | [MOMENT][moment] | Exposes an embedding path for pretrained time-series models | Does internal normalization match the task? Are channels averaged? Which context lengths, masks, and checkpoint license are supported? |
 | [TS2Vec][ts2vec] | Contrastive encoder with full-series and temporal representations | Which training checkpoint is used? How are variable lengths pooled? Does a generic checkpoint transfer to the target domain? |
 | [PatchTST][patchtst] | Patch-based self-supervised encoder architecture | Which hidden layer and pooling define the vector? How are channels represented? Is the exact checkpoint reproducible? |
-| [Chronos-T5][chronos] | Original pipeline exposes encoder states through an embedding method | How are tokenizer scale, padding, EOS state, and sequence pooling fixed? Does forecasting pretraining help retrieval? |
-| [TimesFM][timesfm] | Large pretrained forecasting model family | Is there a supported embedding contract, and are model license and deployment terms suitable? Forecasting quality alone is insufficient. |
+| [Original Chronos-T5][chronos] | Public `embed()` exposes univariate encoder states and tokenizer scale | How are padding, EOS state, and sequence pooling fixed? Is there any advantage over Chronos-2 for the target retrieval task? |
 | [TRACE][trace] | Research on aligned text and time-series representations | Can alignment generalize to held-out financial events without leakage? What shared-space metadata and evaluation are required? |
 
-The initial built-in candidate is expected to be MOMENT only if a pinned
-checkpoint and reviewed adapter pass qualification. Custom-provider support can
-allow TS2Vec, PatchTST, or application-trained encoders without coupling the
-DataFrame API to one model family.
+Chronos-2 and TimesFM 3 are the primary adapter candidates because both model
+multiple variates and covariates jointly. Chronos-2 is the more direct first
+embedding experiment: its public `embed()` accepts multivariate arrays and
+returns states shaped `(n_variates, num_patches + 2, d_model)`, with information
+shared across variates. It does not, however, return one database-ready vector,
+and that embedding entry point does not accept the named past/future-covariate
+dictionaries supported by `predict()`. DuckPD must pin a pooling rule and decide
+how semantic channel roles map to the multivariate embedding input.
+
+TimesFM 3 is especially relevant for covariate-aware representations because it
+stacks targets, past-only covariates, and past/future covariates and mixes them
+with variate attention. Its PyTorch model can expose an internal transformer
+output shaped by variate and patch, but the public forecaster currently exposes
+forecasts rather than a stable embedding method. A TimesFM adapter would
+therefore pin an internal extraction point, pooling, preprocessing, and package
+revision as part of `adapter_revision`. TimesFM 3 pretrained weights currently
+use the TimesFM Non-Commercial License v1.0, so they cannot be the default for
+commercial or production use unless licensing changes or suitable weights are
+provided.
+
+MOMENT, TS2Vec, PatchTST, and application-trained encoders remain useful
+custom-provider and benchmark candidates. The DataFrame API should not depend
+on one model family.
 
 ### Qualification requirements
 
@@ -650,5 +696,6 @@ reference rather than a production commitment.
 [ts2vec]: https://github.com/zhihanyue/ts2vec
 [patchtst]: https://github.com/yuqinie98/PatchTST
 [chronos]: https://github.com/amazon-science/chronos-forecasting
+[chronos2]: https://huggingface.co/amazon/chronos-2
 [timesfm]: https://github.com/google-research/timesfm
 [trace]: https://github.com/Graph-and-Geometric-Learning/TRACE-Multimodal-TSEncoder
