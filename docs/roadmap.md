@@ -982,17 +982,17 @@ vector engine before evaluating learned encoders.
       contracts.
 - [x] Add native `DataFrame.embed_series()` for declared centering,
       normalization, channel ordering, flattening, and zero-scale policy.
-- [ ] Add exact `search_series()` and typed-query support in vector distance and
+- [x] Add exact `search_series()` and typed-query support in vector distance and
       search, rejecting equal-dimension but incompatible representation spaces.
 - [x] Persist and restore series metadata for local Parquet and session-owned
       tables; keep planning free of full-file integrity scans.
-- [ ] Differential-test ordered windows and exact retrieval against independent
+- [x] Differential-test ordered windows and exact retrieval against independent
       array and brute-force distance oracles; prove direct sinks avoid pandas
       materialization.
 
 Exit gate:
 
-- [ ] Native source and query representations agree within declared float
+- [x] Native source and query representations agree within declared float
       tolerances, incompatible spaces fail before retrieval, and filter/history
       semantics are explicit.
 
@@ -1169,7 +1169,7 @@ decomposed into independently testable milestones below.
         corpus through the completed Phase 14 accelerator and dataset milestones.
 30. [x] Complete feature-store text embedding metadata, inferred model lookup,
         model-identity hardening, and controlled automatic preparation in Phase 15.
-31. [ ] Ship model-free native time-series representations and exact retrieval
+31. [x] Ship model-free native time-series representations and exact retrieval
         through Phase 16.
 32. [ ] Add availability-correct event windows and exact event-score fusion
         through Phase 17.

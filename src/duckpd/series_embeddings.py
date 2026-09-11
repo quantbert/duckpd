@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from math import isfinite
+from decimal import Decimal
+from math import fsum, isfinite, sqrt
 from typing import TYPE_CHECKING, Literal, cast
 
 from duckpd._temporal import fixed_duration_ns
@@ -304,6 +306,104 @@ class EmbeddedSeriesQuery:
             or _SHA256.fullmatch(self.representation_fingerprint) is None
         ):
             raise ValueError("representation_fingerprint must be a lowercase SHA-256 digest")
+
+
+SeriesQuerySnapshot = tuple[tuple[str, tuple[float, ...]], ...]
+
+
+def snapshot_series_query(
+    query: object,
+    representation: SeriesRepresentationSpec,
+) -> SeriesQuerySnapshot:
+    """Validate and freeze raw channel observations without representing them."""
+    if not isinstance(query, Mapping):
+        raise TypeError("query must be a mapping of channel names to numeric sequences")
+    raw_query = dict(cast("Mapping[object, object]", query))
+    if any(type(channel) is not str or not channel for channel in raw_query):
+        raise TypeError("query keys must be non-empty channel names")
+    expected = set(representation.channels)
+    actual = set(cast("dict[str, object]", raw_query))
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise ValueError(
+            "query must exactly match representation.channels; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    snapshot: list[tuple[str, tuple[float, ...]]] = []
+    for channel in representation.channels:
+        raw_values = raw_query[channel]
+        if isinstance(raw_values, (str, bytes, bytearray)):
+            raise TypeError(f"query channel {channel!r} must be a numeric sequence")
+        try:
+            values = tuple(cast("Sequence[object]", raw_values))
+        except TypeError:
+            raise TypeError(f"query channel {channel!r} must be a numeric sequence") from None
+        if len(values) != representation.window:
+            raise ValueError(
+                f"query channel {channel!r} length {len(values)} does not match "
+                f"representation window {representation.window}"
+            )
+        converted: list[float] = []
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+                raise TypeError(f"query channel {channel!r} must contain only numeric scalars")
+            number = float(value)
+            if not isfinite(number):
+                raise ValueError(f"query channel {channel!r} must contain only finite values")
+            converted.append(number)
+        snapshot.append((channel, tuple(converted)))
+    return tuple(snapshot)
+
+
+def embed_native_series_query(
+    query: SeriesQuerySnapshot,
+    representation: SeriesRepresentationSpec,
+) -> EmbeddedSeriesQuery:
+    """Apply the canonical native corpus recipe to one frozen query."""
+    from duckpd.errors import UnsupportedOperationError
+
+    if representation.encoder is not None:
+        raise UnsupportedOperationError(
+            "Native series query encoding requires a representation with encoder=None"
+        )
+    by_channel = dict(query)
+    flattened: list[float] = []
+    for channel in representation.channels:
+        values = by_channel[channel]
+        if representation.normalization == "none":
+            normalized = values
+        else:
+            mean = fsum(values) / len(values)
+            centered = tuple(value - mean for value in values)
+            if representation.normalization == "center":
+                normalized = centered
+            else:
+                scale = sqrt(fsum(value * value for value in centered) / len(centered))
+                if scale == 0.0:
+                    raise ValueError(
+                        "series query representation has zero scale and cannot be encoded"
+                    )
+                normalized = tuple(value / scale for value in centered)
+        flattened.extend(normalized)
+
+    if representation.unit_norm:
+        norm = sqrt(fsum(value * value for value in flattened))
+        if norm == 0.0:
+            raise ValueError("series query representation has zero norm and cannot be encoded")
+        flattened = [value / norm for value in flattened]
+
+    encoded: list[float] = []
+    for value in flattened:
+        try:
+            float32 = struct.unpack("!f", struct.pack("!f", value))[0]
+        except OverflowError:
+            raise ValueError("series query representation produced a non-finite value") from None
+        if not isfinite(float32):
+            raise ValueError("series query representation produced a non-finite value")
+        encoded.append(float32)
+    return EmbeddedSeriesQuery(tuple(encoded), representation.fingerprint)
 
 
 def series_embedding_model(

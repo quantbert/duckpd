@@ -515,7 +515,7 @@ matches = valid.vector.search_series(
 )
 ```
 
-Proposed signature:
+Signature:
 
 ```text
 DataFrame.vector.search_series(
@@ -538,11 +538,11 @@ for shape, and referenced by an opaque query key. Mutating the caller's list
 later must not alter the plan.
 
 Planning does not run normalization or a model. Execution represents the query
-once for that execution, validates it, and uses existing exact distance/top-k
-semantics. Deterministic cached query encodings may be reused only under the
-complete representation fingerprint and immutable query content; caches are
-session-local and bounded. There is no `mode` argument in the initial high-level
-API and no automatic approximate fallback.
+once, validates it, and uses the existing exact distance/top-k semantics.
+Cached native query encodings remain bound to the complete representation
+fingerprint and immutable query snapshot in a bounded session-local cache. There
+is no `mode` argument in the high-level API and no automatic approximate
+fallback.
 
 The eager reusable form is:
 
@@ -561,8 +561,10 @@ matches = valid.vector.search(
 ```
 
 `Session.embed_series_query()` returns a frozen `EmbeddedSeriesQuery(values,
-representation_fingerprint)`. It applies exactly the corpus recipe, except that
-invalid/null output is an error rather than a missing corpus row.
+representation_fingerprint)`. It eagerly applies exactly the native corpus
+recipe, except that invalid/null output is an error rather than a missing corpus
+row. Learned representations remain unsupported until the provider lifecycle is
+implemented.
 
 As an additive compatibility improvement, extend `Series.vector.distance()` and
 `DataFrame.vector.search()` to accept both this new type and the existing text

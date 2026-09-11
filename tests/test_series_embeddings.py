@@ -367,10 +367,179 @@ def test_typed_series_query_checks_representation_before_execution() -> None:
     )
     with pytest.raises(UnsupportedOperationError, match="fingerprint"):
         frame.vector.search(wrong_query, column="vector")
+    with pytest.raises(UnsupportedOperationError, match="fingerprint"):
+        frame["vector"].vector.distance(wrong_query)
     assert session.execution_count == 0
 
     assert result.collect()["id"].tolist() == [1]  # pyright: ignore[reportUnknownMemberType]
     assert session.execution_count == 1
+
+
+def test_search_series_matches_independent_window_and_distance_oracles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = duckpd.connect()
+    source_data = pd.DataFrame(
+        {
+            "row": list(range(6)),
+            "x": [1.0, 2.0, 4.0, 7.0, 11.0, 16.0],
+            "y": [10.0, 7.0, 5.0, 4.0, 2.0, -1.0],
+        }
+    )
+    source = session.from_pandas(source_data, order_by="row")
+    windows = source.assign(
+        x_window=lambda frame: frame["x"].rolling(3).to_array(),
+        y_window=lambda frame: frame["y"].rolling(3).to_array(),
+    )
+    representation = duckpd.series_representation(
+        window=3,
+        channels=("x", "y"),
+        sampling="observations",
+        data_contract="xy/v1",
+        normalization="center",
+        unit_norm=True,
+    )
+    candidates = windows.embed_series(
+        columns={"x": "x_window", "y": "y_window"},
+        into="vector",
+        representation=representation,
+    )
+    raw_query: dict[str, list[float]] = {
+        "x": [2.0, 4.0, 7.0],
+        "y": [7.0, 5.0, 4.0],
+    }
+
+    searched = candidates[candidates["row"] >= 2].vector.search_series(
+        raw_query,
+        column="vector",
+        representation=representation,
+        metric="l2",
+        k=4,
+        tie_breaker="row",
+    )
+    raw_query["x"][0] = 999.0
+
+    operations = json.loads(searched.explain(mode="json"))["execution_boundaries"][
+        "embedding_operations"
+    ]
+    search_operation = next(item for item in operations if item["operation"] == "search_series")
+    assert search_operation["representation_fingerprint"] == representation.fingerprint
+    assert search_operation["query"] == "<redacted>"
+    assert session.execution_count == 0
+
+    output = tmp_path / "series-search.parquet"
+
+    def fail_if_materialized(_frame: DataFrame) -> None:
+        raise AssertionError("direct search sink must not materialize through pandas")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "collect", fail_if_materialized)
+        patch.setattr(DataFrame, "to_pandas", fail_if_materialized)
+        searched.write_parquet(output)
+    result = session.read_parquet(output).collect()
+
+    def represent(channels: list[list[float]]) -> tuple[float, ...]:
+        centered: list[float] = []
+        for channel in channels:
+            mean = sum(channel) / len(channel)
+            centered.extend(value - mean for value in channel)
+        norm = sum(value * value for value in centered) ** 0.5
+        return tuple(float(np.float32(value / norm)) for value in centered)
+
+    query_vector = represent([[2.0, 4.0, 7.0], [7.0, 5.0, 4.0]])
+    oracle: list[tuple[float, int]] = []
+    for endpoint in range(2, len(source_data)):
+        start = endpoint - 2
+        vector = represent(
+            [
+                source_data["x"].iloc[start : endpoint + 1].tolist(),
+                source_data["y"].iloc[start : endpoint + 1].tolist(),
+            ]
+        )
+        distance = (
+            sum(
+                (value - query_value) ** 2
+                for value, query_value in zip(vector, query_vector, strict=True)
+            )
+            ** 0.5
+        )
+        oracle.append((distance, endpoint))
+    expected = sorted(oracle)
+
+    assert result["row"].tolist() == [row for _, row in expected]
+    np.testing.assert_allclose(
+        result["_distance"].to_numpy(),
+        [distance for distance, _ in expected],
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+
+def test_series_query_eager_form_and_planning_failures() -> None:
+    representation = duckpd.series_representation(
+        window=2,
+        channels=("value",),
+        sampling="observations",
+        data_contract="value/v1",
+        normalization="center",
+        unit_norm=True,
+    )
+    session = duckpd.connect()
+    frame = _attach_series_metadata(
+        session.sql(
+            "SELECT * FROM (VALUES "
+            "(1, [-0.70710677, 0.70710677]::FLOAT[2]), "
+            "(2, [0.70710677, -0.70710677]::FLOAT[2])"
+            ") AS t(id, vector)"
+        ),
+        "vector",
+        representation,
+    )
+
+    eager = session.embed_series_query(
+        {"value": [2.0, 4.0]},
+        representation=representation,
+    )
+    np.testing.assert_allclose(
+        eager.values,
+        [-0.70710677, 0.70710677],
+        rtol=1e-6,
+        atol=1e-7,
+    )
+    assert session.execution_count == 1
+    assert frame.vector.search(eager, column="vector", metric="l2").collect()["id"].tolist() == [
+        1,
+        2,
+    ]
+
+    incompatible = replace(representation, data_contract="other/v1")
+    invalid_calls = (
+        lambda: frame.vector.search_series({}, column="vector"),
+        lambda: frame.vector.search_series({"value": [1.0]}, column="vector"),
+        lambda: frame.vector.search_series({"value": [1.0, float("nan")]}, column="vector"),
+        lambda: frame.vector.search_series(
+            {"value": [1.0, 2.0]},
+            column="vector",
+            representation=incompatible,
+        ),
+        lambda: session.sql("SELECT [1.0, 2.0]::FLOAT[2] AS vector").vector.search_series(
+            {"value": [1.0, 2.0]}, column="vector"
+        ),
+    )
+    for call in invalid_calls:
+        with pytest.raises((TypeError, ValueError, UnsupportedOperationError)):
+            call()
+
+    zero_scale = _attach_series_metadata(
+        session.sql("SELECT 1 AS id, [1.0, 2.0]::FLOAT[2] AS vector"),
+        "vector",
+        replace(representation, normalization="zscore", unit_norm=False),
+    ).vector.search_series({"value": [3.0, 3.0]}, column="vector")
+    executions_before_failure = session.execution_count
+    with pytest.raises(MaterializationError):
+        zero_scale.collect()
+    assert session.execution_count == executions_before_failure + 1
 
 
 @pytest.mark.parametrize(

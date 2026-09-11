@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -72,7 +73,14 @@ from duckpd.errors import (
     SessionClosedError,
     UnsupportedOperationError,
 )
-from duckpd.series_embeddings import SeriesColumnSpec, SeriesRepresentationSpec
+from duckpd.series_embeddings import (
+    EmbeddedSeriesQuery,
+    SeriesColumnSpec,
+    SeriesQuerySnapshot,
+    SeriesRepresentationSpec,
+    embed_native_series_query,
+    snapshot_series_query,
+)
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -258,6 +266,8 @@ class Session:
         self._embedding_udfs: dict[str, str] = {}
         self._embedding_queries: dict[str, tuple[str, str]] = {}
         self._embedded_queries: dict[str, EmbeddedQuery] = {}
+        self._series_queries: dict[str, tuple[str, SeriesQuerySnapshot]] = {}
+        self._embedded_series_queries: OrderedDict[str, EmbeddedSeriesQuery] = OrderedDict()
         self._table_embedding_specs: dict[tuple[str, str], object] = {}
         self._table_series_specs: dict[tuple[str, str], SeriesColumnSpec] = {}
         self._last_materialization_report: MaterializationReport | None = None
@@ -440,6 +450,18 @@ class Session:
         )
         return embedded
 
+    def embed_series_query(
+        self,
+        query: Mapping[str, Sequence[float]],
+        *,
+        representation: SeriesRepresentationSpec,
+    ) -> EmbeddedSeriesQuery:
+        """Eagerly apply one native representation to a reusable series query."""
+        self._ensure_open()
+        snapshot = snapshot_series_query(query, representation)
+        self._begin_execution()
+        return embed_native_series_query(snapshot, representation)
+
     def _embedding_provider(self, model: EmbeddingModelSpec) -> TextEmbeddingProvider:
         provider = self._embedding_providers.get(model.fingerprint)
         if provider is None or model.fingerprint not in self._prepared_embedding_models:
@@ -453,6 +475,16 @@ class Session:
             raise ValueError("query must be a non-empty string")
         key = uuid4().hex
         self._embedding_queries[key] = (model.fingerprint, query)
+        return key
+
+    def _register_series_query(
+        self,
+        representation: SeriesRepresentationSpec,
+        query: Mapping[str, Sequence[float]],
+    ) -> str:
+        snapshot = snapshot_series_query(query, representation)
+        key = uuid4().hex
+        self._series_queries[key] = (representation.fingerprint, snapshot)
         return key
 
     def _write_embedding_manifest(self, plan: LogicalPlan, path: str) -> None:
@@ -933,6 +965,46 @@ class Session:
             null_handling="special",
         )
         self._embedding_udfs[key] = name
+        return name
+
+    def _series_query_udf(self, representation: SeriesRepresentationSpec) -> str:
+        registry_key = f"series-query:{representation.fingerprint}"
+        existing = self._embedding_udfs.get(registry_key)
+        if existing is not None:
+            return existing
+        name = f"__duckpd_series_query_{representation.fingerprint[:24]}"
+
+        def run(keys: object) -> ArrowUDFResult:
+            key_array = cast("pa.ChunkedArray[Any]", keys)
+            rows: list[list[float]] = []
+            for raw_key in cast("list[str | None]", key_array.to_pylist()):
+                if raw_key is None:
+                    raise ValueError("Series query key must not be null")
+                try:
+                    fingerprint, query = self._series_queries[raw_key]
+                except KeyError:
+                    raise ValueError("Series query is not registered in this session") from None
+                if fingerprint != representation.fingerprint:
+                    raise ValueError("Series query representation fingerprint mismatch")
+                embedded = self._embedded_series_queries.get(raw_key)
+                if embedded is None:
+                    embedded = embed_native_series_query(query, representation)
+                    self._embedded_series_queries[raw_key] = embedded
+                    if len(self._embedded_series_queries) > 128:
+                        self._embedded_series_queries.popitem(last=False)
+                else:
+                    self._embedded_series_queries.move_to_end(raw_key)
+                rows.append(list(embedded.values))
+            return _make_fixed_array(rows, representation.dimension)
+
+        self.register_arrow_udf(
+            name,
+            run,
+            ["VARCHAR"],
+            f"FLOAT[{representation.dimension}]",
+            null_handling="special",
+        )
+        self._embedding_udfs[registry_key] = name
         return name
 
     def from_pandas(

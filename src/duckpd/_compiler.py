@@ -43,6 +43,7 @@ from duckpd._logical import (
     ScanPlan,
     SemanticSearchPlan,
     SeriesRepresentationPlan,
+    SeriesSearchPlan,
     SortDirection,
     SortKey,
     SortPlan,
@@ -196,6 +197,8 @@ class DuckDBCompiler:
             return self._compile_series_representation(plan)
         if isinstance(plan, SemanticSearchPlan):
             return self._compile_semantic_search(plan)
+        if isinstance(plan, SeriesSearchPlan):
+            return self._compile_series_search(plan)
 
         compiled_input = self._compile(plan.input)
         if isinstance(plan, FilterPlan):
@@ -606,6 +609,61 @@ class DuckDBCompiler:
                 "error",
                 duckdb.ConstantExpression(
                     "Semantic search requires finite, non-null vectors of matching dimension"
+                ),
+            ),
+        ).otherwise(distance)
+        projections = [
+            *(
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
+                    column.label
+                )
+                for column in plan.input.metadata.columns
+            ),
+            checked.alias(plan.distance_column.label),
+        ]
+        relation = compiled.relation.project(*projections)
+        sort_keys = [duckdb.ColumnExpression(plan.distance_column.label).asc().nulls_last()]
+        if plan.tie_breaker is not None:
+            sort_keys.append(
+                duckdb.ColumnExpression(compiled.bindings[plan.tie_breaker]).asc().nulls_last()
+            )
+        relation = relation.sort(*sort_keys).limit(plan.k)
+        return CompiledFrame(
+            relation,
+            {
+                **compiled.bindings,
+                plan.distance_column.id: plan.distance_column.label,
+            },
+        )
+
+    def _compile_series_search(self, plan: SeriesSearchPlan) -> CompiledFrame:
+        compiled = self._compile(plan.input)
+        document = duckdb.SQLExpression(quote_identifier(compiled.bindings[plan.vector_column]))
+        query_udf = self._session._series_query_udf(plan.representation)
+        query = duckdb.FunctionExpression(
+            query_udf,
+            duckdb.ConstantExpression(plan.query_key),
+        )
+        function = {
+            VectorMetric.COSINE: "array_cosine_distance",
+            VectorMetric.L2: "array_distance",
+            VectorMetric.INNER_PRODUCT: "array_negative_inner_product",
+        }[plan.metric]
+        distance = duckdb.FunctionExpression(function, document, query)
+        document_norm = duckdb.FunctionExpression("array_inner_product", document, document)
+        invalid = (
+            document.isnull()
+            | document_norm.isnull()
+            | ~duckdb.FunctionExpression("isfinite", document_norm)
+            | distance.isnull()
+            | ~duckdb.FunctionExpression("isfinite", distance)
+        )
+        checked = duckdb.CaseExpression(
+            invalid,
+            duckdb.FunctionExpression(
+                "error",
+                duckdb.ConstantExpression(
+                    "Series search requires finite, non-null vectors of matching dimension"
                 ),
             ),
         ).otherwise(distance)

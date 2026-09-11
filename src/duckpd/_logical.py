@@ -784,6 +784,21 @@ class SemanticSearchPlan(LogicalPlanBase):
 
 
 @dataclass(frozen=True)
+class SeriesSearchPlan(LogicalPlanBase):
+    """Exact retrieval after deferred native query representation."""
+
+    input: LogicalPlan
+    vector_column: ColumnId
+    query_key: str
+    representation: SeriesRepresentationSpec
+    metric: VectorMetric
+    k: int
+    distance_column: Column
+    tie_breaker: ColumnId | None
+    metadata: FrameMetadata
+
+
+@dataclass(frozen=True)
 class VectorSearchPlan(LogicalPlanBase):
     """Exact or verified-index nearest-neighbor retrieval."""
 
@@ -893,6 +908,7 @@ LogicalPlan: TypeAlias = (
     | TopKPlan
     | VectorSearchPlan
     | SemanticSearchPlan
+    | SeriesSearchPlan
     | LimitPlan
     | AggregatePlan
     | JoinPlan

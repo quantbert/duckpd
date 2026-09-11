@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
@@ -15,6 +15,7 @@ from duckpd._logical import (
     FrameMetadata,
     Nullability,
     SemanticSearchPlan,
+    SeriesSearchPlan,
     VectorDistanceExpression,
     VectorExecutionMode,
     VectorMetric,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from duckpd.embeddings import EmbeddingModelSpec
     from duckpd.frame import DataFrame
     from duckpd.series import Series
+    from duckpd.series_embeddings import SeriesRepresentationSpec
 
 VectorMetricName = Literal["cosine", "l2", "inner_product"]
 VectorMode = Literal["exact", "approximate"]
@@ -310,6 +312,69 @@ class VectorFrameMethods:
             model_origin=model_origin,
             auto_prepare=embedding.auto_prepare,
             catalog_model=embedding.origin == "catalog",
+        )
+        return DataFrame(self._frame._session, plan)
+
+    def search_series(
+        self,
+        query: Mapping[str, Sequence[float]],
+        *,
+        column: str,
+        representation: SeriesRepresentationSpec | None = None,
+        metric: VectorMetricName = "cosine",
+        k: int = 10,
+        distance_column: str = "_distance",
+        tie_breaker: str | None = None,
+    ) -> DataFrame:
+        """Represent one raw series query at execution and run exact retrieval."""
+        from duckpd.frame import DataFrame
+
+        vector_column = find_column(self._frame._plan.metadata, column)
+        series = vector_column.series
+        if series is None:
+            raise UnsupportedOperationError(
+                "search_series cannot infer a representation because the column "
+                "has no series metadata"
+            )
+        selected_representation = series.representation
+        if (
+            representation is not None
+            and representation.fingerprint != selected_representation.fingerprint
+        ):
+            raise UnsupportedOperationError(
+                "search_series requires series metadata matching the requested representation"
+            )
+        if selected_representation.encoder is not None:
+            raise UnsupportedOperationError(
+                "search_series currently supports only native representations with encoder=None"
+            )
+        element_type, dimension = _vector_type(vector_column.duckdb_type)
+        if element_type != "FLOAT" or dimension != selected_representation.dimension:
+            raise UnsupportedOperationError(
+                "search_series requires a FLOAT column whose fixed dimension "
+                "matches its series representation metadata"
+            )
+        vector_metric, distance, tie_column, metadata = _search_metadata(
+            self._frame,
+            metric=metric,
+            k=k,
+            distance_column=distance_column,
+            tie_breaker=tie_breaker,
+        )
+        query_key = self._frame._session._register_series_query(
+            selected_representation,
+            query,
+        )
+        plan = SeriesSearchPlan(
+            self._frame._plan,
+            vector_column.id,
+            query_key,
+            selected_representation,
+            vector_metric,
+            k,
+            distance,
+            tie_column.id if tie_column is not None else None,
+            metadata,
         )
         return DataFrame(self._frame._session, plan)
 

@@ -14,6 +14,10 @@ the [release policy](RELEASES.md).
   from verified fixed-count series windows, with representation-declared
   channel ordering, centering or population z-score normalization, optional
   unit normalization, null handling, and zero-scale policy.
+- Exact `DataFrame.vector.search_series()` accepts raw channel windows, resolves
+  verified representation metadata, defers native query encoding to execution,
+  and rejects equal-width incompatible spaces during planning.
+  `Session.embed_series_query()` provides the eager reusable typed-query form.
 - Fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` produce lazy,
   nullable `FLOAT[n]` observation windows with explicit ordering, group
   isolation, finite-float32 validation, and preserved series-window metadata.

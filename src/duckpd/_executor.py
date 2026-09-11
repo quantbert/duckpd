@@ -53,6 +53,7 @@ from duckpd._logical import (
     ScanPlan,
     SemanticSearchPlan,
     SeriesRepresentationPlan,
+    SeriesSearchPlan,
     SortKey,
     SortPlan,
     SourceCapabilities,
@@ -340,6 +341,7 @@ def _plan_nodes(plan: LogicalPlan) -> Iterator[LogicalPlan]:
             SeriesRepresentationPlan,
             VectorSearchPlan,
             SemanticSearchPlan,
+            SeriesSearchPlan,
         ),
     ):
         yield from _plan_nodes(plan.input)
@@ -472,6 +474,30 @@ def _embedding_operations(
                     "persistence": "lazy",
                 }
             )
+        elif isinstance(node, SeriesSearchPlan):
+            origin = next(
+                column.series.origin
+                for column in node.input.metadata.columns
+                if column.id == node.vector_column and column.series is not None
+            )
+            operations.append(
+                {
+                    "operation": "search_series",
+                    "backend": "native",
+                    "representation_fingerprint": node.representation.fingerprint,
+                    "representation_origin": origin,
+                    "dimension": node.representation.dimension,
+                    "normalization": node.representation.normalization,
+                    "unit_norm": node.representation.unit_norm,
+                    "filter_placement": (
+                        "before_search" if isinstance(node.input, FilterPlan) else "none"
+                    ),
+                    "strategy": "persisted_exact",
+                    "k": node.k,
+                    "query": "<redacted>",
+                    "boundary": "duckdb_native_query_expression",
+                }
+            )
         elif isinstance(node, SemanticSearchPlan):
             operations.append(
                 {
@@ -510,7 +536,7 @@ def _redact_plan_text(text: str, plan: LogicalPlan) -> str:
     for location in plan.metadata.provenance.locations:
         text = text.replace(location, sanitize_source_location(location))
     for node in _plan_nodes(plan):
-        if isinstance(node, SemanticSearchPlan):
+        if isinstance(node, (SemanticSearchPlan, SeriesSearchPlan)):
             text = text.replace(node.query_key, "<redacted-query>")
     return text
 
@@ -570,7 +596,7 @@ def _materialization_upper_bound(plan: LogicalPlan) -> int | None:
         if isinstance(node, (LimitPlan, TopKPlan)):
             input_rows = row_upper_bound(node.input)
             return None if input_rows is None else min(input_rows, node.count)
-        if isinstance(node, (VectorSearchPlan, SemanticSearchPlan)):
+        if isinstance(node, (VectorSearchPlan, SemanticSearchPlan, SeriesSearchPlan)):
             input_rows = row_upper_bound(node.input)
             return None if input_rows is None else min(input_rows, node.k)
         if isinstance(node, AggregatePlan):
@@ -718,7 +744,7 @@ def _source_fragments(plan: LogicalPlan) -> tuple[SourceFragment, ...]:
         elif isinstance(node, (EmbeddingPlan, SeriesRepresentationPlan)):
             operations.add(SourceOperation.PROJECTION)
             blocked_operations.add(SourceOperation.PROJECTION)
-        elif isinstance(node, (VectorSearchPlan, SemanticSearchPlan)):
+        elif isinstance(node, (VectorSearchPlan, SemanticSearchPlan, SeriesSearchPlan)):
             operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
             blocked_operations.update((SourceOperation.LIMIT, SourceOperation.SORT))
         elif isinstance(node, SortPlan):
@@ -1274,6 +1300,7 @@ class Executor:
                     EmbeddingPlan,
                     SeriesRepresentationPlan,
                     SemanticSearchPlan,
+                    SeriesSearchPlan,
                     AggregatePlan,
                     SamplePlan,
                     LocIndexPlan,
@@ -1606,6 +1633,7 @@ class Executor:
             VectorSearchPlan,
             EmbeddingPlan,
             SemanticSearchPlan,
+            SeriesSearchPlan,
         )
         blocking = tuple(
             dict.fromkeys(type(node).__name__ for node in nodes if isinstance(node, blocking_types))
@@ -1869,6 +1897,7 @@ class Executor:
                 EmbeddingPlan,
                 SeriesRepresentationPlan,
                 SemanticSearchPlan,
+                SeriesSearchPlan,
                 LimitPlan,
                 AggregatePlan,
             ),

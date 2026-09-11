@@ -86,12 +86,8 @@ with pd.connect() as session:
     )
 
     features = prices.assign(
-        bar_return=lambda frame: (
-            (frame["close"] - frame["open"]) / frame["open"]
-        ),
-        intrabar_range=lambda frame: (
-            (frame["high"] - frame["low"]) / frame["open"]
-        ),
+        bar_return=lambda frame: (frame["close"] - frame["open"]) / frame["open"],
+        intrabar_range=lambda frame: (frame["high"] - frame["low"]) / frame["open"],
     )
 
     windows = features.assign(
@@ -123,15 +119,16 @@ with pd.connect() as session:
     )
 
     candidates = embedded[embedded["market_shape"].notna()]
-    query_row = candidates[["timestamp", "market_shape"]].head(1)
-    query = pd.EmbeddedSeriesQuery(
-        tuple(float(value) for value in query_row.iloc[0]["market_shape"]),
-        representation.fingerprint,
-    )
+    query_row = candidates[["return_window", "range_window"]].head(1)
+    query = {
+        "bar_return": tuple(query_row.iloc[0]["return_window"]),
+        "intrabar_range": tuple(query_row.iloc[0]["range_window"]),
+    }
 
-    matches = candidates.vector.search(
+    matches = candidates.vector.search_series(
         query,
         column="market_shape",
+        representation=representation,
         metric="l2",
         k=10,
         tie_breaker="timestamp",
@@ -312,6 +309,15 @@ Use upstream data preparation to establish a regular grid when elapsed-time
 comparability matters. Fully verified fixed-grid and event-window construction
 is part of the future time-series roadmap.
 
+### Place filters relative to history and retrieval
+
+A filter before `rolling(...).to_array()` changes the observations available to
+each window. A filter after `embed_series()` but before `search_series()` keeps
+the established history and restricts the eligible candidate endpoints. A
+filter after `search_series()` filters the bounded top-k result and is not
+equivalent to filtering candidates before ranking. DuckPD does not move filters
+across window construction or exact top-k boundaries.
+
 ## Representation identity and safety
 
 Vector width alone cannot establish compatibility. Two `FLOAT[16]` columns may
@@ -327,9 +333,13 @@ represent different channels, sampling rules, units, normalization, or models.
 - A versioned native vector layout.
 
 DuckPD serializes this contract canonically and hashes it into a SHA-256
-fingerprint. `EmbeddedSeriesQuery` carries that fingerprint with its values.
-Searching a typed query against an incompatible column fails during planning,
-even if their dimensions match.
+fingerprint. `search_series()` resolves the contract from verified column
+metadata and represents raw channel windows only when the search executes. An
+explicit representation is a compatibility assertion, not an override.
+`Session.embed_series_query()` provides an eager reusable `EmbeddedSeriesQuery`.
+Both typed paths reject incompatible columns during planning, even when their
+dimensions match. Plain numeric `vector.search()` remains the explicitly
+unverified low-level path.
 
 The `data_contract` identifies upstream semantics such as return convention,
 price adjustment, clipping, units, and feature definitions. DuckPD preserves
@@ -461,6 +471,8 @@ The following behavior is implemented now:
   `EmbeddedSeriesQuery`.
 - Typed-query compatibility checks through `vector.distance()` and
   `vector.search()`.
+- Raw-window `vector.search_series()` and eager
+  `Session.embed_series_query()` using the same native representation recipe.
 - Exact cosine, L2, and negative-inner-product retrieval.
 - Representation metadata preservation for supported projections, joins,
   local Parquet sidecars, and session-owned tables.
@@ -469,8 +481,7 @@ The following behavior is not implemented yet:
 
 - Learned series-model preparation or inference.
 - A public `SeriesEmbeddingProvider` lifecycle.
-- A high-level `search_series()` that accepts raw channel windows and encodes
-  the query automatically.
+- Learned-query encoding through `search_series()`.
 - General verified fixed-grid rolling windows and event-aligned windows.
 - Feature-store declarations for series representations.
 - Automatic or general approximate series search.
