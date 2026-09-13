@@ -99,6 +99,12 @@ the [release policy](RELEASES.md).
   concatenations fail before execution.
 - Managed Parquet sidecars and session-owned DuckDB tables persist and restore
   series representation metadata alongside existing text embedding metadata.
+- Strict catalog-version-1 series model and representation registries,
+  metadata-only `FeatureStore` lookup APIs, inferred native series search,
+  fixed-size physical validation, sidecar identity checks, and metadata
+  preservation through feature aliases and exact/point-in-time alignment.
+- Deterministic fixed-size return-shape vectors in the generated OHLCV family
+  and symbology table, both bound through the generated series catalog.
 
 ### Changed
 

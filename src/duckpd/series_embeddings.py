@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from decimal import Decimal
 from math import fsum, isfinite, sqrt
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from duckpd._temporal import fixed_duration_ns
 
@@ -262,6 +262,31 @@ class SeriesColumnSpec:
     @property
     def fingerprint(self) -> str:
         return self.representation.fingerprint
+
+
+def _series_schema_error(  # pyright: ignore[reportUnusedFunction]
+    schema: object,
+    columns: Sequence[tuple[str, SeriesRepresentationSpec]],
+) -> str | None:
+    """Validate catalog-bound physical series vectors without reading row values."""
+    import pyarrow as pa
+
+    arrow_schema = cast("Any", schema)
+    for label, representation in columns:
+        index = arrow_schema.get_field_index(label)
+        if index < 0:
+            return f"Catalog series column {label!r} is absent from feature data"
+        dtype = arrow_schema.field(index).type
+        if (
+            not pa.types.is_fixed_size_list(dtype)
+            or dtype.list_size != representation.dimension
+            or not pa.types.is_float32(dtype.value_type)
+        ):
+            return (
+                f"Catalog series column {label!r} requires fixed-size "
+                f"float32[{representation.dimension}] feature data; found {dtype}"
+            )
+    return None
 
 
 @dataclass(frozen=True)

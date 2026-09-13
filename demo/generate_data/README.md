@@ -108,6 +108,35 @@ The generated catalog carries the complete immutable model specification.
 does not prepare the model; first execution uses the store's bounded automatic
 preparation policy. Disable that policy and pre-warm explicitly for offline use.
 
+Generation also writes `return_shape_8` as fixed-size `float32[8]` vectors in
+the OHLCV family and symbology table. The vector contains trailing one-minute
+simple returns in oldest-first order; initial OHLCV rows are left-zero-padded.
+Catalog version 1 binds both columns to
+`simple-return-shape-8-1m`, so `search_series()` infers the native
+representation:
+
+```python
+import duckpd
+
+store = duckpd.FeatureStore(DATA_ROOT)
+vectors = store.features(
+    ["ohlcv:return_shape_8"],
+    start="2024-01-02T08:00:00Z",
+    end="2024-01-03T08:00:00Z",
+    alignment="exact",
+)
+matches = vectors.vector.search_series(
+    {"simple_return": query_returns},
+    column="return_shape_8",
+    metric="l2",
+    k=20,
+)
+```
+
+Catalog parsing, feature selection, and explain remain metadata-only. The
+generator computes corpus vectors explicitly; DuckPD never refreshes them while
+loading or querying the store.
+
 ### AMD ROCm generation
 
 GPU generation is explicit. The normal `duckpd[embeddings]` installation and

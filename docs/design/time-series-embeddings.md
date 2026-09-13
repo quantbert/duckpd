@@ -1,17 +1,18 @@
 # Time-Series Embeddings and Event Similarity
 
-**Status: proposed.**
+**Status: native representations, event windows, and catalog declarations implemented;
+learned encoder execution proposed.**
 
-This document proposes new behavior; it does not describe an
-implemented time-series embedding API.
+This document defines the shipped native and catalog contracts and the remaining
+learned-encoder design.
 
 **Intended location:** `docs/design/time-series-embeddings.md`.
 
 Companion designs: [Text Embeddings and Semantic Search][design-text],
 [Vector Search][design-vector], [Feature Store Architecture][design-store], and
 [Feature Store Embedding Metadata and Automatic Model Preparation][design-catalog].
-The last document is itself a proposal. Its catalog-version-1 text embedding
-declarations and automatic preparation behavior must not be treated as shipped dependencies.
+The companion text catalog behavior is implemented in the same
+`catalog_version: 1` schema.
 
 ## Product decision
 
@@ -84,12 +85,12 @@ The following are source observations, not proposed additions.
 | Architecture | Immutable logical plans and metadata; compilation and execution are separate. No silent pandas fallback. | Add typed nodes and expressions, not SQL stored on public objects. |
 | Windows | Integer and fixed-duration rolling aggregates exist; fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` emit typed, nullable `FLOAT[n]` windows. | Reuse the series-window metadata and grouped alignment path when implementing representations. |
 | Text embeddings | `EmbeddingModelSpec`, providers, explicit preparation, Arrow inference, `embed_text()`, and fingerprint-checked `search_text()` exist. | Reuse the lifecycle pattern, not text-specific preprocessing or fingerprints. |
-| Numeric vectors | Exact cosine, L2, and negative-inner-product ranking exist. Numeric queries are currently plain sequences. | Reuse distance/top-k lowering and add typed-query acceptance explicitly. |
+| Numeric vectors | Exact cosine, L2, and negative-inner-product ranking accept plain and fingerprinted typed queries. | Reuse distance/top-k lowering while preserving representation identity. |
 | Approximate search | Requires a compatible session-owned HNSW index and a plain local table scan. Upstream filters and tie-breakers are rejected. | Do not promise filtered event ANN retrieval or a new automatic search mode. |
-| Metadata | A `Column` currently has text-specific `embedding` metadata. | Introduce additive series metadata without rehashing legacy text models. |
-| Persistence | Local Parquet embedding sidecars and session-managed table embedding metadata exist. | Extend versioned persistence; do not assume metadata survives every external tool or session reopen. |
-| Feature store | Catalog parser accepts version 1. Timeseries feature planning initially uses `UNKNOWN` column types. | Catalog series search needs declared logical vector types plus physical validation. |
-| Catalog embedding design | Catalog-version-1 text embedding declarations and automatic preparation are proposed. | Series catalog work has an explicit dependency, not an assumed capability. |
+| Metadata | `Column` carries additive text embedding, series representation, and raw series-window metadata. | Keep the series and text identity domains independent. |
+| Persistence | Local Parquet sidecars and session-managed table metadata preserve text and series identity. | Do not assume metadata survives unsupported external rewrites or session reopen. |
+| Feature store | Catalog version 1 resolves declared series columns to `FLOAT[D]` and validates Parquet shape, values, and optional sidecar identity. | Keep catalog planning metadata-only and preserve identity through alignment. |
+| Catalog embedding design | Catalog-version-1 text and series declarations are implemented in one strict schema. | Add learned execution only through an explicit qualified provider lifecycle. |
 
 These observations are grounded in the architecture decisions and source for
 [windows][src-window], [embeddings][src-embeddings], [vectors][src-vector],
@@ -1056,18 +1057,17 @@ a separate persistence enhancement, not a hidden prerequisite.
 
 ## Feature-store integration
 
-### Relationship to the existing catalog proposal
+### Catalog version 1 relationship
 
-Core window/representation/search functionality must ship independently of the
-catalog work. DuckPD has one catalog schema, identified by `catalog_version: 1`.
-The text-embedding and series-representation proposals both extend that schema
-in place; they do not introduce catalog versions 2 or 3.
+DuckPD has one catalog schema, identified by `catalog_version: 1`. Text
+embedding and series-representation declarations extend that schema in place;
+there are no catalog versions 2 or 3.
 
-The series extension adds `series_embedding_models` and
+The series extension defines `series_embedding_models` and
 `series_representations` registries plus `series_representation` references on
 feature or table-column declarations. Existing text `embedding_models` and
 `embedding_model` fields remain unchanged. The parser, generator, examples, and
-both proposals must adopt the complete catalog version 1 schema atomically.
+public API use the complete catalog version 1 schema atomically.
 
 A deterministic example is:
 
@@ -1166,12 +1166,11 @@ its own schema, not both fields attached opportunistically.
 
 ### Typed planning and source validation
 
-The current feature-store timeseries planner constructs columns with `UNKNOWN`
-types. Attaching a representation while leaving that type unchanged is not
-sufficient for vector accessors. Resolve `FLOAT[D]` from the validated catalog
-specification into logical metadata during planning, and validate physical type,
-length, nullability, and values when binding/reading the actual partitions.
-[Source: timeseries source construction][src-store].
+The feature-store timeseries planner resolves a catalog-bound representation to
+`FLOAT[D]` logical metadata. The physical Parquet column remains the source of
+truth: binding validates fixed-size-list shape, float32 child type, null-child
+and finiteness rules, and any available sidecar identity. Whole-vector nulls
+remain nullable.
 
 This is a declared logical type, not proof about unseen Parquet data. Wrong
 physical types or lengths raise; there is no silent projection/truncation to make
@@ -1185,7 +1184,7 @@ array dimensions match. Exact alignment still requires the existing compatible
 time/key contracts; unrelated news and market families are not automatically
 joined into events.
 
-Proposed lookup and usage:
+Lookup and usage:
 
 ```python
 store = pd.FeatureStore(
@@ -1208,9 +1207,9 @@ matches = valid.vector.search_series(
 )
 ```
 
-`FeatureStore.series_representation(name)` is a new metadata-only lookup. For
-learned registries, also add `FeatureStore.series_embedding_model(name)` so an
-application can prepare the exact declared encoder explicitly.
+`FeatureStore.series_representation(name)` is a metadata-only lookup.
+`FeatureStore.series_embedding_model(name)` exposes the exact declared learned
+encoder identity without preparing or executing it.
 
 ### Model acquisition policy
 

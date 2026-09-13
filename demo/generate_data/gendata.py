@@ -17,7 +17,7 @@ import shutil
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -31,6 +31,7 @@ from news_config import (
     NEWS_SOURCE_SHA256,
     news_model,
 )
+from series_config import RETURN_SHAPE_WINDOW
 
 import duckpd as pd
 
@@ -64,6 +65,11 @@ SCHEMA = pa.schema(
         pa.field("low", pa.float64()),
         pa.field("close", pa.float64()),
         pa.field("volume", pa.int64()),
+        pa.field(
+            "return_shape_8",
+            pa.list_(pa.float32(), RETURN_SHAPE_WINDOW),
+            nullable=False,
+        ),
     ]
 )
 SMA_SCHEMA = pa.schema(
@@ -81,6 +87,11 @@ SYMBOLOGY_SCHEMA = pa.schema(
         pa.field("company_name", pa.string(), nullable=False),
         pa.field("description", pa.string(), nullable=False),
         pa.field("market_code", pa.string(), nullable=False),
+        pa.field(
+            "return_shape_8",
+            pa.list_(pa.float32(), RETURN_SHAPE_WINDOW),
+            nullable=False,
+        ),
     ]
 )
 MARKETS_SCHEMA = pa.schema(
@@ -425,6 +436,16 @@ def generate_news_dataset(
 
 def generate_symbology(tickers: list[str]) -> pa.Table:
     """Generate one deterministic symbology row for every ticker."""
+    return_shape = pa.array(
+        [
+            [
+                float(((int(ticker) + offset * 7) % 23) - 11) / 10_000.0
+                for offset in range(RETURN_SHAPE_WINDOW)
+            ]
+            for ticker in tickers
+        ],
+        type=pa.list_(pa.float32(), RETURN_SHAPE_WINDOW),
+    )
     return pa.table(
         {
             "ticker": tickers,
@@ -433,6 +454,7 @@ def generate_symbology(tickers: list[str]) -> pa.Table:
             "company_name": [f"Example Company {ticker}" for ticker in tickers],
             "description": [f"Synthetic company record for ticker {ticker}." for ticker in tickers],
             "market_code": ["XSTO"] * len(tickers),
+            "return_shape_8": return_shape,
         },
         schema=SYMBOLOGY_SCHEMA,
     )
@@ -494,6 +516,26 @@ def generate_bars(ticker: str, year: int, timestamps: list[datetime], seed: int)
     low = np.minimum(open_price, close) * (1.0 - lower_spread)
     volume = generator.integers(100, 1_000_001, row_count, dtype=np.int64)
 
+    simple_return = np.empty(row_count, dtype=np.float32)
+    simple_return[0] = 0.0
+    simple_return[1:] = np.asarray(close[1:] / close[:-1] - 1.0, dtype=np.float32)
+    return_windows = np.zeros((row_count, RETURN_SHAPE_WINDOW), dtype=np.float32)
+    for endpoint in range(1, min(row_count, RETURN_SHAPE_WINDOW)):
+        return_windows[endpoint, -endpoint:] = simple_return[1 : endpoint + 1]
+    if row_count > RETURN_SHAPE_WINDOW:
+        return_windows[RETURN_SHAPE_WINDOW:] = np.lib.stride_tricks.sliding_window_view(
+            simple_return[1:],
+            RETURN_SHAPE_WINDOW,
+        )
+    maker = cast("Any", pa.FixedSizeListArray)
+    return_shape = cast(
+        "pa.Array[Any]",
+        maker.from_arrays(
+            pa.array(return_windows.reshape(-1), type=pa.float32()),
+            RETURN_SHAPE_WINDOW,
+        ),
+    )
+
     return pa.table(
         {
             "datetime": pa.array(timestamps, type=SCHEMA.field("datetime").type),
@@ -503,6 +545,7 @@ def generate_bars(ticker: str, year: int, timestamps: list[datetime], seed: int)
             "low": pa.array(low),
             "close": pa.array(close),
             "volume": pa.array(volume),
+            "return_shape_8": return_shape,
         },
         schema=SCHEMA,
     )

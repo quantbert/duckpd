@@ -284,7 +284,10 @@ flowchart TD
 1. **`duckpd.featurestore.FeatureStore`:**
    The public entry point. Holds the connection `Session`, resolved `catalog.json`, and cache configuration.
 2. **Catalog v1 Specification:**
-   Validates `catalog.json` at store initialization. Reads `timeseries` and `table` specifications, time columns, series keys, and feature definitions.
+   Validates the complete `catalog.json` schema at store initialization,
+   including strict text-model, series-model, and series-representation
+   registries; dataset time/key contracts; feature bindings; and reference-table
+   vector columns.
 3. **Partition-Mirrored Cache Manager:**
    Resolves production UTC-day paths required by `[start, end)`. Point-in-time
    plans add optional `history_lookback` days. Missing or incomplete remote
@@ -340,6 +343,8 @@ DuckPD 0.1.4 ships the complete feature-store path described above:
 - cumulative column-projected daily remote caches with per-partition
   coordination, unique staging files, and atomic replacement;
 - lazy `store.table()`, `store.features()`, and `store.feature_batches()` APIs;
+- catalog-inferred text and native series search with typed fixed-size physical
+  validation and metadata preservation through aliases and alignment;
 - explicit cache pre-warming through `store.sync()`;
 - an end-to-end notebook and a cold-versus-warm FeatureStore benchmark.
 

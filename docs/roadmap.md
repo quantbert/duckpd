@@ -1022,21 +1022,21 @@ Exit gate:
 Goal: publish and retrieve deterministic series representations through the
 same catalog version 1 metadata path established for text embeddings.
 
-- [ ] Add strict `series_embedding_models`, `series_representations`, and
+- [x] Add strict `series_embedding_models`, `series_representations`, and
       `series_representation` declarations to `catalog_version: 1`.
-- [ ] Resolve declared `FLOAT[D]` types during planning and validate physical
+- [x] Resolve declared `FLOAT[D]` types during planning and validate physical
       types, dimensions, nullability, and representation identity when binding
       partitions.
-- [ ] Preserve series metadata through feature aliases, exact alignment, and
+- [x] Preserve series metadata through feature aliases, exact alignment, and
       point-in-time ASOF payloads.
-- [ ] Support deterministic native representations first; catalog access must
+- [x] Support deterministic native representations first; catalog access must
       never generate or refresh corpus representations.
-- [ ] Test the complete catalog version 1 schema, registry references, unknown
+- [x] Test the complete catalog version 1 schema, registry references, unknown
       fields, offline behavior, and model trust policies.
 
 Exit gate:
 
-- [ ] Catalog-declared native series vectors can be searched without restating
+- [x] Catalog-declared native series vectors can be searched without restating
       their representation and without model or network activity during
       planning.
 
@@ -1173,7 +1173,7 @@ decomposed into independently testable milestones below.
         through Phase 16.
 32. [x] Add availability-correct event windows and exact event-score fusion
         through Phase 17.
-33. [ ] Integrate deterministic series representations into the single catalog
+33. [x] Integrate deterministic series representations into the single catalog
         version 1 schema through Phase 18.
 34. [ ] Qualify optional learned series encoders only after the native and
         catalog contracts pass their exit gates in Phase 19.

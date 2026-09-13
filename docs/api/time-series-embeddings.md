@@ -490,6 +490,70 @@ DuckPD validates ordering provenance, window width, channel compatibility,
 finite values, fixed output type, and representation identity. Errors surface
 instead of changing the representation implicitly.
 
+## Feature-store catalog vectors
+
+Catalog version 1 can publish native series vectors without making callers
+repeat their representation:
+
+```json
+{
+  "catalog_version": 1,
+  "series_embedding_models": {},
+  "series_representations": {
+    "return-shape-8": {
+      "version": 1,
+      "window": 8,
+      "channels": ["simple_return"],
+      "sampling": "fixed_grid",
+      "step": "PT1M",
+      "data_contract": "simple-return-left-zero-padded/v1",
+      "normalization": "none",
+      "unit_norm": false,
+      "zero_scale": "null",
+      "encoder": null
+    }
+  },
+  "features": {
+    "returns:shape_8": {
+      "dataset": "returns",
+      "name": "shape_8",
+      "availability_delay": "PT0S",
+      "lookahead_safe": true,
+      "series_representation": "return-shape-8"
+    }
+  }
+}
+```
+
+Reference tables use the same registry key under
+`datasets[].columns.<column>.series_representation`. The referenced Parquet
+column must be a fixed-size `float32[D]` list matching the resolved
+representation. Null list children and nonfinite values fail at execution;
+whole-vector nulls are retained. If a DuckPD sidecar also declares the column,
+its canonical representation must agree with the catalog.
+
+```python
+store = pd.FeatureStore("/data/features")
+features = store.features(
+    {"pattern": "returns:shape_8"},
+    start="2025-01-01T00:00:00Z",
+    end="2025-02-01T00:00:00Z",
+    alignment="exact",
+)
+matches = features[features["pattern"].notna()].vector.search_series(
+    {"simple_return": query_returns},
+    column="pattern",
+    metric="l2",
+    k=20,
+)
+```
+
+`FeatureStore.series_representation(name)` and
+`FeatureStore.series_embedding_model(name)` are metadata-only lookups.
+Constructing the store, selecting features, calling `search_series()`, and
+explaining the plan do not prepare a learned encoder or generate corpus
+representations. Learned series inference remains unsupported.
+
 ## Limitations and common mistakes
 
 ### The representation only knows declared features
@@ -570,6 +634,8 @@ The following behavior is implemented now:
 - Exact cosine, L2, and negative-inner-product retrieval.
 - Representation metadata preservation for supported projections, joins,
   local Parquet sidecars, and session-owned tables.
+- Strict catalog-version-1 series registries, typed feature/reference-table
+  columns, alias and alignment propagation, and inferred native series search.
 - Exact text-first, reaction-first, and full eligible-set late fusion through
   ordinary filters, typed distances, joins, and deterministic `nsmallest()`.
 
@@ -579,7 +645,6 @@ The following behavior is not implemented yet:
 - A public `SeriesEmbeddingProvider` lifecycle.
 - Learned-query encoding through `search_series()`.
 - General verified fixed-grid rolling windows outside event alignment.
-- Feature-store declarations for series representations.
 - Automatic or general approximate series search.
 - A joint multimodal model or shared text-to-series representation space.
 

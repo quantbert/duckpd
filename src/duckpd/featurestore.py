@@ -49,6 +49,12 @@ from duckpd.embeddings import (
     _embedding_schema_error,
 )
 from duckpd.series import Series
+from duckpd.series_embeddings import (
+    SeriesColumnSpec,
+    SeriesEmbeddingModelSpec,
+    SeriesRepresentationSpec,
+    _series_schema_error,
+)
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -145,10 +151,12 @@ class FeatureStore:
         self._dataset_entries: dict[str, dict[str, Any]] = {}
         self._feature_entries: dict[str, dict[str, Any]] = {}
         self._embedding_models: dict[str, EmbeddingModelSpec] = {}
+        self._series_embedding_models: dict[str, SeriesEmbeddingModelSpec] = {}
+        self._series_representations: dict[str, SeriesRepresentationSpec] = {}
         catalog_started = perf_counter()
         self._load_catalog()
         catalog_elapsed = perf_counter() - catalog_started
-        if self._embedding_models:
+        if self._embedding_models or self._series_embedding_models or self._series_representations:
             self._session._embedding_catalog_access_seconds += catalog_elapsed
         for model in self._embedding_models.values():
             self._session._register_catalog_embedding_model(
@@ -257,11 +265,19 @@ class FeatureStore:
             raise FileNotFoundError(f"Catalog not found in {self._source_raw}")
 
         catalog_data = json.loads(catalog_text)
-        dataset_index, feature_index, embedding_models = validate_catalog(catalog_data)
+        (
+            dataset_index,
+            feature_index,
+            embedding_models,
+            series_embedding_models,
+            series_representations,
+        ) = validate_catalog(catalog_data)
         self._catalog = catalog_data
         self._dataset_entries = dataset_index
         self._feature_entries = feature_index
         self._embedding_models = embedding_models
+        self._series_embedding_models = series_embedding_models
+        self._series_representations = series_representations
 
     def catalog(self) -> dict[str, Any]:
         """Return a defensive copy of the validated catalog."""
@@ -285,6 +301,24 @@ class FeatureStore:
             return self._embedding_models[name]
         except KeyError:
             raise ValueError(f"Unknown catalog embedding model: {name!r}") from None
+
+    def series_embedding_model(self, name: Any) -> SeriesEmbeddingModelSpec:
+        """Return one immutable series-encoder specification from the catalog."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("series embedding model name must be a non-empty string")
+        try:
+            return self._series_embedding_models[name]
+        except KeyError:
+            raise ValueError(f"Unknown catalog series embedding model: {name!r}") from None
+
+    def series_representation(self, name: Any) -> SeriesRepresentationSpec:
+        """Return one immutable resolved series representation from the catalog."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("series representation name must be a non-empty string")
+        try:
+            return self._series_representations[name]
+        except KeyError:
+            raise ValueError(f"Unknown catalog series representation: {name!r}") from None
 
     def table(self, name: Any) -> DataFrame:
         """Return a lazy scan of a registered catalog reference table."""
@@ -320,6 +354,11 @@ class FeatureStore:
                 (column.label, column.embedding.model.dimension)
                 for column in columns
                 if column.embedding is not None
+            ),
+            series_columns=tuple(
+                (column.label, column.series.representation)
+                for column in columns
+                if column.series is not None
             ),
         )
         metadata = FrameMetadata(
@@ -367,7 +406,17 @@ class FeatureStore:
             for label, declaration in column_config.items()
             if "embedding" in declaration
         )
+        series_columns = tuple(
+            (
+                label,
+                self._series_representations[cast("str", declaration["series"])],
+            )
+            for label, declaration in column_config.items()
+            if "series" in declaration
+        )
         if error := _embedding_schema_error(schema, embedding_columns):
+            raise ValueError(error)
+        if error := _series_schema_error(schema, series_columns):
             raise ValueError(error)
         empty = pa.Table.from_batches([], schema=schema)
         relation = self._session._connection.from_arrow(empty)
@@ -375,10 +424,30 @@ class FeatureStore:
         columns: list[Column] = []
         for label, dtype in physical_types.items():
             embedding = self._column_embedding(column_config.get(label))
-            duckdb_type = (
-                f"FLOAT[{embedding.model.dimension}]" if embedding is not None else str(dtype)
+            series = self._column_series(column_config.get(label))
+            dimension = (
+                embedding.model.dimension
+                if embedding is not None
+                else series.representation.dimension
+                if series is not None
+                else None
             )
-            columns.append(Column(ColumnId.create(), label, duckdb_type, embedding=embedding))
+            duckdb_type = f"FLOAT[{dimension}]" if dimension is not None else str(dtype)
+            nullable = (
+                Nullability.NULLABLE
+                if cast("Any", schema).field(label).nullable
+                else Nullability.NON_NULL
+            )
+            columns.append(
+                Column(
+                    ColumnId.create(),
+                    label,
+                    duckdb_type,
+                    nullable=nullable,
+                    embedding=embedding,
+                    series=series,
+                )
+            )
         return tuple(columns)
 
     def _column_embedding(
@@ -391,6 +460,17 @@ class FeatureStore:
             self._embedding_models[cast("str", config["embedding"])],
             origin="catalog",
             auto_prepare=self._auto_prepare_embeddings,
+        )
+
+    def _column_series(
+        self,
+        config: Mapping[str, Any] | None,
+    ) -> SeriesColumnSpec | None:
+        if config is None or "series" not in config:
+            return None
+        return SeriesColumnSpec(
+            self._series_representations[cast("str", config["series"])],
+            origin="catalog",
         )
 
     def _feature_embedding(
@@ -415,6 +495,27 @@ class FeatureStore:
             self._embedding_models[references.pop()],
             origin="catalog",
             auto_prepare=self._auto_prepare_embeddings,
+        )
+
+    def _feature_series(
+        self,
+        dataset: str,
+        physical_name: str,
+    ) -> SeriesColumnSpec | None:
+        references = {
+            cast("str", entry["series"])
+            for entry in self._feature_entries.values()
+            if entry["dataset"] == dataset and entry["name"] == physical_name and "series" in entry
+        }
+        if not references:
+            return None
+        if len(references) != 1:
+            raise ValueError(
+                f"Catalog has conflicting series representations for {dataset}.{physical_name}"
+            )
+        return SeriesColumnSpec(
+            self._series_representations[references.pop()],
+            origin="catalog",
         )
 
     def _configure(
@@ -567,19 +668,28 @@ class FeatureStore:
                 ]
             )
         )
-        columns = tuple(
-            Column(
-                ColumnId.create(),
-                label,
-                (
-                    f"FLOAT[{embedding.model.dimension}]"
-                    if (embedding := self._feature_embedding(dataset, label)) is not None
-                    else "UNKNOWN"
-                ),
-                embedding=embedding,
+        columns_list: list[Column] = []
+        for label in labels:
+            embedding = self._feature_embedding(dataset, label)
+            series = self._feature_series(dataset, label)
+            dimension = (
+                embedding.model.dimension
+                if embedding is not None
+                else series.representation.dimension
+                if series is not None
+                else None
             )
-            for label in labels
-        )
+            columns_list.append(
+                Column(
+                    ColumnId.create(),
+                    label,
+                    f"FLOAT[{dimension}]" if dimension is not None else "UNKNOWN",
+                    nullable=(Nullability.NULLABLE if series is not None else Nullability.UNKNOWN),
+                    embedding=embedding,
+                    series=series,
+                )
+            )
+        columns = tuple(columns_list)
         source = FeatureParquetSource(
             source_root=self._source_raw if self._is_remote else str(self._source_path),
             cache_root=str(self._cache_path) if self._is_remote else None,
@@ -594,6 +704,11 @@ class FeatureStore:
                 (column.label, column.embedding.model.dimension)
                 for column in columns
                 if column.embedding is not None
+            ),
+            series_columns=tuple(
+                (column.label, column.series.representation)
+                for column in columns
+                if column.series is not None
             ),
         )
         metadata = FrameMetadata(

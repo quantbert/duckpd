@@ -315,6 +315,8 @@ deferred.
 | `DataFrame.embed_series()` | **`[DuckPD Native]`** | channel-to-column mapping, output label, representation, batch size, null policy | Lazy | Appends a nullable fixed-size `FLOAT[n]` vector without Python row execution. Requires verified fixed-count `Rolling.to_array()` inputs sharing one order/partition contract. Native recipes support channel-major oldest-first flattening, centering, population z-score normalization, optional final unit normalization, and explicit zero-scale behavior. Learned encoders are rejected before execution. |
 | `DataFrame.vector.search_series()` | **`[DuckPD Native]`** | raw channel mapping, vector column, optional representation assertion, exact metric, `k`, distance label, tie-breaker | Lazy | Resolves verified series metadata, freezes raw query observations during planning, applies the native corpus recipe during execution, and runs exact top-k retrieval. Equal-width incompatible spaces fail during planning. |
 | `Session.embed_series_query()` | **`[DuckPD Native]`** | raw channel mapping, representation | Eager | Returns a reusable `EmbeddedSeriesQuery` after applying the same native representation recipe. Invalid, nonfinite, wrong-width, zero-scale, and learned queries fail explicitly. |
+| `FeatureStore.series_representation()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns the immutable resolved representation; registry aliases are expanded before fingerprinting. |
+| `FeatureStore.series_embedding_model()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns immutable learned-encoder identity without preparing, importing, downloading, or executing a model. |
 
 Mapping order is ignored; `SeriesRepresentationSpec.channels` defines vector
 layout. A null input window propagates to a null output by default, while
@@ -323,6 +325,16 @@ window metadata, and wrong array widths fail rather than changing representation
 identity. Event-window `event_id` may be composite for revisions, and source
 observations must be unique on `(by, on)` inside the bounded event intervals.
 Representation metadata survives direct Parquet and session-table persistence.
+Feature-store catalog version 1 accepts strict `series_embedding_models` and
+`series_representations` registries. Timeseries features and reference-table
+columns bind them with `series_representation`. Bound columns are typed as
+`FLOAT[n]`; Parquet fixed-size-list width, float32 children, finite values, and
+any available DuckPD sidecar identity are checked when data is bound or read.
+Whole-vector nulls remain nullable, while null children are invalid. Aliases,
+exact alignment, and point-in-time ASOF payloads preserve the representation,
+so `search_series()` can infer it. Catalog inspection and query planning never
+generate corpus vectors or prepare learned models.
+
 
 
 ---

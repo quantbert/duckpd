@@ -19,6 +19,11 @@ from news_config import (
     embedding_models,
     news_model,
 )
+from series_config import (
+    RETURN_SHAPE_KEY,
+    RETURN_SHAPE_WINDOW,
+    series_representations,
+)
 
 # pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 
@@ -55,6 +60,15 @@ DATASETS: dict[str, dict[str, Any]] = {
                     ("close", "float64", "price", "Bar close price."),
                     ("volume", "int64", "shares", "Bar traded volume."),
                 )
+            },
+            "return_shape_8": {
+                "dtype": f"float32[{RETURN_SHAPE_WINDOW}]",
+                "description": (
+                    "Trailing eight one-minute simple returns, left-zero-padded and oldest first."
+                ),
+                "series_representation": RETURN_SHAPE_KEY,
+                "availability_delay": "PT1M",
+                "lookahead_safe": True,
             },
         },
     },
@@ -155,6 +169,11 @@ DATASETS: dict[str, dict[str, Any]] = {
             "company_name": {"dtype": "string", "description": "Synthetic company name."},
             "description": {"dtype": "string", "description": "Synthetic company description."},
             "market_code": {"dtype": "string", "description": "Listing market MIC."},
+            "return_shape_8": {
+                "dtype": f"float32[{RETURN_SHAPE_WINDOW}]",
+                "description": "Deterministic synthetic return-shape signature.",
+                "series_representation": RETURN_SHAPE_KEY,
+            },
         },
     },
     "markets": {
@@ -497,6 +516,19 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
         for field in ("time_column", "series_keys", "primary_key", "history_lookback"):
             if field in definition:
                 entry[field] = definition[field]
+        if definition["kind"] == "table":
+            vector_columns = {
+                column_name: {
+                    field: column_definition[field]
+                    for field in ("embedding_model", "series_representation")
+                    if field in column_definition
+                }
+                for column_name, column_definition in definition.get("columns", {}).items()
+                if "embedding_model" in column_definition
+                or "series_representation" in column_definition
+            }
+            if vector_columns:
+                entry["columns"] = vector_columns
         if definition["kind"] == "timeseries":
             entry["partitioning"] = {
                 "column": definition["time_column"],
@@ -521,6 +553,10 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
                     feature_index[feature_reference]["embedding_model"] = feature_definition[
                         "embedding_model"
                     ]
+                if "series_representation" in feature_definition:
+                    feature_index[feature_reference]["series_representation"] = feature_definition[
+                        "series_representation"
+                    ]
         dataset_entries.append(entry)
 
     catalog = {
@@ -529,6 +565,8 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
         "description": "Research and model-training datasets.",
         "datasets": dataset_entries,
         "features": feature_index,
+        "series_embedding_models": {},
+        "series_representations": series_representations(),
     }
     if "news" in {entry["name"] for entry in dataset_entries}:
         catalog["embedding_models"] = embedding_models(catalog_embedding_model)

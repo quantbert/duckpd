@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Generator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pyarrow as pa
@@ -22,8 +22,9 @@ from duckpd.embeddings import (
     PreparedModelInfo,
     _make_fixed_array,
 )
-from duckpd.errors import UnsupportedOperationError
+from duckpd.errors import MaterializationError, UnsupportedOperationError
 from duckpd.featurestore import FeatureStore, parse_availability_delay, parse_timestamp
+from duckpd.series_embeddings import SeriesRepresentationSpec
 
 
 class CatalogEmbeddingProvider:
@@ -98,6 +99,80 @@ def _add_embedding_catalog(root: Path) -> EmbeddingModelSpec:
     }
     catalog_path.write_text(json.dumps(catalog))
     return model
+
+
+def _catalog_series_representation(
+    representation: SeriesRepresentationSpec,
+    *,
+    encoder: str | None = None,
+) -> dict[str, object]:
+    return {
+        "version": 1,
+        "window": representation.window,
+        "channels": list(representation.channels),
+        "sampling": representation.sampling,
+        "step": representation.step,
+        "data_contract": representation.data_contract,
+        "normalization": representation.normalization,
+        "unit_norm": representation.unit_norm,
+        "zero_scale": representation.zero_scale,
+        "encoder": encoder,
+    }
+
+
+def _add_series_catalog(root: Path) -> SeriesRepresentationSpec:
+    representation = duckpd.series_representation(
+        window=3,
+        channels=("return",),
+        sampling="observations",
+        data_contract="simple-return/v1",
+        normalization="none",
+    )
+    partition = root / "ohlcv" / "year=2024" / "data.parquet"
+    table = pq.read_table(partition)  # pyright: ignore[reportUnknownMemberType]
+    vectors = _make_fixed_array(
+        [
+            [1.0, 2.0, 3.0],
+            [2.0, 3.0, 4.0],
+            [3.0, 4.0, 5.0],
+            [4.0, 5.0, 6.0],
+            [5.0, 6.0, 7.0],
+        ],
+        3,
+    )
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        table.append_column("return_shape", vectors), partition
+    )
+
+    symbols = root / "symbols" / "data.parquet"
+    symbol_table = pq.read_table(symbols)  # pyright: ignore[reportUnknownMemberType]
+    symbol_vectors = _make_fixed_array(
+        [[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
+        3,
+    )
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        symbol_table.append_column("return_shape", symbol_vectors), symbols
+    )
+
+    catalog_path = root / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["series_embedding_models"] = {}
+    catalog["series_representations"] = {
+        "return-shape-3": _catalog_series_representation(representation)
+    }
+    catalog["features"]["ohlcv:return_shape"] = {
+        "dataset": "ohlcv",
+        "name": "return_shape",
+        "availability_delay": "PT0S",
+        "lookahead_safe": True,
+        "series_representation": "return-shape-3",
+    }
+    symbology = next(entry for entry in catalog["datasets"] if entry["name"] == "symbology")
+    symbology.setdefault("columns", {})["return_shape"] = {
+        "series_representation": "return-shape-3"
+    }
+    catalog_path.write_text(json.dumps(catalog))
+    return representation
 
 
 def _cache_partition_worker(
@@ -561,7 +636,7 @@ def test_daily_partition_and_history_lookback_validation() -> None:
             }
         ],
     }
-    datasets, _, _ = validate_catalog(valid)
+    datasets, _, _, _, _ = validate_catalog(valid)
     assert datasets["prices"]["_history_lookback"] == timedelta(days=7)
 
     for field, value, message in (
@@ -2130,3 +2205,313 @@ def test_search_text_without_verified_metadata_requires_explicit_model() -> None
     frame = duckpd.from_pandas(pd.DataFrame({"embedding": [[1.0, 0.0, 0.0]]}))
     with pytest.raises(UnsupportedOperationError, match="cannot infer"):
         frame.vector.search_text("ai", column="embedding")
+
+
+def test_catalog_series_schema_registries_and_references_are_strict(
+    feature_store_fixture: Path,
+) -> None:
+    native = _add_series_catalog(feature_store_fixture)
+    catalog_path = feature_store_fixture / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    model = duckpd.series_embedding_model(
+        "test/series-encoder",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        artifact_sha256="a" * 64,
+        backend="onnx-runtime",
+        dimension=3,
+        input_length=3,
+        input_channels=("return",),
+        input_normalization="none",
+        pooling="last",
+        adapter_revision="adapter-v1",
+    )
+    learned = duckpd.series_representation(
+        window=3,
+        channels=("return",),
+        sampling="observations",
+        data_contract="simple-return/v1",
+        encoder=model,
+    )
+    catalog["series_embedding_models"]["learned"] = model.to_dict()
+    catalog["series_representations"]["learned"] = _catalog_series_representation(
+        learned,
+        encoder="learned",
+    )
+    catalog_path.write_text(json.dumps(catalog))
+
+    store = FeatureStore(feature_store_fixture)
+    assert store.series_embedding_model("learned") == model
+    assert store.series_representation("return-shape-3") == native
+    assert store.series_representation("learned") == learned
+    exposed = store.catalog()
+    exposed["series_representations"]["return-shape-3"]["window"] = 99
+    assert store.catalog()["series_representations"]["return-shape-3"]["window"] == 3
+
+    invalid = json.loads(json.dumps(catalog))
+    invalid["series_representations"]["return-shape-3"]["extra"] = True
+    catalog_path.write_text(json.dumps(invalid))
+    with pytest.raises(ValueError, match="unknown fields"):
+        FeatureStore(feature_store_fixture)
+
+    invalid = json.loads(json.dumps(catalog))
+    invalid["series_embedding_models"]["learned"]["extra"] = True
+    catalog_path.write_text(json.dumps(invalid))
+    with pytest.raises(ValueError, match="unknown fields"):
+        FeatureStore(feature_store_fixture)
+
+    invalid = json.loads(json.dumps(catalog))
+    invalid["features"]["ohlcv:return_shape"]["series_representation"] = "missing"
+    catalog_path.write_text(json.dumps(invalid))
+    with pytest.raises(ValueError, match="unknown series representation"):
+        FeatureStore(feature_store_fixture)
+
+    invalid = json.loads(json.dumps(catalog))
+    invalid["series_embedding_models"]["learned"]["revision"] = "main"
+    catalog_path.write_text(json.dumps(invalid))
+    with pytest.raises(ValueError, match="immutable model revision"):
+        FeatureStore(feature_store_fixture)
+
+    invalid = json.loads(json.dumps(catalog))
+    invalid["unexpected"] = True
+    catalog_path.write_text(json.dumps(invalid))
+    with pytest.raises(ValueError, match="Catalog has unknown fields"):
+        FeatureStore(feature_store_fixture)
+
+
+def test_catalog_series_search_is_inferred_lazy_and_preserved_by_alignment(
+    feature_store_fixture: Path,
+) -> None:
+    representation = _add_series_catalog(feature_store_fixture)
+    session = duckpd.connect()
+    store = FeatureStore(feature_store_fixture, session=session)
+    assert session.execution_count == 0
+
+    exact = store.features(
+        features={"shape": "ohlcv:return_shape"},
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    exact_shape = next(
+        column for column in exact._plan.metadata.visible_columns if column.label == "shape"
+    )
+    assert exact_shape.nullable.value == "nullable"
+    assert exact_shape.duckdb_type == "FLOAT[3]"
+    assert exact_shape.series is not None
+    assert exact_shape.series.representation == representation
+    assert exact_shape.series.origin == "catalog"
+
+    point_in_time = store.features(
+        features={"shape": "ohlcv:return_shape"},
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="point_in_time",
+        spine="ohlcv",
+    )
+    pit_shape = next(
+        column for column in point_in_time._plan.metadata.visible_columns if column.label == "shape"
+    )
+    assert pit_shape.series == exact_shape.series
+
+    table = store.table("symbology")
+    table_shape = next(
+        column for column in table._plan.metadata.visible_columns if column.label == "return_shape"
+    )
+    assert table_shape.series == exact_shape.series
+    assert session.execution_count == 0
+
+    searched = exact.vector.search_series(
+        {"return": [1.0, 2.0, 3.0]},
+        column="shape",
+        metric="l2",
+        k=2,
+    )
+    explanation = json.loads(searched.explain(mode="json"))
+    operation = next(
+        item
+        for item in explanation["execution_boundaries"]["embedding_operations"]
+        if item["operation"] == "search_series"
+    )
+    assert operation["representation_fingerprint"] == representation.fingerprint
+    assert session.execution_count == 0
+
+    result = searched.collect()
+    assert next(iter(result["datetime"])) == pd.Timestamp("2024-01-02T08:00:00Z")
+    table_result = table.vector.search_series(
+        {"return": [1.0, 2.0, 3.0]},
+        column="return_shape",
+        metric="l2",
+        k=1,
+        tie_breaker="ticker",
+    ).collect()
+    assert list(table_result["ticker"]) == ["001"]
+
+
+def test_catalog_learned_series_declarations_never_prepare_during_planning(
+    feature_store_fixture: Path,
+) -> None:
+    _add_series_catalog(feature_store_fixture)
+    catalog_path = feature_store_fixture / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    model = duckpd.series_embedding_model(
+        "test/series-encoder",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        artifact_sha256="b" * 64,
+        backend="onnx-runtime",
+        dimension=3,
+        input_length=3,
+        input_channels=("return",),
+        input_normalization="none",
+        pooling="last",
+        adapter_revision="adapter-v1",
+    )
+    learned = duckpd.series_representation(
+        window=3,
+        channels=("return",),
+        sampling="observations",
+        data_contract="simple-return/v1",
+        encoder=model,
+    )
+    catalog["series_embedding_models"]["learned"] = model.to_dict()
+    catalog["series_representations"]["learned"] = _catalog_series_representation(
+        learned,
+        encoder="learned",
+    )
+    catalog["features"]["ohlcv:return_shape"]["series_representation"] = "learned"
+    catalog_path.write_text(json.dumps(catalog))
+
+    session = duckpd.connect()
+    store = FeatureStore(feature_store_fixture, session=session)
+    frame = store.features(
+        features=["ohlcv:return_shape"],
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    assert store.series_embedding_model("learned") == model
+    assert store.series_representation("learned") == learned
+    assert session.execution_count == 0
+    assert session.inspect_prepared_embedding_models() == ()
+    with pytest.raises(
+        UnsupportedOperationError,
+        match="encoder=None",
+    ):
+        frame.vector.search_series(
+            {"return": [1.0, 2.0, 3.0]},
+            column="return_shape",
+        )
+    assert session.execution_count == 0
+    assert session.inspect_prepared_embedding_models() == ()
+
+
+def test_catalog_series_timeseries_dimension_is_checked_when_bound(
+    feature_store_fixture: Path,
+) -> None:
+    _add_series_catalog(feature_store_fixture)
+    partition = feature_store_fixture / "ohlcv" / "year=2024" / "data.parquet"
+    table = pq.read_table(partition)  # pyright: ignore[reportUnknownMemberType]
+    index = table.schema.get_field_index("return_shape")
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        table.set_column(
+            index,
+            "return_shape",
+            _make_fixed_array([[1.0, 2.0]] * table.num_rows, 2),
+        ),
+        partition,
+    )
+    frame = FeatureStore(feature_store_fixture).features(
+        features=["ohlcv:return_shape"],
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    with pytest.raises(
+        UnsupportedOperationError,
+        match=r"fixed-size float32\[3\]",
+    ):
+        frame.collect()
+
+
+def test_catalog_series_physical_schema_and_identity_are_enforced(
+    feature_store_fixture: Path,
+) -> None:
+    representation = _add_series_catalog(feature_store_fixture)
+    symbols_path = feature_store_fixture / "symbols" / "data.parquet"
+    symbols = pq.read_table(symbols_path)  # pyright: ignore[reportUnknownMemberType]
+    index = symbols.schema.get_field_index("return_shape")
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        symbols.set_column(
+            index,
+            "return_shape",
+            _make_fixed_array([[1.0, 2.0], [2.0, 1.0]], 2),
+        ),
+        symbols_path,
+    )
+    with pytest.raises(ValueError, match=r"fixed-size float32\[3\]"):
+        FeatureStore(feature_store_fixture).table("symbology")
+
+    partition = feature_store_fixture / "ohlcv" / "year=2024" / "data.parquet"
+    manifest = Path(f"{partition}.duckpd-embeddings.json")
+    incompatible = duckpd.series_representation(
+        window=3,
+        channels=("return",),
+        sampling="observations",
+        data_contract="different-return/v1",
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "text_columns": {},
+                "series_columns": {
+                    "return_shape": incompatible.to_dict(),
+                },
+            }
+        )
+    )
+    frame = FeatureStore(feature_store_fixture).features(
+        features=["ohlcv:return_shape"],
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    with pytest.raises(
+        UnsupportedOperationError,
+        match="conflicts with persisted series representation",
+    ):
+        frame.collect()
+    assert incompatible != representation
+
+
+@pytest.mark.parametrize("invalid_value", [None, float("nan")])
+def test_catalog_series_rejects_invalid_child_values_at_execution(
+    feature_store_fixture: Path,
+    invalid_value: float | None,
+) -> None:
+    _add_series_catalog(feature_store_fixture)
+    partition = feature_store_fixture / "ohlcv" / "year=2024" / "data.parquet"
+    table = pq.read_table(partition)  # pyright: ignore[reportUnknownMemberType]
+    index = table.schema.get_field_index("return_shape")
+    values = pa.array(
+        [
+            1.0,
+            invalid_value,
+            3.0,
+            *[value for row in range(1, 5) for value in (row + 1.0, row + 2.0, row + 3.0)],
+        ],
+        type=pa.float32(),
+    )
+    maker = cast("Any", pa.FixedSizeListArray)
+    vectors = cast("pa.Array[Any]", maker.from_arrays(values, 3))
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        table.set_column(index, "return_shape", vectors),
+        partition,
+    )
+    frame = FeatureStore(feature_store_fixture).features(
+        features=["ohlcv:return_shape"],
+        start="2024-01-02T08:00:00Z",
+        end="2024-01-02T08:05:00Z",
+        alignment="exact",
+    )
+    with pytest.raises(MaterializationError):
+        frame.collect()

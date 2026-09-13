@@ -92,6 +92,15 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog["datasets"][0]["min_time"], "2024-01-02T08:00:00Z")
         self.assertEqual(catalog["datasets"][2]["primary_key"], ["ticker"])
         self.assertNotIn("primary_key", catalog["datasets"][3])
+        self.assertEqual(catalog["series_embedding_models"], {})
+        self.assertEqual(
+            catalog["features"]["ohlcv:return_shape_8"]["series_representation"],
+            "simple-return-shape-8-1m",
+        )
+        self.assertEqual(
+            catalog["datasets"][2]["columns"]["return_shape_8"]["series_representation"],
+            "simple-return-shape-8-1m",
+        )
         self.assertIn('source="hf://buckets/owner/store"', readme)
 
     def test_adds_news_model_and_daily_partition_metadata(self) -> None:
@@ -315,11 +324,37 @@ class GeneratedDatasetTests(unittest.TestCase):
             )
             build_catalog(data_root, "owner/store", str(data_root))
 
-            frame = pd.FeatureStore(data_root).features(
+            store = pd.FeatureStore(data_root)
+            frame = store.features(
                 ["ohlcv:close", "sma:sma10"],
                 start="2024-01-02T08:00:00Z",
                 end="2024-01-02T08:05:00Z",
                 alignment="exact",
+            )
+            series_result = (
+                store.features(
+                    ["ohlcv:return_shape_8"],
+                    start="2024-01-02T08:08:00Z",
+                    end="2024-01-02T08:13:00Z",
+                    alignment="exact",
+                )
+                .vector.search_series(
+                    {"simple_return": [0.0] * 8},
+                    column="return_shape_8",
+                    metric="l2",
+                    k=1,
+                )
+                .collect()
+            )
+            table_result = (
+                store.table("symbology")
+                .vector.search_series(
+                    {"simple_return": [0.0] * 8},
+                    column="return_shape_8",
+                    metric="l2",
+                    k=1,
+                )
+                .collect()
             )
             ohlcv_partition_exists = (
                 data_root / "ohlcv" / "year=2024" / "month=01" / "day=02" / "part.parquet"
@@ -329,6 +364,8 @@ class GeneratedDatasetTests(unittest.TestCase):
         self.assertEqual(result.shape, (5, 4))
         self.assertTrue(ohlcv_partition_exists)
         self.assertEqual(result["ticker"].unique().tolist(), ["007"])
+        self.assertEqual(series_result.shape[0], 1)
+        self.assertEqual(table_result["ticker"].tolist(), ["007"])
 
     def test_migrates_legacy_yearly_files_to_atomic_daily_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -391,6 +428,11 @@ class GeneratedDatasetTests(unittest.TestCase):
         self.assertEqual(table.column("ticker").to_pylist(), ["007", "042"])
         self.assertEqual(table.column("isin").to_pylist(), ["SE0000000007", "SE0000000042"])
         self.assertEqual(table.column("cik").to_pylist(), ["0000000008", "0000000043"])
+        self.assertEqual(
+            table.schema.field("return_shape_8").type,
+            pa.list_(pa.float32(), 8),
+        )
+        self.assertEqual(table.schema.field("return_shape_8").nullable, False)
 
     def test_generates_non_keyed_market_hours_rows(self) -> None:
         table = generate_markets()

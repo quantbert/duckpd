@@ -162,6 +162,11 @@ typed lazy plan.
 * **Lazy end to end:** `features()`, `table()`, and `feature_batches()` return
   ordinary DuckPD lazy DataFrames. Use `sync()` when a batch job should
   pre-warm its required partitions.
+* **Catalog-inferred series search:** Strict version-1 series registries bind
+  persisted `FLOAT[n]` feature and table columns. Aliases and exact/ASOF
+  alignment retain the representation, so native `search_series()` needs no
+  repeated specification and performs no model or network activity while
+  planning.
 
 ```python
 import duckpd as pd
@@ -175,11 +180,19 @@ training_frame = store.features(
     features={
         "close": "ohlcv:close",
         "momentum_20d": "momentum:value_20d",
+        "return_shape": "ohlcv:return_shape_8",
     },
     start="2023-01-01T00:00:00Z",
     end="2025-01-01T00:00:00Z",
     alignment="point_in_time",
     spine="ohlcv",
+)
+
+similar = training_frame[training_frame["return_shape"].notna()].vector.search_series(
+    {"simple_return": query_returns},
+    column="return_shape",
+    metric="l2",
+    k=20,
 )
 
 # Still lazy: DuckDB performs partition pruning, projection, and ASOF alignment.

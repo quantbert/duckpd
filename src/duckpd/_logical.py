@@ -114,6 +114,7 @@ class FeatureParquetSource:
     filesystem_key: str | None = None
     table: bool = False
     embedding_columns: tuple[tuple[str, int], ...] = ()
+    series_columns: tuple[tuple[str, SeriesRepresentationSpec], ...] = ()
 
 
 @dataclass(frozen=True)

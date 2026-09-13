@@ -443,6 +443,10 @@ def materialize_feature_source(
     path_template = source.path_template
     _validated_relative_path(path_template)
     relative_paths = partition_paths_for_interval(entry, path_template, start, end)
+    fixed_size_columns = dict(source.embedding_columns)
+    fixed_size_columns.update(
+        (label, representation.dimension) for label, representation in source.series_columns
+    )
     return [
         str(
             ensure_cached_partition(
@@ -451,7 +455,7 @@ def materialize_feature_source(
                 relative_path,
                 list(source.needed_columns),
                 con,
-                embedding_columns=dict(source.embedding_columns),
+                embedding_columns=fixed_size_columns,
             ).resolve()
         )
         for relative_path in relative_paths

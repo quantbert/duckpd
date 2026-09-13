@@ -8,6 +8,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from duckpd.embeddings import EmbeddingModelSpec
+from duckpd.series_embeddings import (
+    SeriesEmbeddingModelSpec,
+    SeriesRepresentationSpec,
+)
 
 _EMBEDDING_MODEL_FIELDS = frozenset(
     {
@@ -19,6 +23,61 @@ _EMBEDDING_MODEL_FIELDS = frozenset(
         "pooling",
         "document_prefix",
         "query_prefix",
+    }
+)
+
+_CATALOG_FIELDS = frozenset(
+    {
+        "catalog_version",
+        "name",
+        "description",
+        "datasets",
+        "features",
+        "embedding_models",
+        "series_embedding_models",
+        "series_representations",
+    }
+)
+_DATASET_FIELDS = frozenset(
+    {
+        "name",
+        "kind",
+        "description",
+        "metadata",
+        "time_column",
+        "series_keys",
+        "partitioning",
+        "history_lookback",
+        "min_time",
+        "max_time",
+        "path_template",
+        "primary_key",
+        "columns",
+    }
+)
+_FEATURE_FIELDS = frozenset(
+    {
+        "dataset",
+        "name",
+        "metadata",
+        "availability_delay",
+        "lookahead_safe",
+        "embedding_model",
+        "series_representation",
+    }
+)
+_SERIES_REPRESENTATION_FIELDS = frozenset(
+    {
+        "version",
+        "window",
+        "channels",
+        "sampling",
+        "step",
+        "data_contract",
+        "normalization",
+        "unit_norm",
+        "zero_scale",
+        "encoder",
     }
 )
 
@@ -65,6 +124,102 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
             )
         models[raw_name] = specification
     return models
+
+
+def _validate_series_embedding_models(
+    value: Any,
+) -> dict[str, SeriesEmbeddingModelSpec]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("Catalog series_embedding_models must be a mapping")
+    models: dict[str, SeriesEmbeddingModelSpec] = {}
+    for raw_name, raw_specification in cast("Mapping[object, object]", value).items():
+        if not isinstance(raw_name, str) or not raw_name:
+            raise ValueError("Catalog series embedding model keys must be non-empty strings")
+        if not isinstance(raw_specification, Mapping):
+            raise ValueError(f"Series embedding model {raw_name!r} must be a mapping")
+        data = dict(cast("Mapping[str, object]", raw_specification))
+        raw_channels = data.get("input_channels")
+        if isinstance(raw_channels, Sequence) and not isinstance(raw_channels, (str, bytes)):
+            data["input_channels"] = tuple(cast("Sequence[object]", raw_channels))
+        try:
+            models[raw_name] = SeriesEmbeddingModelSpec.from_dict(data)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid series embedding model {raw_name!r}: {error}") from None
+    return models
+
+
+def _validate_series_representations(
+    value: Any,
+    models: Mapping[str, SeriesEmbeddingModelSpec],
+) -> dict[str, SeriesRepresentationSpec]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("Catalog series_representations must be a mapping")
+    representations: dict[str, SeriesRepresentationSpec] = {}
+    for raw_name, raw_specification in cast("Mapping[object, object]", value).items():
+        if not isinstance(raw_name, str) or not raw_name:
+            raise ValueError("Catalog series representation keys must be non-empty strings")
+        if not isinstance(raw_specification, Mapping):
+            raise ValueError(f"Series representation {raw_name!r} must be a mapping")
+        data = dict(cast("Mapping[str, Any]", raw_specification))
+        unknown = sorted(set(data) - _SERIES_REPRESENTATION_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"Series representation {raw_name!r} has unknown fields: {', '.join(unknown)}"
+            )
+        missing = sorted(_SERIES_REPRESENTATION_FIELDS - set(data))
+        if missing:
+            raise ValueError(
+                f"Series representation {raw_name!r} is missing fields: {', '.join(missing)}"
+            )
+        if data.pop("version", None) != 1:
+            raise ValueError(f"Series representation {raw_name!r} version must be 1")
+        raw_channels = data.get("channels")
+        if not isinstance(raw_channels, Sequence) or isinstance(raw_channels, (str, bytes)):
+            raise ValueError(f"Series representation {raw_name!r} channels must be an array")
+        data["channels"] = tuple(cast("Sequence[object]", raw_channels))
+        raw_encoder = data.pop("encoder", None)
+        encoder: SeriesEmbeddingModelSpec | None = None
+        if raw_encoder is not None:
+            if not isinstance(raw_encoder, str) or not raw_encoder:
+                raise ValueError(
+                    f"Series representation {raw_name!r} encoder must be a "
+                    "non-empty registry key or null"
+                )
+            try:
+                encoder = models[raw_encoder]
+            except KeyError:
+                raise ValueError(
+                    f"Series representation {raw_name!r} references unknown "
+                    f"series embedding model {raw_encoder!r}"
+                ) from None
+        try:
+            representations[raw_name] = SeriesRepresentationSpec(
+                encoder=encoder,
+                **data,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid series representation {raw_name!r}: {error}") from None
+    return representations
+
+
+def _series_reference(
+    declaration: Mapping[str, Any],
+    *,
+    owner: str,
+    representations: Mapping[str, SeriesRepresentationSpec],
+) -> str | None:
+    raw_reference = declaration.get("series_representation")
+    if raw_reference is None:
+        return None
+    if not isinstance(raw_reference, str) or not raw_reference:
+        raise ValueError(f"{owner} series_representation must be a non-empty string")
+    if raw_reference not in representations:
+        raise ValueError(f"{owner} references unknown series representation {raw_reference!r}")
+    return raw_reference
 
 
 def _embedding_reference(
@@ -134,13 +289,25 @@ def validate_catalog(
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
     dict[str, EmbeddingModelSpec],
+    dict[str, SeriesEmbeddingModelSpec],
+    dict[str, SeriesRepresentationSpec],
 ]:
     """Validate the complete catalog version 1 schema."""
     catalog_version = catalog.get("catalog_version")
     if catalog_version != 1:
         raise ValueError(f"Unsupported catalog version: {catalog_version!r}")
+    unknown_catalog_fields = sorted(set(catalog) - _CATALOG_FIELDS)
+    if unknown_catalog_fields:
+        raise ValueError(f"Catalog has unknown fields: {', '.join(unknown_catalog_fields)}")
 
     embedding_models = _validate_embedding_models(catalog.get("embedding_models"))
+    series_embedding_models = _validate_series_embedding_models(
+        catalog.get("series_embedding_models")
+    )
+    series_representations = _validate_series_representations(
+        catalog.get("series_representations"),
+        series_embedding_models,
+    )
     dataset_entries_raw = catalog.get("datasets")
     if not isinstance(dataset_entries_raw, list) or not dataset_entries_raw:
         raise ValueError("Catalog must define at least one dataset")
@@ -150,6 +317,11 @@ def validate_catalog(
         if not isinstance(entry_raw, dict):
             raise ValueError("Catalog dataset entry must be a mapping")
         entry = cast("dict[str, Any]", entry_raw)
+        unknown_dataset_fields = sorted(set(entry) - _DATASET_FIELDS)
+        if unknown_dataset_fields:
+            raise ValueError(
+                f"Catalog dataset has unknown fields: {', '.join(unknown_dataset_fields)}"
+            )
         name: Any = entry.get("name")
         kind: Any = entry.get("kind")
         if not isinstance(name, str) or not name:
@@ -210,7 +382,9 @@ def validate_catalog(
                         f"Dataset {name!r} column {raw_column_name!r} metadata must be a mapping"
                     )
                 declaration = cast("Mapping[str, Any]", raw_declaration)
-                unknown_column_fields = sorted(set(declaration) - {"embedding_model"})
+                unknown_column_fields = sorted(
+                    set(declaration) - {"embedding_model", "series_representation"}
+                )
                 if unknown_column_fields:
                     raise ValueError(
                         f"Dataset {name!r} column {raw_column_name!r} has unknown fields: "
@@ -221,9 +395,21 @@ def validate_catalog(
                     owner=f"Dataset {name!r} column {raw_column_name!r}",
                     models=embedding_models,
                 )
+                series = _series_reference(
+                    declaration,
+                    owner=f"Dataset {name!r} column {raw_column_name!r}",
+                    representations=series_representations,
+                )
+                if embedding is not None and series is not None:
+                    raise ValueError(
+                        f"Dataset {name!r} column {raw_column_name!r} cannot define "
+                        "both embedding_model and series_representation"
+                    )
                 normalized = dict(declaration)
                 if embedding is not None:
                     normalized["embedding"] = embedding
+                if series is not None:
+                    normalized["series"] = series
                 normalized_columns[raw_column_name] = normalized
             entry = {**entry, "columns": normalized_columns}
         dataset_index[name] = entry
@@ -235,11 +421,18 @@ def validate_catalog(
 
     feature_index: dict[str, dict[str, Any]] = {}
     physical_embeddings: dict[tuple[str, str], str] = {}
+    physical_series: dict[tuple[str, str], str] = {}
     for ref_key, entry_val in feature_entries.items():
         reference = str(ref_key)
         if not isinstance(entry_val, dict):
             raise ValueError(f"Catalog feature entry for {reference!r} must be a mapping")
         entry = cast("dict[str, Any]", entry_val)
+        unknown_feature_fields = sorted(set(entry) - _FEATURE_FIELDS)
+        if unknown_feature_fields:
+            raise ValueError(
+                f"Catalog feature {reference!r} has unknown fields: "
+                f"{', '.join(unknown_feature_fields)}"
+            )
         expected_reference = f"{entry.get('dataset')}:{entry.get('name')}"
         if reference != expected_reference:
             raise ValueError(
@@ -254,19 +447,51 @@ def validate_catalog(
             owner=f"Catalog feature {reference!r}",
             models=embedding_models,
         )
+        series = _series_reference(
+            entry,
+            owner=f"Catalog feature {reference!r}",
+            representations=series_representations,
+        )
+        if embedding is not None and series is not None:
+            raise ValueError(
+                f"Catalog feature {reference!r} cannot define both embedding_model "
+                "and series_representation"
+            )
+        physical_key = (entry["dataset"], entry["name"])
+        if (embedding is not None and physical_key in physical_series) or (
+            series is not None and physical_key in physical_embeddings
+        ):
+            raise ValueError(
+                f"Catalog feature {reference!r} conflicts with another vector "
+                f"declaration for {physical_key[0]}.{physical_key[1]}"
+            )
         normalized_entry = dict(entry)
         if embedding is not None:
             normalized_entry["embedding"] = embedding
-            key = (entry["dataset"], entry["name"])
-            existing = physical_embeddings.setdefault(key, embedding)
+            existing = physical_embeddings.setdefault(physical_key, embedding)
             if existing != embedding:
                 raise ValueError(
                     f"Catalog feature {reference!r} conflicts with another embedding "
-                    f"declaration for {key[0]}.{key[1]}"
+                    f"declaration for {physical_key[0]}.{physical_key[1]}"
+                )
+        if series is not None:
+            normalized_entry["series"] = series
+            existing_series = physical_series.setdefault(physical_key, series)
+            if existing_series != series:
+                raise ValueError(
+                    f"Catalog feature {reference!r} conflicts with another series "
+                    f"representation declaration for "
+                    f"{physical_key[0]}.{physical_key[1]}"
                 )
         feature_index[reference] = normalized_entry
 
-    return dataset_index, feature_index, embedding_models
+    return (
+        dataset_index,
+        feature_index,
+        embedding_models,
+        series_embedding_models,
+        series_representations,
+    )
 
 
 def resolve_features(

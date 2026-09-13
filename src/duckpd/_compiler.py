@@ -65,9 +65,54 @@ from duckpd._logical import (
 from duckpd._optimizer import LogicalOptimizer, OptimizationResult
 from duckpd._quoting import quote_identifier, quote_literal
 from duckpd.errors import UnsupportedOperationError
+from duckpd.series_embeddings import SeriesRepresentationSpec, _series_schema_error
 
 if TYPE_CHECKING:
     from duckpd.session import Session
+
+
+def _catalog_series_manifest_error(
+    path: str,
+    columns: tuple[tuple[str, SeriesRepresentationSpec], ...],
+) -> str | None:
+    """Compare an optional persisted series identity with the catalog contract."""
+    import json
+    from pathlib import Path
+
+    manifest_path = Path(f"{path}.duckpd-embeddings.json")
+    if not columns or not manifest_path.is_file():
+        return None
+    try:
+        raw_payload: object = json.loads(manifest_path.read_text())
+        if not isinstance(raw_payload, dict):
+            raise TypeError
+        payload = cast("dict[str, object]", raw_payload)
+        version = payload.get("version")
+        if version == 1:
+            return None
+        if version != 2:
+            raise ValueError
+        raw_columns_object = payload.get("series_columns")
+        if not isinstance(raw_columns_object, dict):
+            raise TypeError
+        raw_columns = cast("dict[str, object]", raw_columns_object)
+        for label, catalog_representation in columns:
+            raw_representation = raw_columns.get(label)
+            if raw_representation is None:
+                continue
+            if not isinstance(raw_representation, dict):
+                raise TypeError
+            persisted = SeriesRepresentationSpec.from_dict(
+                cast("dict[str, object]", raw_representation)
+            )
+            if persisted != catalog_representation:
+                return (
+                    f"Catalog series column {label!r} conflicts with persisted "
+                    "series representation metadata"
+                )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return "Invalid DuckPD series representation metadata manifest"
+    return None
 
 
 @dataclass(frozen=True)
@@ -1054,18 +1099,49 @@ class DuckDBCompiler:
                     source.embedding_columns,
                 ):
                     raise UnsupportedOperationError(error)
+                if error := _series_schema_error(
+                    pq.ParquetFile(path).schema_arrow,
+                    source.series_columns,
+                ):
+                    raise UnsupportedOperationError(error)
+                if error := _catalog_series_manifest_error(
+                    path,
+                    source.series_columns,
+                ):
+                    raise UnsupportedOperationError(error)
             relation = self._session._connection.read_parquet(paths)
-            embedding_dimensions = dict(source.embedding_columns)
+            fixed_dimensions = dict(source.embedding_columns)
+            fixed_dimensions.update(
+                (label, representation.dimension) for label, representation in source.series_columns
+            )
             projections = [
                 (
                     f"CAST({quote_identifier(label)} AS FLOAT"
-                    f"[{embedding_dimensions[label]}]) AS {quote_identifier(label)}"
-                    if label in embedding_dimensions
+                    f"[{fixed_dimensions[label]}]) AS {quote_identifier(label)}"
+                    if label in fixed_dimensions
                     else quote_identifier(label)
                 )
                 for label in relation.columns
             ]
-            return relation.project(", ".join(projections))
+            relation = relation.project(", ".join(projections))
+            for label, representation in source.series_columns:
+                column = quote_identifier(label)
+                invalid = (
+                    f"({column} IS NOT NULL AND list_contains("
+                    f"list_transform({column}, value -> "
+                    "value IS NULL OR NOT isfinite(CAST(value AS FLOAT))), TRUE))"
+                )
+                if representation.unit_norm:
+                    as_double = f"CAST({column} AS DOUBLE[{representation.dimension}])"
+                    norm = f"sqrt(array_inner_product({as_double}, {as_double}))"
+                    invalid = f"({invalid} OR ({column} IS NOT NULL AND abs({norm} - 1.0) > 1e-4))"
+                message = quote_literal(
+                    f"Catalog series column {label!r} contains invalid vector values"
+                )
+                relation = relation.filter(
+                    f"CASE WHEN {invalid} THEN error({message}) ELSE TRUE END"
+                )
+            return relation
 
         paths: str | list[str] = source.paths[0] if len(source.paths) == 1 else list(source.paths)
         return self._session._connection.read_parquet(
