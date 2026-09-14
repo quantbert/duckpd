@@ -143,6 +143,9 @@ def _validate_series_embedding_models(
         raw_channels = data.get("input_channels")
         if isinstance(raw_channels, Sequence) and not isinstance(raw_channels, (str, bytes)):
             data["input_channels"] = tuple(cast("Sequence[object]", raw_channels))
+        raw_roles = data.get("input_roles")
+        if isinstance(raw_roles, Sequence) and not isinstance(raw_roles, (str, bytes)):
+            data["input_roles"] = tuple(cast("Sequence[object]", raw_roles))
         try:
             models[raw_name] = SeriesEmbeddingModelSpec.from_dict(data)
         except (TypeError, ValueError) as error:

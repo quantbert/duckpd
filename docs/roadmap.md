@@ -1045,21 +1045,21 @@ Exit gate:
 Goal: add learned inference only after the native representation and retrieval
 contracts are stable and independently useful.
 
-- [ ] Add a session-owned `SeriesEmbeddingProvider` lifecycle with explicit
+- [x] Add a session-owned `SeriesEmbeddingProvider` lifecycle with explicit
       preparation, bounded Arrow batches, masks, ordered target/past-only/
       known-future covariate roles, context length, pooling, and output validation.
-- [ ] Evaluate immutable Chronos-2 and TimesFM 3 adapters; qualify a built-in
+- [x] Evaluate immutable Chronos-2 and TimesFM 3 adapters; qualify a built-in
       checkpoint only if its license permits the intended use and a reviewed
       retrieval benchmark demonstrates value over native representations for a
       named task. Do not block native release on this result.
-- [ ] Record preparation, inference, memory, and cache metrics without hidden
+- [x] Record preparation, inference, memory, and cache metrics without hidden
       normalization, device fallback, or planning-time downloads.
-- [ ] Add further adapters without changing the DataFrame, typed-query, or exact
+- [x] Add further adapters without changing the DataFrame, typed-query, or exact
       search contracts.
 
 Exit gate:
 
-- [ ] Corpus and query encoding agree deterministically, provider calls remain
+- [x] Corpus and query encoding agree deterministically, provider calls remain
       bounded, failures leave no promoted cache or output, and qualification
       records the exact model artifact and runtime.
 

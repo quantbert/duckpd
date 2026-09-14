@@ -2221,6 +2221,7 @@ def test_catalog_series_schema_registries_and_references_are_strict(
         dimension=3,
         input_length=3,
         input_channels=("return",),
+        input_roles=("target",),
         input_normalization="none",
         pooling="last",
         adapter_revision="adapter-v1",
@@ -2361,6 +2362,7 @@ def test_catalog_learned_series_declarations_never_prepare_during_planning(
         dimension=3,
         input_length=3,
         input_channels=("return",),
+        input_roles=("target",),
         input_normalization="none",
         pooling="last",
         adapter_revision="adapter-v1",
@@ -2392,16 +2394,17 @@ def test_catalog_learned_series_declarations_never_prepare_during_planning(
     assert store.series_representation("learned") == learned
     assert session.execution_count == 0
     assert session.inspect_prepared_embedding_models() == ()
-    with pytest.raises(
-        UnsupportedOperationError,
-        match="encoder=None",
-    ):
-        frame.vector.search_series(
-            {"return": [1.0, 2.0, 3.0]},
-            column="return_shape",
-        )
+    searched = frame.vector.search_series(
+        {"return": [1.0, 2.0, 3.0]},
+        column="return_shape",
+    )
+    searched.explain(mode="json")
+    assert session.execution_count == 0
+    with pytest.raises(UnsupportedOperationError, match="not prepared"):
+        searched.collect()
     assert session.execution_count == 0
     assert session.inspect_prepared_embedding_models() == ()
+    assert session.inspect_prepared_series_embedding_models() == ()
 
 
 def test_catalog_series_timeseries_dimension_is_checked_when_bound(

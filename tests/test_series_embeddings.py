@@ -2,19 +2,29 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from threading import Lock
+from time import sleep
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 import duckpd
 from duckpd._logical import SeriesRepresentationPlan
 from duckpd.errors import MaterializationError, UnsupportedOperationError
 from duckpd.frame import DataFrame
-from duckpd.series_embeddings import SeriesColumnSpec, SeriesWindowSpec
+from duckpd.series_embeddings import (
+    SeriesColumnSpec,
+    SeriesNormalization,
+    SeriesWindowSpec,
+    ZeroScalePolicy,
+)
 
 
 def _native_representation(
@@ -41,10 +51,148 @@ def _learned_model() -> duckpd.SeriesEmbeddingModelSpec:
         dimension=3,
         input_length=2,
         input_channels=("simple_return",),
+        input_roles=("target",),
         input_normalization="none",
         pooling="mean-valid-v1",
         adapter_revision="adapter-v1",
     )
+
+
+def _learned_representation(
+    *,
+    channels: tuple[str, ...] = ("simple_return",),
+    roles: tuple[duckpd.SeriesChannelRole, ...] = ("target",),
+    normalization: SeriesNormalization = "none",
+    unit_norm: bool = False,
+    zero_scale: ZeroScalePolicy = "error",
+) -> duckpd.SeriesRepresentationSpec:
+    model = duckpd.series_embedding_model(
+        "research/return-encoder",
+        revision="immutable-revision-v1",
+        artifact_sha256="a" * 64,
+        backend="custom",
+        dimension=3,
+        input_length=2,
+        input_channels=channels,
+        input_roles=roles,
+        input_normalization="provider-none-v1",
+        pooling="mean-valid-v1",
+        adapter_revision="adapter-v1",
+    )
+    return duckpd.series_representation(
+        window=2,
+        channels=channels,
+        sampling="observations",
+        data_contract="market/learned-input/v1",
+        normalization=normalization,
+        unit_norm=unit_norm,
+        zero_scale=zero_scale,
+        encoder=model,
+    )
+
+
+class _RecordingSeriesProvider:
+    def __init__(
+        self,
+        model: duckpd.SeriesEmbeddingModelSpec,
+        *,
+        thread_safe: bool = True,
+        delay: float = 0.0,
+        output_mode: str = "valid",
+        prepared_override: dict[str, object] | None = None,
+    ) -> None:
+        self._model = model
+        self._thread_safe = thread_safe
+        self._delay = delay
+        self.output_mode = output_mode
+        self.prepared_override = prepared_override or {}
+        self.prepare_calls = 0
+        self.batches: list[pa.RecordBatch] = []
+        self.close_calls = 0
+        self.max_active = 0
+        self._active = 0
+        self._lock = Lock()
+
+    @property
+    def specification(self) -> duckpd.SeriesEmbeddingModelSpec:
+        return self._model
+
+    @property
+    def thread_safe(self) -> bool:
+        return self._thread_safe
+
+    def prepare(self) -> duckpd.PreparedSeriesModelInfo:
+        self.prepare_calls += 1
+        values: dict[str, object] = {
+            "model_fingerprint": self._model.fingerprint,
+            "resolved_revision": self._model.revision,
+            "artifact_sha256": self._model.artifact_sha256,
+            "backend": self._model.backend,
+            "adapter_revision": self._model.adapter_revision,
+            "input_length": self._model.input_length,
+            "input_channels": self._model.input_channels,
+            "input_roles": self._model.input_roles,
+            "input_normalization": self._model.input_normalization,
+            "pooling": self._model.pooling,
+            "dimension": self._model.dimension,
+            "cache_path": None,
+            "execution_providers": ("CPUExecutionProvider",),
+            "runtime_versions": (("fake-series-runtime", "1.0"),),
+        }
+        values.update(self.prepared_override)
+        return duckpd.PreparedSeriesModelInfo(**values)  # type: ignore[arg-type]
+
+    def embed_windows(self, batch: pa.RecordBatch) -> pa.Array[Any]:
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            if self._delay:
+                sleep(self._delay)
+            self.batches.append(batch)
+            batch_columns = cast("list[pa.Array[Any]]", cast("Any", batch).columns)
+            rows_by_channel = [
+                cast("list[list[float]]", column.to_pylist()) for column in batch_columns
+            ]
+            vectors = [
+                [
+                    float(rows_by_channel[0][row][0]),
+                    float(rows_by_channel[0][row][-1]),
+                    float(
+                        sum(
+                            value for channel_rows in rows_by_channel for value in channel_rows[row]
+                        )
+                    ),
+                ]
+                for row in range(batch.num_rows)
+            ]
+            if self.output_mode == "rows":
+                vectors = vectors[:-1]
+            elif self.output_mode == "dimension":
+                vectors = [row[:2] for row in vectors]
+            elif self.output_mode == "nan":
+                vectors[0][0] = float("nan")
+            elif self.output_mode == "zero":
+                vectors = [[0.0] * self._model.dimension for _ in vectors]
+            if self.output_mode == "wrong_type":
+                return pa.array(vectors, type=pa.list_(pa.float32()))
+            if self.output_mode == "null":
+                return pa.array(
+                    [None for _ in vectors],
+                    type=pa.list_(pa.float32(), self._model.dimension),
+                )
+            if self.output_mode == "child_null":
+                vectors[0][0] = None  # type: ignore[assignment]
+            return pa.array(
+                vectors,
+                type=pa.list_(pa.float32(), len(vectors[0]) if vectors else self._model.dimension),
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 def _attach_series_metadata(
@@ -687,13 +835,6 @@ def test_embed_series_rejects_invalid_contracts_before_execution() -> None:
         data_contract="value/v1",
     )
     fixed_grid = replace(representation, sampling="fixed_grid", step="PT1M")
-    learned = duckpd.series_representation(
-        window=2,
-        channels=("simple_return",),
-        sampling="observations",
-        data_contract="value/v1",
-        encoder=_learned_model(),
-    )
 
     invalid_calls = (
         lambda: windows.embed_series(
@@ -720,11 +861,6 @@ def test_embed_series_rejects_invalid_contracts_before_execution() -> None:
             columns={"value": "window"},
             into="vector",
             representation=fixed_grid,
-        ),
-        lambda: windows.embed_series(
-            columns={"simple_return": "window"},
-            into="vector",
-            representation=learned,
         ),
         lambda: windows.embed_series(
             columns={"value": "window"},
@@ -831,3 +967,460 @@ def test_native_series_representation_round_trips_through_direct_parquet_sink(
     )
     values = restored.collect()["vector"]  # pyright: ignore[reportUnknownMemberType]
     np.testing.assert_array_equal(values.iloc[1], np.array([-0.5, 0.5], dtype=np.float32))
+
+
+def _learned_windows(
+    session: duckpd.Session,
+    representation: duckpd.SeriesRepresentationSpec,
+    *,
+    batch_size: int = 2,
+) -> DataFrame:
+    source = session.from_pandas(
+        pd.DataFrame(
+            {
+                "row": range(5),
+                "target": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "past": [10.0, 20.0, 30.0, 40.0, 50.0],
+                "known": [100.0, 101.0, 102.0, 103.0, 104.0],
+            }
+        ),
+        order_by="row",
+    )
+    windows = source.assign(
+        target_window=lambda frame: frame["target"].rolling(2).to_array(),
+        past_window=lambda frame: frame["past"].rolling(2).to_array(),
+        known_window=lambda frame: frame["known"].rolling(2).to_array(),
+    )
+    return windows.embed_series(
+        columns={
+            "target": "target_window",
+            "past": "past_window",
+            "known": "known_window",
+        },
+        into="vector",
+        representation=representation,
+        batch_size=batch_size,
+    )
+
+
+def test_learned_series_model_roles_are_canonical_and_strict() -> None:
+    representation = _learned_representation(
+        channels=("target", "past", "known"),
+        roles=("target", "past_covariate", "known_future_covariate"),
+    )
+    model = representation.encoder
+    assert model is not None
+
+    restored = duckpd.SeriesEmbeddingModelSpec.from_dict(json.loads(json.dumps(model.to_dict())))
+
+    assert restored == model
+    assert restored.fingerprint == model.fingerprint
+    with pytest.raises(ValueError, match="one-for-one"):
+        replace(model, input_roles=("target",))
+    with pytest.raises(ValueError, match="input_roles"):
+        replace(model, input_roles=("target", "invalid", "known_future_covariate"))
+    with pytest.raises(ValueError, match="target"):
+        replace(
+            model,
+            input_roles=(
+                "past_covariate",
+                "past_covariate",
+                "known_future_covariate",
+            ),
+        )
+
+
+def test_learned_provider_lifecycle_is_explicit_bounded_and_masked() -> None:
+    representation = _learned_representation(
+        channels=("target", "past", "known"),
+        roles=("target", "past_covariate", "known_future_covariate"),
+    )
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    embedded = _learned_windows(session, representation, batch_size=2)
+
+    operation = json.loads(embedded.explain(mode="json"))["execution_boundaries"][
+        "embedding_operations"
+    ][0]
+    assert "__duckpd_embed_series_" in embedded.explain(mode="sql")
+    assert operation["backend"] == "custom"
+    assert operation["model_prepared"] is False
+    assert operation["input_roles"] == [
+        "target",
+        "past_covariate",
+        "known_future_covariate",
+    ]
+    assert provider.prepare_calls == 0
+    assert provider.batches == []
+    executions_before_failure = session.execution_count
+    with pytest.raises(UnsupportedOperationError, match="not prepared"):
+        embedded.collect()
+    assert session.execution_count == executions_before_failure
+    assert provider.batches == []
+
+    prepared = session.prepare_series_embedding_model(model)
+    assert prepared.model_fingerprint == model.fingerprint
+    assert prepared.resolved_revision == model.revision
+    assert prepared.runtime_versions == (("fake-series-runtime", "1.0"),)
+    assert session.prepare_series_embedding_model(model) is prepared
+    assert provider.prepare_calls == 1
+
+    result = embedded.collect()
+
+    assert pd.isna(result["vector"].iloc[0])
+    np.testing.assert_array_equal(
+        result["vector"].iloc[1],
+        np.array([1.0, 2.0, 234.0], dtype=np.float32),
+    )
+    assert [batch.num_rows for batch in provider.batches] == [2, 2]
+    for batch in provider.batches:
+        assert batch.schema.names == ["target", "past", "known"]
+        assert batch.schema.metadata is not None
+        assert batch.schema.metadata[b"duckpd.mask_semantics"] == b"complete_rows_only-v1"
+        fields = cast("list[Any]", list(batch.schema))
+        assert [field.metadata[b"duckpd.channel_role"] for field in fields] == [
+            b"target",
+            b"past_covariate",
+            b"known_future_covariate",
+        ]
+        assert all(field.type == pa.list_(pa.float32(), 2) for field in fields)
+        columns = cast("list[pa.Array[Any]]", cast("Any", batch).columns)
+        assert all(column.null_count == 0 for column in columns)
+    assert session._embedding_metrics["series_complete_rows"] == 4
+    assert session._embedding_metrics["series_propagated_null_rows"] == 1
+    assert session._embedding_metrics["series_max_provider_batch_rows"] == 2
+
+    eager = session.embed_series_query(
+        {
+            "target": [1.0, 2.0],
+            "past": [10.0, 20.0],
+            "known": [100.0, 101.0],
+        },
+        representation=representation,
+    )
+    assert eager.values == (1.0, 2.0, 234.0)
+
+
+def test_learned_series_query_matches_corpus_once_per_execution() -> None:
+    representation = _learned_representation(
+        channels=("target", "past", "known"),
+        roles=("target", "past_covariate", "known_future_covariate"),
+        normalization="center",
+        unit_norm=True,
+    )
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+    candidates = _learned_windows(session, representation, batch_size=2)
+    raw_query = {
+        "target": [2.0, 3.0],
+        "past": [20.0, 30.0],
+        "known": [101.0, 102.0],
+    }
+    searched = candidates[candidates["row"] >= 1].vector.search_series(
+        raw_query,
+        column="vector",
+        metric="l2",
+        k=4,
+        tie_breaker="row",
+    )
+    raw_query["target"][0] = 999.0
+
+    first = searched.collect()
+    first_query_calls = session._embedding_metrics["series_query_provider_calls"]
+    first_corpus_calls = session._embedding_metrics["series_corpus_provider_calls"]
+    second = searched.collect()
+
+    assert first["row"].iloc[0] == 1
+    assert second["row"].tolist() == first["row"].tolist()
+    assert first_query_calls == 1
+    assert session._embedding_metrics["series_query_provider_calls"] == 2
+    assert session._embedding_metrics["series_corpus_provider_calls"] == 2 * first_corpus_calls
+    assert session._embedding_metrics["series_query_cache_entries"] == 1
+
+
+@pytest.mark.parametrize(
+    "output_mode",
+    ("rows", "dimension", "nan", "null", "child_null", "wrong_type", "zero"),
+)
+def test_learned_provider_rejects_invalid_output_without_cache(output_mode: str) -> None:
+    representation = _learned_representation()
+    if output_mode == "zero":
+        representation = replace(representation, unit_norm=True)
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model, output_mode=output_mode)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+
+    with pytest.raises((TypeError, ValueError)):
+        session.embed_series_query(
+            {"simple_return": [1.0, 2.0]},
+            representation=representation,
+        )
+
+    assert session._embedded_series_queries == {}
+    assert session.inspect_prepared_series_embedding_models()[0].model_fingerprint == (
+        model.fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("model_fingerprint", "f" * 64),
+        ("resolved_revision", "different-revision"),
+        ("artifact_sha256", "b" * 64),
+        ("adapter_revision", "different-adapter"),
+        ("dimension", 4),
+        ("input_roles", ("past_covariate",)),
+    ),
+)
+def test_failed_series_preparation_is_never_promoted(field: str, invalid: object) -> None:
+    representation = _learned_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model, prepared_override={field: invalid})
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+
+    for _ in range(2):
+        with pytest.raises(UnsupportedOperationError, match="attestation mismatch"):
+            session.prepare_series_embedding_model(model)
+
+    assert provider.prepare_calls == 2
+    assert session.inspect_prepared_series_embedding_models() == ()
+
+
+def test_non_thread_safe_series_provider_calls_never_overlap_and_close_once() -> None:
+    representation = _learned_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model, thread_safe=False, delay=0.01)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+
+    def encode(value: float) -> duckpd.EmbeddedSeriesQuery:
+        return session.embed_series_query(
+            {"simple_return": [value, value + 1.0]},
+            representation=representation,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = tuple(executor.map(encode, (1.0, 2.0, 3.0, 4.0)))
+
+    assert len(results) == 4
+    assert provider.max_active == 1
+    session.close()
+    session.close()
+    assert provider.close_calls == 1
+
+
+def test_learned_series_profile_reports_lifecycle_and_arrow_resources() -> None:
+    representation = _learned_representation(
+        channels=("target", "past", "known"),
+        roles=("target", "past_covariate", "known_future_covariate"),
+    )
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+
+    profile = _learned_windows(session, representation, batch_size=2).profile()
+    metrics = profile.embedding_metrics
+
+    assert metrics is not None
+    assert metrics["series_preparation_count"] == 1
+    assert metrics["series_model_cache_bytes"] == 0
+    assert metrics["series_corpus_provider_calls"] == 2
+    assert metrics["series_corpus_rows"] == 4
+    assert metrics["series_max_provider_batch_rows"] == 2
+    assert metrics["series_arrow_bytes"] > 0
+    assert metrics["series_peak_arrow_batch_bytes"] > 0
+
+
+def test_learned_zero_scale_and_null_masks_skip_provider_calls() -> None:
+    representation = _learned_representation(
+        normalization="zscore",
+        zero_scale="null",
+    )
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+    source = session.from_pandas(
+        pd.DataFrame({"row": range(4), "value": [3.0] * 4}),
+        order_by="row",
+    )
+    windows = source.assign(window=lambda frame: frame["value"].rolling(2).to_array())
+    embedded = windows.embed_series(
+        columns={"simple_return": "window"},
+        into="vector",
+        representation=representation,
+    )
+
+    result = embedded.collect()
+
+    assert result["vector"].isna().all()
+    assert provider.batches == []
+    assert session._embedding_metrics["series_complete_rows"] == 0
+    assert session._embedding_metrics["series_propagated_null_rows"] == 1
+    assert session._embedding_metrics["series_zero_scale_rows"] == 3
+
+
+def test_failed_learned_sink_leaves_no_output_or_query_cache(tmp_path: Path) -> None:
+    representation = _learned_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model, output_mode="nan")
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+    source = session.from_pandas(
+        pd.DataFrame({"row": range(3), "value": [1.0, 2.0, 3.0]}),
+        order_by="row",
+    )
+    windows = source.assign(window=lambda frame: frame["value"].rolling(2).to_array())
+    embedded = windows.embed_series(
+        columns={"simple_return": "window"},
+        into="vector",
+        representation=representation,
+    )
+    output = tmp_path / "invalid-series.parquet"
+
+    with pytest.raises(MaterializationError):
+        embedded.write_parquet(output)
+
+    assert not output.exists()
+    assert session._embedded_series_queries == {}
+
+
+def test_prepared_series_model_info_rejects_incomplete_runtime_contracts() -> None:
+    model = _learned_model()
+    info = _RecordingSeriesProvider(model).prepare()
+    invalid_changes: tuple[dict[str, object], ...] = (
+        {"model_fingerprint": ""},
+        {"resolved_revision": ""},
+        {"artifact_sha256": "invalid"},
+        {"backend": ""},
+        {"adapter_revision": ""},
+        {"input_length": 0},
+        {"input_channels": ("",)},
+        {"input_roles": ()},
+        {"input_roles": ("invalid",)},
+        {"input_normalization": ""},
+        {"pooling": ""},
+        {"dimension": 0},
+        {"cache_path": ""},
+        {"execution_providers": ()},
+        {"execution_providers": ("",)},
+        {"runtime_versions": ()},
+        {"runtime_versions": (("runtime", ""),)},
+        {"preparation_seconds": -1.0},
+        {"preparation_seconds": float("nan")},
+    )
+
+    for changes in invalid_changes:
+        with pytest.raises((TypeError, ValueError)):
+            replace(info, **changes)
+
+
+def test_series_provider_registration_and_preparation_are_strict() -> None:
+    representation = _learned_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+
+    with pytest.raises(UnsupportedOperationError, match="backend='custom'"):
+        noncustom = replace(model, backend="onnx-runtime")
+        session.register_series_embedding_provider(
+            noncustom,
+            _RecordingSeriesProvider(noncustom),
+        )
+    with pytest.raises(ValueError, match="specification"):
+        session.register_series_embedding_provider(_learned_model(), provider)
+
+    invalid_thread_safety = _RecordingSeriesProvider(model)
+    invalid_thread_safety._thread_safe = cast("Any", "yes")
+    with pytest.raises(TypeError, match="thread_safe"):
+        session.register_series_embedding_provider(model, invalid_thread_safety)
+
+    session.register_series_embedding_provider(model, provider)
+    with pytest.raises(ValueError, match="different series provider"):
+        session.register_series_embedding_provider(model, _RecordingSeriesProvider(model))
+
+    with pytest.raises(UnsupportedOperationError, match="not registered"):
+        duckpd.connect().prepare_series_embedding_model(model)
+
+    class InvalidPreparationProvider(_RecordingSeriesProvider):
+        def prepare(self) -> duckpd.PreparedSeriesModelInfo:
+            return cast("duckpd.PreparedSeriesModelInfo", {})
+
+    invalid_model = replace(model, artifact_sha256="c" * 64)
+    invalid_session = duckpd.connect()
+    invalid_session.register_series_embedding_provider(
+        invalid_model,
+        InvalidPreparationProvider(invalid_model),
+    )
+    with pytest.raises(TypeError, match="PreparedSeriesModelInfo"):
+        invalid_session.prepare_series_embedding_model(invalid_model)
+    assert invalid_session.inspect_prepared_series_embedding_models() == ()
+
+
+def test_series_preparation_measures_local_cache_bytes(tmp_path: Path) -> None:
+    cache = tmp_path / "series-model"
+    cache.mkdir()
+    (cache / "weights.bin").write_bytes(b"1234")
+    (cache / "config.json").write_bytes(b"12")
+    representation = _learned_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(
+        model,
+        prepared_override={"cache_path": str(cache)},
+    )
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+
+    session.prepare_series_embedding_model(model)
+
+    assert session._embedding_metrics["series_model_cache_bytes"] == 6
+
+
+def test_learned_null_error_fails_before_provider_inference() -> None:
+    representation = _learned_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+    session.register_series_embedding_provider(model, provider)
+    session.prepare_series_embedding_model(model)
+    source = session.from_pandas(
+        pd.DataFrame({"row": [0, 1], "value": [1.0, 2.0]}),
+        order_by="row",
+    )
+    windows = source.assign(window=lambda frame: frame["value"].rolling(2).to_array())
+    embedded = windows.embed_series(
+        columns={"simple_return": "window"},
+        into="vector",
+        representation=representation,
+        null_policy="error",
+    )
+
+    with pytest.raises(MaterializationError):
+        embedded.collect()
+
+    assert provider.batches == []

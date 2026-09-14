@@ -291,10 +291,23 @@ def _execution_context(
             }
             if executes:
                 if operation == "profile":
+                    lifecycle_metrics = {
+                        key: value
+                        for key, value in self._session._embedding_metrics.items()
+                        if key.startswith(
+                            (
+                                "series_preparation_",
+                                "series_model_cache_",
+                                "series_execution_provider_",
+                            )
+                        )
+                    }
                     self._session._embedding_metrics = {
-                        "catalog_access_seconds": (self._session._embedding_catalog_access_seconds)
+                        "catalog_access_seconds": self._session._embedding_catalog_access_seconds,
+                        **lifecycle_metrics,
                     }
                 self._session._prepare_plan_embedding_models(plan)
+                self._session._validate_plan_series_models(plan)
             progress = self._show_embedding_progress(plan) if executes else nullcontext()
             try:
                 with progress:
@@ -487,18 +500,32 @@ def _embedding_operations(
                 }
             )
         elif isinstance(node, SeriesRepresentationPlan):
+            encoder = node.representation.encoder
             operations.append(
                 {
                     "operation": "embed_series",
-                    "backend": "native",
+                    "backend": "native" if encoder is None else encoder.backend,
+                    "model_fingerprint": None if encoder is None else encoder.fingerprint,
+                    "model_prepared": (
+                        False if encoder is None else encoder.fingerprint in prepared_models
+                    ),
                     "representation_fingerprint": node.representation.fingerprint,
                     "dimension": node.representation.dimension,
                     "normalization": node.representation.normalization,
+                    "internal_normalization": (
+                        None if encoder is None else encoder.input_normalization
+                    ),
+                    "pooling": None if encoder is None else encoder.pooling,
+                    "input_roles": None if encoder is None else list(encoder.input_roles),
                     "unit_norm": node.representation.unit_norm,
                     "batch_size": node.batch_size,
                     "null_policy": node.null_policy,
                     "channels": [channel for channel, _ in node.channels],
-                    "boundary": "duckdb_native_expression",
+                    "boundary": (
+                        "duckdb_native_expression"
+                        if encoder is None
+                        else "arrow_series_embedding_provider"
+                    ),
                     "persistence": "lazy",
                 }
             )
@@ -508,14 +535,24 @@ def _embedding_operations(
                 for column in node.input.metadata.columns
                 if column.id == node.vector_column and column.series is not None
             )
+            encoder = node.representation.encoder
             operations.append(
                 {
                     "operation": "search_series",
-                    "backend": "native",
+                    "backend": "native" if encoder is None else encoder.backend,
+                    "model_fingerprint": None if encoder is None else encoder.fingerprint,
+                    "model_prepared": (
+                        False if encoder is None else encoder.fingerprint in prepared_models
+                    ),
                     "representation_fingerprint": node.representation.fingerprint,
                     "representation_origin": origin,
                     "dimension": node.representation.dimension,
                     "normalization": node.representation.normalization,
+                    "internal_normalization": (
+                        None if encoder is None else encoder.input_normalization
+                    ),
+                    "pooling": None if encoder is None else encoder.pooling,
+                    "input_roles": None if encoder is None else list(encoder.input_roles),
                     "unit_norm": node.representation.unit_norm,
                     "filter_placement": (
                         "before_search" if isinstance(node.input, FilterPlan) else "none"
@@ -523,7 +560,11 @@ def _embedding_operations(
                     "strategy": "persisted_exact",
                     "k": node.k,
                     "query": "<redacted>",
-                    "boundary": "duckdb_native_query_expression",
+                    "boundary": (
+                        "duckdb_native_query_expression"
+                        if encoder is None
+                        else "arrow_series_embedding_provider"
+                    ),
                 }
             )
         elif isinstance(node, SemanticSearchPlan):
@@ -1598,7 +1639,12 @@ class Executor:
         vector_operations = _vector_operations(plan)
         embedding_operations = _embedding_operations(
             plan,
-            frozenset(self._session._prepared_embedding_models),
+            frozenset(
+                {
+                    *self._session._prepared_embedding_models,
+                    *self._session._prepared_series_embedding_models,
+                }
+            ),
             {
                 fingerprint: policy.auto_prepare
                 for fingerprint, policy in self._session._catalog_embedding_policies.items()
@@ -1820,7 +1866,12 @@ class Executor:
             embedding_metrics=embedding_metrics or None,
             embedding_operations=_embedding_operations(
                 plan,
-                frozenset(self._session._prepared_embedding_models),
+                frozenset(
+                    {
+                        *self._session._prepared_embedding_models,
+                        *self._session._prepared_series_embedding_models,
+                    }
+                ),
                 {
                     fingerprint: policy.auto_prepare
                     for fingerprint, policy in self._session._catalog_embedding_policies.items()

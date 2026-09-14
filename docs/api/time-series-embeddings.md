@@ -551,8 +551,10 @@ matches = features[features["pattern"].notna()].vector.search_series(
 `FeatureStore.series_representation(name)` and
 `FeatureStore.series_embedding_model(name)` are metadata-only lookups.
 Constructing the store, selecting features, calling `search_series()`, and
-explaining the plan do not prepare a learned encoder or generate corpus
-representations. Learned series inference remains unsupported.
+explaining the plan do not prepare a learned encoder or run inference. Executing
+a learned search requires the exact provider to have been explicitly registered
+and prepared; corpus vectors already stored in the feature partition are not
+regenerated.
 
 ## Limitations and common mistakes
 
@@ -623,14 +625,19 @@ The following behavior is implemented now:
 - Fixed-count `Rolling.to_array()` and `GroupedRolling.to_array()` windows.
 - Exact UTC fixed-grid `DataFrame.event_windows()` with explicit entity,
   event-identity, availability, duplicate, and missing-slot contracts.
-- Native `DataFrame.embed_series()` with `none`, `center`, or population
-  `zscore` normalization and optional final unit normalization.
-- `SeriesRepresentationSpec`, representation fingerprints, and
-  `EmbeddedSeriesQuery`.
+- Native and learned `DataFrame.embed_series()` with `none`, `center`, or
+  population `zscore` outer normalization and optional final unit normalization.
+- `SeriesRepresentationSpec`, ordered learned channel roles, representation
+  fingerprints, `SeriesEmbeddingProvider`, and `EmbeddedSeriesQuery`.
+- Explicit session-owned learned-model registration and preparation with full
+  artifact, adapter, input, pooling, runtime, and execution-provider attestation.
+- Bounded complete-row Arrow inference with internal validity masks, null-row
+  scatter-back, strict provider output validation, and serialized calls for
+  providers declaring `thread_safe=False`.
 - Typed-query compatibility checks through `vector.distance()` and
   `vector.search()`.
 - Raw-window `vector.search_series()` and eager
-  `Session.embed_series_query()` using the same native representation recipe.
+  `Session.embed_series_query()` using the same native or learned recipe.
 - Exact cosine, L2, and negative-inner-product retrieval.
 - Representation metadata preservation for supported projections, joins,
   local Parquet sidecars, and session-owned tables.
@@ -639,27 +646,24 @@ The following behavior is implemented now:
 - Exact text-first, reaction-first, and full eligible-set late fusion through
   ordinary filters, typed distances, joins, and deterministic `nsmallest()`.
 
-The following behavior is not implemented yet:
+The following behavior is not implemented:
 
-- Learned series-model preparation or inference.
-- A public `SeriesEmbeddingProvider` lifecycle.
-- Learned-query encoding through `search_series()`.
+- A bundled learned-series adapter or checkpoint.
+- Variable-length learned inputs, implicit masks/padding, or context conversion.
 - General verified fixed-grid rolling windows outside event alignment.
 - Automatic or general approximate series search.
 - A joint multimodal model or shared text-to-series representation space.
 
-`series_embedding_model()` already creates a side-effect-free learned-model
-specification so representation identity can stabilize before runtime support.
-Passing a representation with an encoder to `embed_series()` currently raises
-an unsupported-operation error.
+`series_embedding_model()` creates a side-effect-free learned-model
+specification. Planning and catalog lookup never import a runtime, prepare a
+model, download an artifact, or run inference.
 
-## Future learned encoders
+## Learned encoders
 
-Learned encoders are planned as an optional extension, not a replacement for
-native representations. The intended public workflow is:
+Learned encoders are an optional extension, not a replacement for native
+representations. The public custom-provider workflow is:
 
 ```python
-# Illustrative future API; model preparation and inference are not shipped yet.
 encoder = pd.series_embedding_model(
     "research/return-window-encoder",
     revision="immutable-checkpoint-revision",
@@ -668,6 +672,7 @@ encoder = pd.series_embedding_model(
     dimension=128,
     input_length=60,
     input_channels=("simple_return",),
+    input_roles=("target",),
     input_normalization="checkpoint-defined-v1",
     pooling="mean-valid-v1",
     adapter_revision="return-encoder-adapter-v1",
@@ -684,13 +689,14 @@ representation = pd.series_representation(
     encoder=encoder,
 )
 
-# Planned lifecycle, not currently available:
+# Registration has no preparation or inference side effect.
 session.register_series_embedding_provider(encoder, provider)
-session.prepare_series_embedding_model(encoder)
+prepared = session.prepare_series_embedding_model(encoder)
 learned = windows.embed_series(
     columns={"simple_return": "return_window"},
     into="return_embedding",
     representation=representation,
+    batch_size=256,
 )
 ```
 
@@ -698,6 +704,18 @@ A learned encoder is only one component of the representation space. Input
 features, sampling, outer normalization, internal model normalization, channel
 order, context length, masks, pooling, output normalization, checkpoint, and
 adapter behavior all affect compatibility and must participate in identity.
+
+The provider exposes `specification`, `thread_safe`, `prepare()`, and
+`embed_windows(batch)`. `prepare()` returns immutable
+`PreparedSeriesModelInfo`: the resolved revision, artifact digest, adapter and
+backend revisions, input length/channels/roles, internal normalization, pooling,
+dimension, cache path, execution providers, and runtime versions must all match
+the declaration before the session promotes it. `embed_windows()` receives a
+`pyarrow.RecordBatch` whose fields follow `input_channels` order and have type
+`FixedSizeList<float32, input_length>`. Field metadata records each role.
+DuckPD's validity mask removes outer-null and zero-scale rows before the call;
+the provider therefore receives complete non-null rows only. Variable-length
+padding masks are not part of this first contract.
 
 ### Targets, variates, and covariates
 
@@ -712,11 +730,12 @@ not need:
 - **Static covariates** describe the entity rather than varying by timestamp.
 
 For native DuckPD representations, all numeric channels are simply ordered
-inputs to one deterministic vector. For a learned forecasting-model adapter,
-channel role can change attention, masking, normalization, and output. The
-future contract must therefore record more than `input_channels`: it needs an
-ordered input schema containing each channel's role, dtype or categorical
-encoding, availability rule, and whether future values are consumed.
+inputs to one deterministic vector. Learned specifications pair every
+`input_channels` entry with an `input_roles` entry: `target`,
+`past_covariate`, or `known_future_covariate`. Inputs are numeric float32 fixed
+windows. Static and categorical channels, future-horizon values, and
+variable-length masks require a later versioned contract rather than an
+implicit adapter convention.
 
 This distinction also prevents leakage. A historical window representation may
 only consume values that were available at its endpoint. A known-future
@@ -725,23 +744,31 @@ observation or future market value cannot be included merely because it exists
 in today's dataset. Corpus and query adapters must apply the same availability
 contract.
 
-### Planned execution model
+### Execution model
 
-The intended implementation follows the proven text-embedding lifecycle while
-retaining series-specific contracts:
+The implementation follows the text-embedding lifecycle while retaining
+series-specific contracts:
 
-- Planning remains side-effect-free and never downloads a model.
-- Preparation is explicit, eager, and session-owned.
+- Planning remains side-effect-free and never downloads or imports a model.
+- Preparation is explicit, eager, session-owned, and fully attested.
 - Checkpoints and all numerical assets are pinned by immutable revision and a
   canonical artifact-manifest digest.
 - Corpus inference uses bounded Arrow batches rather than pandas rows or whole
   corpus materialization.
-- Channel order, input length, masks, padding, normalization, pooling, output
-  dimension, and finite values are validated.
+- DuckPD applies declared outer normalization before the provider and final
+  unit normalization afterward. Internal normalization is provider-declared.
+- Channel order, roles, input length, complete-row masks, normalization,
+  pooling, output dimension, row count, float32 type, nulls, and finite values
+  are validated.
 - Null rows are propagated without calling the provider when policy permits.
-- Query and corpus encoding use the same adapter and representation fingerprint.
+- Query and corpus encoding share preprocessing, provider validation, and the
+  representation fingerprint. A raw query is encoded once per execution.
+- Calls to non-thread-safe providers are serialized per model.
 - No hidden interpolation, truncation, padding, device fallback, or model
   download is allowed.
+- Profile metrics separate preparation, corpus/query inference, input and
+  propagated-null rows, provider calls/rows/max batch size, Arrow bytes and peak
+  batch bytes, query-cache state, cache bytes, and execution-provider count.
 
 ### What learned encoders may add
 
@@ -798,6 +825,23 @@ provided.
 MOMENT, TS2Vec, PatchTST, and application-trained encoders remain useful
 custom-provider and benchmark candidates. The DataFrame API should not depend
 on one model family.
+
+### Phase 19 adapter qualification review
+
+Reviewed 2026-09-14. No built-in adapter is promoted. This is a deliberate
+negative qualification result: forecasting scores do not establish retrieval
+quality, and no candidate has a reviewed DuckPD retrieval benchmark against the
+native baselines.
+
+| Candidate | Immutable material reviewed | License and interface findings | Decision |
+| --- | --- | --- | --- |
+| Chronos-2 | `amazon/chronos-2` revision `29ec3766d36d6f73f0696f85560a422f50e8498c`; `chronos-forecasting` source `4dbf163c2734c089cdf7da2b86fde48862ff9c6f` | Code and weights are Apache-2.0. Public `embed()` returns `(n_variates, num_patches + 2, d_model)` states and model scale, not one vector; it does not expose the named target/past/future-covariate input used by forecasting. | Fits the custom-provider protocol after pooling, semantic role mapping, artifact-manifest digest, runtime matrix, and retrieval benchmark are pinned. Not built in now. |
+| TimesFM 3.0 | `google/timesfm-3.0-pytorch` revision `43046b85ec22d584a13f8098c2ed39c889e129c2`; source `8cb0628371af142e16b8c232cc9fbf667ffb12f9` (`timesfm` 3.0.2) | Source is Apache-2.0, but weights use `timesfm-non-commercial-license-v1.0` and forbid commercial/production use. The lower PyTorch model exposes transformer state only through auxiliary outputs; the public forecaster has no stable fixed-vector API. | License fails the intended deployment gate. Internal extraction and pooling are also unqualified. Not built in. |
+| PatchTST | Official source `204c21efe0b39603ad6e2ca640ef5896646ab1a9` | Source is Apache-2.0. The self-supervised backbone returns per-channel, per-patch states, but the repository provides training code rather than one canonical portable checkpoint. Channel-independent processing does not implement target/covariate role interaction. | Useful custom-provider benchmark candidate for an application-owned checkpoint. Exact checkpoint, pooling, normalization, masks, runtime, and retrieval gain remain unqualified. |
+
+PatchTST fits the comparison as an encoder architecture, not as a built-in model:
+its backbone is a cleaner extraction point than TimesFM's forecasting internals,
+but it lacks a single qualified artifact and native covariate-role semantics.
 
 ### Qualification requirements
 

@@ -411,6 +411,7 @@ encoder = pd.series_embedding_model(
     dimension=128,
     input_length=60,
     input_channels=("simple_return",),
+    input_roles=("target",),
     input_normalization="none",
     pooling="mean-valid-v1",
     adapter_revision="return-encoder-adapter-v1",
@@ -428,11 +429,13 @@ learned_returns = pd.series_representation(
 )
 ```
 
-Proposed `SeriesEmbeddingModelSpec` fields are exactly those in the example.
-The constructor is `pd.series_embedding_model(model, *, ...)`; all fields shown
-are required. `dimension` and `input_length` are positive integers,
-`input_channels` is a nonempty tuple of unique names, and `artifact_sha256` is a
-validated SHA-256 digest of a canonical artifact manifest. The manifest hashes
+`SeriesEmbeddingModelSpec` fields are exactly those in the example. The
+constructor is `pd.series_embedding_model(model, *, ...)`; all fields shown are
+required. `dimension` and `input_length` are positive integers,
+`input_channels` is a nonempty tuple of unique names, `input_roles` has one
+`target`, `past_covariate`, or `known_future_covariate` entry per channel, and
+`artifact_sha256` is a validated SHA-256 digest of a canonical artifact
+manifest. The manifest hashes
 all numerical assets and configuration required by the adapter, not merely one
 arbitrarily selected weights file. The adapter revision identifies its inference
 contract. Runtime package versions and resolved asset provenance are also
@@ -467,9 +470,10 @@ partition acquisition attributable to the execution.
 `SeriesEmbeddingModelSpec` also exposes canonical `to_dict()` / `from_dict()` and
 a computed `fingerprint`. `PreparedSeriesModelInfo` is immutable and records
 `model_fingerprint`, `resolved_revision`, `artifact_sha256`, `backend`,
-`adapter_revision`, `input_length`, `input_channels`, `input_normalization`,
-`pooling`, `dimension`, `cache_path`, `execution_providers`, `runtime_versions`,
-and `preparation_seconds`. Preparation validates all declared fields against the
+`adapter_revision`, `input_length`, `input_channels`, `input_roles`,
+`input_normalization`, `pooling`, `dimension`, `cache_path`,
+`execution_providers`, `runtime_versions`, and `preparation_seconds`.
+Preparation validates all declared fields against the
 loaded adapter rather than trusting a provider's reported dimension alone.
 
 No implicit truncation, interpolation, padding, or context-length conversion is
@@ -486,12 +490,12 @@ fingerprint. A model with internal normalization is not assumed to preserve
 absolute volatility simply because the outer recipe uses `"none"`.
 
 Forecasting foundation models distinguish target variates, past-only
-covariates, known-future covariates, and sometimes static covariates. The
-current `input_channels` tuple records order but not these roles. Before a
-Chronos-2 or TimesFM 3 adapter ships, the learned specification must gain a
-canonical ordered input-schema contract that records each channel's role,
-numeric or categorical encoding, availability rule, and whether future values
-are consumed. Corpus and query representations must enforce the same schema.
+covariates, known-future covariates, and sometimes static covariates. The first
+learned contract records ordered numeric roles through parallel
+`input_channels` and `input_roles` tuples. Static/categorical channels,
+future-horizon inputs, availability policies beyond `data_contract`, and
+variable-length masks require a later versioned specification. Corpus and query
+representations enforce the same current schema.
 
 Historical representations may consume only values available at the
 representation endpoint. Known-future calendar or schedule values are valid
@@ -560,10 +564,10 @@ matches = valid.vector.search(
 ```
 
 `Session.embed_series_query()` returns a frozen `EmbeddedSeriesQuery(values,
-representation_fingerprint)`. It eagerly applies exactly the native corpus
-recipe, except that invalid/null output is an error rather than a missing corpus
-row. Learned representations remain unsupported until the provider lifecycle is
-implemented.
+representation_fingerprint)`. It eagerly applies exactly the native or learned
+corpus recipe, except that invalid/null output is an error rather than a missing
+corpus row. Learned representations require the exact explicitly prepared
+session provider.
 
 As an additive compatibility improvement, extend `Series.vector.distance()` and
 `DataFrame.vector.search()` to accept both this new type and the existing text
@@ -1262,7 +1266,7 @@ as part of a search call. Those remain explicit producer workflows.
 
 ### Arrow provider interface
 
-The proposed core protocol uses existing optional-provider conventions:
+The implemented core protocol uses existing optional-provider conventions:
 
 ```python
 class SeriesEmbeddingProvider(Protocol):

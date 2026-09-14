@@ -344,10 +344,6 @@ class VectorFrameMethods:
             raise UnsupportedOperationError(
                 "search_series requires series metadata matching the requested representation"
             )
-        if selected_representation.encoder is not None:
-            raise UnsupportedOperationError(
-                "search_series currently supports only native representations with encoder=None"
-            )
         element_type, dimension = _vector_type(vector_column.duckdb_type)
         if element_type != "FLOAT" or dimension != selected_representation.dimension:
             raise UnsupportedOperationError(

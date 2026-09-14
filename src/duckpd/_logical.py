@@ -751,7 +751,7 @@ class EmbeddingPlan(LogicalPlanBase):
 
 @dataclass(frozen=True)
 class SeriesRepresentationPlan(LogicalPlanBase):
-    """Row-preserving native time-series representation projection."""
+    """Row-preserving native or Arrow-batched learned series projection."""
 
     input: LogicalPlan
     channels: tuple[tuple[str, ColumnId], ...]

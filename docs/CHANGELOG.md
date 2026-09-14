@@ -10,6 +10,15 @@ the [release policy](RELEASES.md).
 
 ### Added
 
+- Session-owned custom `SeriesEmbeddingProvider` registration and explicit
+  preparation now drive learned `embed_series()`, `search_series()`, and eager
+  series-query encoding. The Arrow boundary enforces ordered target/past/
+  known-future roles, fixed context, complete-row masks, bounded calls,
+  deterministic shared preprocessing, strict float32 output validation,
+  non-thread-safe serialization, lifecycle/resource metrics, and failure-safe
+  cache promotion. Chronos-2, TimesFM 3, and PatchTST were reviewed; none is
+  bundled without a qualifying retrieval benchmark and deployable license.
+
 - Typed `DataFrame.event_windows()` constructs lazy exact fixed-grid arrays for
   event rows with explicit entity and revision-safe event keys, UTC floor/ceil
   anchoring, missing-slot policy, availability propagation, bounded source

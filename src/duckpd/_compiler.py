@@ -540,8 +540,34 @@ class DuckDBCompiler:
         self,
         plan: SeriesRepresentationPlan,
     ) -> CompiledFrame:
-        """Lower one native representation to deterministic DuckDB list expressions."""
+        """Lower native series expressions or one bounded learned Arrow boundary."""
         compiled = self._compile(plan.input)
+        if plan.representation.encoder is not None:
+            udf_name = self._session._series_document_udf(plan)
+            inputs = [
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column_id])).cast(
+                    f"DOUBLE[{plan.representation.window}]"
+                )
+                for _, column_id in plan.channels
+            ]
+            packed = duckdb.FunctionExpression("list_value", *inputs)
+            output = duckdb.FunctionExpression(udf_name, packed)
+            projections = [
+                *(
+                    duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(
+                        column.label
+                    )
+                    for column in plan.input.metadata.columns
+                ),
+                output.alias(plan.output_column.label),
+            ]
+            return CompiledFrame(
+                compiled.relation.project(*projections),
+                {
+                    **compiled.bindings,
+                    plan.output_column.id: plan.output_column.label,
+                },
+            )
         dimension = plan.representation.dimension
         normalized: list[str] = []
         null_checks: list[str] = []

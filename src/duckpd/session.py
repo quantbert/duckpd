@@ -8,7 +8,7 @@ import os
 import re
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace
 from glob import glob
 from pathlib import Path
@@ -43,6 +43,8 @@ from duckpd._logical import (
     RowIdentity,
     ScanPlan,
     SemanticSearchPlan,
+    SeriesRepresentationPlan,
+    SeriesSearchPlan,
     SortDirection,
     SortKey,
     SortPlan,
@@ -75,9 +77,15 @@ from duckpd.errors import (
 )
 from duckpd.series_embeddings import (
     EmbeddedSeriesQuery,
+    PreparedSeriesModelInfo,
     SeriesColumnSpec,
+    SeriesEmbeddingModelSpec,
+    SeriesEmbeddingProvider,
     SeriesQuerySnapshot,
     SeriesRepresentationSpec,
+    _finalize_series_embeddings,
+    _make_series_provider_batch,
+    _normalize_series_snapshot,
     embed_native_series_query,
     snapshot_series_query,
 )
@@ -260,6 +268,11 @@ class Session:
         self._embedding_metrics: dict[str, int | float] = {}
         self._embedding_progress_callbacks: dict[str, Callable[[int], object]] = {}
         self._prepared_embedding_models: dict[str, PreparedModelInfo] = {}
+        self._series_embedding_providers: dict[str, SeriesEmbeddingProvider] = {}
+        self._prepared_series_embedding_models: dict[str, PreparedSeriesModelInfo] = {}
+        self._series_embedding_prepare_locks: dict[str, Lock] = {}
+        self._series_embedding_call_locks: dict[str, Lock] = {}
+        self._series_embedding_metrics_lock = Lock()
         self._catalog_embedding_policies: dict[str, _CatalogEmbeddingPolicy] = {}
         self._embedding_catalog_access_seconds = 0.0
         self._embedding_prepare_locks: dict[str, Lock] = {}
@@ -306,6 +319,181 @@ class Session:
         if provider.specification != model:
             raise ValueError("provider specification does not match the requested model")
         self._embedding_providers[model.fingerprint] = provider
+
+    def register_series_embedding_provider(
+        self,
+        model: SeriesEmbeddingModelSpec,
+        provider: SeriesEmbeddingProvider,
+    ) -> None:
+        """Register one custom learned-series provider without preparing it."""
+        self._ensure_open()
+        if model.backend != "custom":
+            raise UnsupportedOperationError(
+                "Only backend='custom' is qualified for registered series providers"
+            )
+        if provider.specification != model:
+            raise ValueError("provider specification does not match the requested series model")
+        if type(provider.thread_safe) is not bool:
+            raise TypeError("series provider thread_safe must be a boolean")
+        existing = self._series_embedding_providers.get(model.fingerprint)
+        if existing is not None and existing is not provider:
+            raise ValueError("a different series provider is already registered for this model")
+        self._series_embedding_providers[model.fingerprint] = provider
+
+    def prepare_series_embedding_model(
+        self,
+        model: SeriesEmbeddingModelSpec,
+    ) -> PreparedSeriesModelInfo:
+        """Eagerly prepare and fully attest one registered series provider."""
+        self._begin_execution()
+        lock = self._series_embedding_prepare_locks.setdefault(model.fingerprint, Lock())
+        with lock:
+            prepared = self._prepared_series_embedding_models.get(model.fingerprint)
+            if prepared is not None:
+                self._embedding_metrics["series_preparation_cache_reused"] = 1
+                return prepared
+            provider = self._series_embedding_providers.get(model.fingerprint)
+            if provider is None:
+                raise UnsupportedOperationError(
+                    "Series embedding model is not registered; call "
+                    "session.register_series_embedding_provider(model, provider)"
+                )
+            started = perf_counter()
+            info = provider.prepare()
+            if type(info) is not PreparedSeriesModelInfo:
+                raise TypeError("series provider prepare() must return PreparedSeriesModelInfo")
+            elapsed = perf_counter() - started
+            info = replace(info, preparation_seconds=elapsed)
+            self._validate_prepared_series_model(model, info)
+            self._prepared_series_embedding_models[model.fingerprint] = info
+            self._embedding_metrics["series_preparation_seconds"] = elapsed
+            self._embedding_metrics["series_preparation_count"] = (
+                int(self._embedding_metrics.get("series_preparation_count", 0)) + 1
+            )
+            self._embedding_metrics["series_preparation_cache_reused"] = 0
+            self._embedding_metrics["series_model_cache_bytes"] = _path_size(info.cache_path)
+            self._embedding_metrics["series_execution_provider_count"] = len(
+                info.execution_providers
+            )
+            return info
+
+    @staticmethod
+    def _validate_prepared_series_model(
+        model: SeriesEmbeddingModelSpec,
+        info: PreparedSeriesModelInfo,
+    ) -> None:
+        expected: dict[str, object] = {
+            "model_fingerprint": model.fingerprint,
+            "resolved_revision": model.revision,
+            "artifact_sha256": model.artifact_sha256,
+            "backend": model.backend,
+            "adapter_revision": model.adapter_revision,
+            "input_length": model.input_length,
+            "input_channels": model.input_channels,
+            "input_roles": model.input_roles,
+            "input_normalization": model.input_normalization,
+            "pooling": model.pooling,
+            "dimension": model.dimension,
+        }
+        mismatches = [
+            field_name
+            for field_name, expected_value in expected.items()
+            if getattr(info, field_name) != expected_value
+        ]
+        if mismatches:
+            raise UnsupportedOperationError(
+                "Prepared series provider attestation mismatch: " + ", ".join(mismatches)
+            )
+
+    def inspect_prepared_series_embedding_models(
+        self,
+    ) -> tuple[PreparedSeriesModelInfo, ...]:
+        """Return fully attested learned series models owned by this session."""
+        self._ensure_open()
+        return tuple(
+            self._prepared_series_embedding_models[key]
+            for key in sorted(self._prepared_series_embedding_models)
+        )
+
+    def _series_embedding_provider(
+        self,
+        model: SeriesEmbeddingModelSpec,
+    ) -> SeriesEmbeddingProvider:
+        provider = self._series_embedding_providers.get(model.fingerprint)
+        if provider is None or model.fingerprint not in self._prepared_series_embedding_models:
+            raise UnsupportedOperationError(
+                "Series embedding model is not prepared; call "
+                "session.prepare_series_embedding_model(model)"
+            )
+        return provider
+
+    def _run_series_provider_batch(
+        self,
+        model: SeriesEmbeddingModelSpec,
+        batch: pa.RecordBatch,
+        *,
+        kind: Literal["corpus", "query"],
+    ) -> pa.Array[Any]:
+        provider = self._series_embedding_provider(model)
+        guard = (
+            nullcontext()
+            if provider.thread_safe
+            else self._series_embedding_call_locks.setdefault(model.fingerprint, Lock())
+        )
+        started = perf_counter()
+        with guard:
+            output = provider.embed_windows(batch)
+        elapsed = perf_counter() - started
+        with self._series_embedding_metrics_lock:
+            self._embedding_metrics["series_provider_calls"] = (
+                int(self._embedding_metrics.get("series_provider_calls", 0)) + 1
+            )
+            self._embedding_metrics[f"series_{kind}_provider_calls"] = (
+                int(self._embedding_metrics.get(f"series_{kind}_provider_calls", 0)) + 1
+            )
+            self._embedding_metrics["series_provider_rows"] = int(
+                self._embedding_metrics.get("series_provider_rows", 0)
+            ) + len(batch)
+            self._embedding_metrics[f"series_{kind}_rows"] = int(
+                self._embedding_metrics.get(f"series_{kind}_rows", 0)
+            ) + len(batch)
+            self._embedding_metrics["series_max_provider_batch_rows"] = max(
+                int(self._embedding_metrics.get("series_max_provider_batch_rows", 0)),
+                len(batch),
+            )
+            arrow_bytes = batch.nbytes + int(getattr(output, "nbytes", 0))
+            self._embedding_metrics["series_arrow_bytes"] = (
+                int(self._embedding_metrics.get("series_arrow_bytes", 0)) + arrow_bytes
+            )
+            self._embedding_metrics["series_peak_arrow_batch_bytes"] = max(
+                int(self._embedding_metrics.get("series_peak_arrow_batch_bytes", 0)),
+                arrow_bytes,
+            )
+            self._embedding_metrics["series_inference_seconds"] = (
+                float(self._embedding_metrics.get("series_inference_seconds", 0.0)) + elapsed
+            )
+            self._embedding_metrics[f"series_{kind}_inference_seconds"] = (
+                float(
+                    self._embedding_metrics.get(
+                        f"series_{kind}_inference_seconds",
+                        0.0,
+                    )
+                )
+                + elapsed
+            )
+        return output
+
+    def _validate_plan_series_models(self, plan: LogicalPlan) -> None:
+        from duckpd._executor import _plan_nodes
+
+        models: dict[str, SeriesEmbeddingModelSpec] = {}
+        for node in _plan_nodes(plan):
+            if isinstance(node, (SeriesRepresentationPlan, SeriesSearchPlan)):
+                model = node.representation.encoder
+                if model is not None:
+                    models[model.fingerprint] = model
+        for model in models.values():
+            self._series_embedding_provider(model)
 
     def prepare_embedding_model(
         self,
@@ -456,11 +644,32 @@ class Session:
         *,
         representation: SeriesRepresentationSpec,
     ) -> EmbeddedSeriesQuery:
-        """Eagerly apply one native representation to a reusable series query."""
+        """Eagerly encode one reusable native or learned series query."""
         self._ensure_open()
         snapshot = snapshot_series_query(query, representation)
+        model = representation.encoder
+        if model is None:
+            self._begin_execution()
+            return embed_native_series_query(snapshot, representation)
+        self._series_embedding_provider(model)
+        normalized = _normalize_series_snapshot(
+            snapshot,
+            representation,
+            zero_scale_as_null=False,
+        )
+        assert normalized is not None
+        batch = _make_series_provider_batch((normalized,), representation)
         self._begin_execution()
-        return embed_native_series_query(snapshot, representation)
+        output = self._run_series_provider_batch(model, batch, kind="query")
+        rows = _finalize_series_embeddings(
+            output,
+            representation,
+            expected_rows=1,
+            zero_scale_as_null=False,
+        )
+        values = rows[0]
+        assert values is not None
+        return EmbeddedSeriesQuery(values, representation.fingerprint)
 
     def _embedding_provider(self, model: EmbeddingModelSpec) -> TextEmbeddingProvider:
         provider = self._embedding_providers.get(model.fingerprint)
@@ -967,6 +1176,109 @@ class Session:
         self._embedding_udfs[key] = name
         return name
 
+    def _series_document_udf(self, plan: SeriesRepresentationPlan) -> str:
+        model = plan.representation.encoder
+        if model is None:
+            raise ValueError("A learned series UDF requires an encoder")
+        key_payload = (
+            f"series-document:{plan.output_column.id.value}:"
+            f"{plan.representation.fingerprint}:{plan.batch_size}:{plan.null_policy}"
+        )
+        key = hashlib.sha256(key_payload.encode()).hexdigest()[:24]
+        existing = self._embedding_udfs.get(key)
+        if existing is not None:
+            return existing
+        name = f"__duckpd_embed_series_{key}"
+
+        def run(raw_batch: object) -> ArrowUDFResult:
+            packed = cast("list[Any]", cast("pa.ChunkedArray[Any]", raw_batch).to_pylist())
+            row_count = len(packed)
+            scattered: list[list[float] | None] = [None] * row_count
+            valid_rows: list[SeriesQuerySnapshot] = []
+            valid_positions: list[int] = []
+            propagated = 0
+            input_zero_scale = 0
+            output_zero_norm = 0
+            for row_index, raw_values in enumerate(packed):
+                if raw_values is None or len(raw_values) != len(plan.channels):
+                    raise ValueError("Series embedding channel batch has invalid shape")
+                raw_row = {
+                    channel: raw_values[column_index]
+                    for column_index, (channel, _) in enumerate(plan.channels)
+                }
+                if any(value is None for value in raw_row.values()):
+                    if plan.null_policy == "error":
+                        raise ValueError("Series embedding encountered a null input window")
+                    propagated += 1
+                    continue
+                snapshot = snapshot_series_query(raw_row, plan.representation)
+                normalized = _normalize_series_snapshot(
+                    snapshot,
+                    plan.representation,
+                    zero_scale_as_null=True,
+                )
+                if normalized is None:
+                    input_zero_scale += 1
+                    continue
+                valid_positions.append(row_index)
+                valid_rows.append(normalized)
+
+            for offset in range(0, len(valid_rows), plan.batch_size):
+                rows = valid_rows[offset : offset + plan.batch_size]
+                batch = _make_series_provider_batch(rows, plan.representation)
+                raw_output = self._run_series_provider_batch(model, batch, kind="corpus")
+                output_rows = _finalize_series_embeddings(
+                    raw_output,
+                    plan.representation,
+                    expected_rows=len(rows),
+                    zero_scale_as_null=True,
+                )
+                for position, values in zip(
+                    valid_positions[offset : offset + len(rows)],
+                    output_rows,
+                    strict=True,
+                ):
+                    scattered[position] = None if values is None else list(values)
+                    if values is None:
+                        output_zero_norm += 1
+
+            with self._series_embedding_metrics_lock:
+                self._embedding_metrics["series_input_rows"] = (
+                    int(self._embedding_metrics.get("series_input_rows", 0)) + row_count
+                )
+                self._embedding_metrics["series_complete_rows"] = int(
+                    self._embedding_metrics.get("series_complete_rows", 0)
+                ) + len(valid_rows)
+                self._embedding_metrics["series_propagated_null_rows"] = (
+                    int(self._embedding_metrics.get("series_propagated_null_rows", 0)) + propagated
+                )
+                self._embedding_metrics["series_zero_scale_rows"] = (
+                    int(self._embedding_metrics.get("series_zero_scale_rows", 0)) + input_zero_scale
+                )
+                self._embedding_metrics["series_provider_zero_norm_rows"] = (
+                    int(self._embedding_metrics.get("series_provider_zero_norm_rows", 0))
+                    + output_zero_norm
+                )
+                self._embedding_metrics["series_incomplete_rows"] = (
+                    int(self._embedding_metrics.get("series_incomplete_rows", 0))
+                    + propagated
+                    + input_zero_scale
+                )
+            return pa.array(
+                scattered,
+                type=pa.list_(pa.float32(), plan.representation.dimension),
+            )
+
+        self.register_arrow_udf(
+            name,
+            run,
+            [f"DOUBLE[{plan.representation.window}][]"],
+            f"FLOAT[{plan.representation.dimension}]",
+            null_handling="special",
+        )
+        self._embedding_udfs[key] = name
+        return name
+
     def _series_query_udf(self, representation: SeriesRepresentationSpec) -> str:
         registry_key = f"series-query:{representation.fingerprint}"
         existing = self._embedding_udfs.get(registry_key)
@@ -988,13 +1300,46 @@ class Session:
                     raise ValueError("Series query representation fingerprint mismatch")
                 embedded = self._embedded_series_queries.get(raw_key)
                 if embedded is None:
-                    embedded = embed_native_series_query(query, representation)
+                    model = representation.encoder
+                    if model is None:
+                        embedded = embed_native_series_query(query, representation)
+                    else:
+                        normalized = _normalize_series_snapshot(
+                            query,
+                            representation,
+                            zero_scale_as_null=False,
+                        )
+                        assert normalized is not None
+                        batch = _make_series_provider_batch((normalized,), representation)
+                        raw_output = self._run_series_provider_batch(
+                            model,
+                            batch,
+                            kind="query",
+                        )
+                        output_rows = _finalize_series_embeddings(
+                            raw_output,
+                            representation,
+                            expected_rows=1,
+                            zero_scale_as_null=False,
+                        )
+                        values = output_rows[0]
+                        assert values is not None
+                        embedded = EmbeddedSeriesQuery(
+                            values,
+                            representation.fingerprint,
+                        )
                     self._embedded_series_queries[raw_key] = embedded
                     if len(self._embedded_series_queries) > 128:
                         self._embedded_series_queries.popitem(last=False)
                 else:
                     self._embedded_series_queries.move_to_end(raw_key)
+                    self._embedding_metrics["series_query_cache_reuses"] = (
+                        int(self._embedding_metrics.get("series_query_cache_reuses", 0)) + 1
+                    )
                 rows.append(list(embedded.values))
+            self._embedding_metrics["series_query_cache_entries"] = len(
+                self._embedded_series_queries
+            )
             return _make_fixed_array(rows, representation.dimension)
 
         self.register_arrow_udf(
@@ -1002,6 +1347,8 @@ class Session:
             run,
             ["VARCHAR"],
             f"FLOAT[{representation.dimension}]",
+            deterministic=False,
+            side_effects=True,
             null_handling="special",
         )
         self._embedding_udfs[registry_key] = name
@@ -1727,6 +2074,21 @@ class Session:
         self._object_store_secrets.clear()
         self._attachments.clear()
         self._registered_sources.clear()
+        seen_providers: set[int] = set()
+        for provider in self._series_embedding_providers.values():
+            if id(provider) in seen_providers:
+                continue
+            seen_providers.add(id(provider))
+            close_provider = getattr(provider, "close", None)
+            if callable(close_provider):
+                with suppress(Exception):
+                    close_provider()
+        self._series_embedding_providers.clear()
+        self._prepared_series_embedding_models.clear()
+        self._series_embedding_prepare_locks.clear()
+        self._series_embedding_call_locks.clear()
+        self._series_queries.clear()
+        self._embedded_series_queries.clear()
         self._connection.close()
         self._closed = True
 
@@ -1753,6 +2115,8 @@ class Session:
     def _begin_execution(self) -> None:
         self._ensure_open()
         self._execution_count += 1
+        self._embedded_series_queries.clear()
+        self._embedding_metrics["series_query_cache_entries"] = 0
 
     def _source_plan(
         self,
@@ -1961,6 +2325,21 @@ def connect(
         threads=threads,
         fallback=fallback,
     )
+
+
+def _path_size(raw_path: str | None) -> int:
+    """Measure an attested local model cache without following missing paths."""
+    if raw_path is None:
+        return 0
+    path = Path(raw_path)
+    try:
+        if path.is_file():
+            return path.stat().st_size
+        if path.is_dir():
+            return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+    except OSError:
+        return 0
+    return 0
 
 
 _LimitT = TypeVar("_LimitT", int, float)

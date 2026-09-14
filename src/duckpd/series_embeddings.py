@@ -11,7 +11,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from decimal import Decimal
 from math import fsum, isfinite, sqrt
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+
+import pyarrow as pa
 
 from duckpd._temporal import fixed_duration_ns
 
@@ -23,6 +25,7 @@ SeriesSampling = Literal["observations", "fixed_grid"]
 SeriesNormalization = Literal["none", "center", "zscore"]
 ZeroScalePolicy = Literal["error", "null"]
 SeriesNullPolicy = Literal["propagate", "error"]
+SeriesChannelRole = Literal["target", "past_covariate", "known_future_covariate"]
 SeriesMetadataOrigin = Literal["generated", "application_asserted", "sidecar", "table", "catalog"]
 SeriesWindowOrigin = Literal["rolling", "event", "application_asserted", "catalog"]
 
@@ -94,6 +97,7 @@ class SeriesEmbeddingModelSpec:
     dimension: int
     input_length: int
     input_channels: tuple[str, ...]
+    input_roles: tuple[SeriesChannelRole, ...]
     input_normalization: str
     pooling: str
     adapter_revision: str
@@ -117,6 +121,18 @@ class SeriesEmbeddingModelSpec:
         _positive_integer(self.dimension, field_name="dimension")
         _positive_integer(self.input_length, field_name="input_length")
         _names(self.input_channels, field_name="input_channels")
+        if type(self.input_roles) is not tuple or len(self.input_roles) != len(self.input_channels):
+            raise ValueError("input_roles must align one-for-one with input_channels")
+        if any(
+            role not in {"target", "past_covariate", "known_future_covariate"}
+            for role in self.input_roles
+        ):
+            raise ValueError(
+                "input_roles must contain only 'target', 'past_covariate', or "
+                "'known_future_covariate'"
+            )
+        if "target" not in self.input_roles:
+            raise ValueError("input_roles must contain at least one target channel")
 
     @property
     def fingerprint(self) -> str:
@@ -128,7 +144,102 @@ class SeriesEmbeddingModelSpec:
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> SeriesEmbeddingModelSpec:
         fields = frozenset(cls.__dataclass_fields__)
-        return cls(**_strict_mapping(value, fields=fields, owner="series embedding model"))  # type: ignore[arg-type]
+        data = _strict_mapping(value, fields=fields, owner="series embedding model")
+        for field_name in ("input_channels", "input_roles"):
+            raw_items = data.get(field_name)
+            if isinstance(raw_items, Sequence) and not isinstance(
+                raw_items,
+                (str, bytes),
+            ):
+                data[field_name] = tuple(cast("Sequence[object]", raw_items))
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class PreparedSeriesModelInfo:
+    """Verified learned series model artifacts owned by one session."""
+
+    model_fingerprint: str
+    resolved_revision: str
+    artifact_sha256: str
+    backend: str
+    adapter_revision: str
+    input_length: int
+    input_channels: tuple[str, ...]
+    input_roles: tuple[SeriesChannelRole, ...]
+    input_normalization: str
+    pooling: str
+    dimension: int
+    cache_path: str | None
+    execution_providers: tuple[str, ...]
+    runtime_versions: tuple[tuple[str, str], ...]
+    preparation_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if type(self.model_fingerprint) is not str or not self.model_fingerprint:
+            raise ValueError("model_fingerprint must be a non-empty string")
+        if type(self.resolved_revision) is not str or not self.resolved_revision:
+            raise ValueError("resolved_revision must be a non-empty string")
+        if type(self.artifact_sha256) is not str or _SHA256.fullmatch(self.artifact_sha256) is None:
+            raise ValueError("artifact_sha256 must be a lowercase SHA-256 digest")
+        for field_name in (
+            "backend",
+            "adapter_revision",
+            "input_normalization",
+            "pooling",
+        ):
+            if type(getattr(self, field_name)) is not str or not getattr(self, field_name):
+                raise ValueError(f"{field_name} must be a non-empty string")
+        _positive_integer(self.input_length, field_name="input_length")
+        _positive_integer(self.dimension, field_name="dimension")
+        _names(self.input_channels, field_name="input_channels")
+        if (
+            type(self.input_roles) is not tuple
+            or len(self.input_roles) != len(self.input_channels)
+            or any(
+                role not in {"target", "past_covariate", "known_future_covariate"}
+                for role in self.input_roles
+            )
+        ):
+            raise ValueError("input_roles must align with channels and contain valid roles")
+        if self.cache_path is not None and (
+            type(self.cache_path) is not str or not self.cache_path
+        ):
+            raise ValueError("cache_path must be None or a non-empty string")
+        if (
+            type(self.execution_providers) is not tuple
+            or not self.execution_providers
+            or any(type(item) is not str or not item for item in self.execution_providers)
+        ):
+            raise ValueError("execution_providers must contain non-empty strings")
+        if (
+            type(self.runtime_versions) is not tuple
+            or not self.runtime_versions
+            or any(
+                type(item) is not tuple
+                or len(item) != 2
+                or any(type(value) is not str or not value for value in item)
+                for item in self.runtime_versions
+            )
+        ):
+            raise ValueError("runtime_versions must contain non-empty name/version pairs")
+        if not isfinite(self.preparation_seconds) or self.preparation_seconds < 0:
+            raise ValueError("preparation_seconds must be finite and non-negative")
+
+
+@runtime_checkable
+class SeriesEmbeddingProvider(Protocol):
+    """Prepared batch provider for one immutable learned series encoder."""
+
+    @property
+    def specification(self) -> SeriesEmbeddingModelSpec: ...
+
+    @property
+    def thread_safe(self) -> bool: ...
+
+    def prepare(self) -> PreparedSeriesModelInfo: ...
+
+    def embed_windows(self, batch: pa.RecordBatch) -> pa.Array[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -382,6 +493,143 @@ def snapshot_series_query(
     return tuple(snapshot)
 
 
+def _normalize_series_snapshot(
+    query: SeriesQuerySnapshot,
+    representation: SeriesRepresentationSpec,
+    *,
+    zero_scale_as_null: bool,
+) -> SeriesQuerySnapshot | None:
+    """Apply outer channel normalization identically for corpus and query rows."""
+    normalized: list[tuple[str, tuple[float, ...]]] = []
+    for channel, values in query:
+        if representation.normalization == "none":
+            output = values
+        else:
+            mean = fsum(values) / len(values)
+            centered = tuple(value - mean for value in values)
+            if representation.normalization == "center":
+                output = centered
+            else:
+                scale = sqrt(fsum(value * value for value in centered) / len(centered))
+                if scale == 0.0:
+                    if zero_scale_as_null and representation.zero_scale == "null":
+                        return None
+                    raise ValueError(
+                        "series query representation has zero scale and cannot be encoded"
+                    )
+                output = tuple(value / scale for value in centered)
+        normalized.append((channel, tuple(output)))
+    return tuple(normalized)
+
+
+def _finite_float32(value: float) -> float:
+    try:
+        converted = struct.unpack("!f", struct.pack("!f", value))[0]
+    except OverflowError:
+        raise ValueError("series representation produced a non-finite value") from None
+    if not isfinite(converted):
+        raise ValueError("series representation produced a non-finite value")
+    return converted
+
+
+def _make_series_provider_batch(  # pyright: ignore[reportUnusedFunction]
+    rows: Sequence[SeriesQuerySnapshot],
+    representation: SeriesRepresentationSpec,
+) -> pa.RecordBatch:
+    """Build the canonical complete-row, fixed-width Arrow provider boundary."""
+    encoder = representation.encoder
+    if encoder is None:
+        raise ValueError("A learned representation requires an encoder")
+    arrays: list[pa.Array[Any]] = []
+    fields: list[Any] = []
+    by_row = [dict(row) for row in rows]
+    for channel, role in zip(
+        encoder.input_channels,
+        encoder.input_roles,
+        strict=True,
+    ):
+        flattened = [_finite_float32(value) for row in by_row for value in row[channel]]
+        values = pa.array(flattened, type=pa.float32())
+        maker = cast("Any", pa.FixedSizeListArray)
+        arrays.append(cast("pa.Array[Any]", maker.from_arrays(values, encoder.input_length)))
+        fields.append(
+            pa.field(
+                channel,
+                pa.list_(pa.float32(), encoder.input_length),
+                nullable=False,
+                metadata={b"duckpd.channel_role": role.encode()},
+            )
+        )
+    schema = pa.schema(
+        fields,
+        metadata={
+            b"duckpd.model_fingerprint": encoder.fingerprint.encode(),
+            b"duckpd.representation_fingerprint": representation.fingerprint.encode(),
+            b"duckpd.mask_semantics": b"complete_rows_only-v1",
+        },
+    )
+    record_batch = cast("Any", pa.RecordBatch)
+    return cast("pa.RecordBatch", record_batch.from_arrays(arrays, schema=schema))
+
+
+def _validate_series_embedding_array(
+    output: object,
+    model: SeriesEmbeddingModelSpec,
+    *,
+    expected_rows: int,
+) -> pa.Array[Any]:
+    """Reject provider output that does not exactly match its declared space."""
+    if not isinstance(output, pa.FixedSizeListArray):
+        raise TypeError("Series embedding provider must return a FixedSizeListArray")
+    array = cast("Any", output)
+    if len(array) != expected_rows:
+        raise ValueError(
+            f"Series embedding provider returned {len(array)} rows; expected {expected_rows}"
+        )
+    if array.type.list_size != model.dimension or array.type.value_type != pa.float32():
+        raise ValueError(
+            "Series embedding provider output must have type "
+            f"FixedSizeList<float32>[{model.dimension}]"
+        )
+    if array.null_count or array.values.null_count:
+        raise ValueError("Series embedding provider output must not contain nulls")
+    rows = cast("list[list[float]]", array.to_pylist())
+    if any(not isfinite(float(value)) for row in rows for value in row):
+        raise ValueError("Series embedding provider output must contain only finite values")
+    return cast("pa.Array[Any]", output)
+
+
+def _finalize_series_embeddings(  # pyright: ignore[reportUnusedFunction]
+    output: object,
+    representation: SeriesRepresentationSpec,
+    *,
+    expected_rows: int,
+    zero_scale_as_null: bool,
+) -> tuple[tuple[float, ...] | None, ...]:
+    encoder = representation.encoder
+    if encoder is None:
+        raise ValueError("A learned representation requires an encoder")
+    validated = _validate_series_embedding_array(
+        output,
+        encoder,
+        expected_rows=expected_rows,
+    )
+    rows: list[tuple[float, ...] | None] = []
+    raw_rows = cast("list[list[float]]", validated.to_pylist())
+    for raw_row in raw_rows:
+        values = tuple(float(value) for value in raw_row)
+        if representation.unit_norm:
+            norm = sqrt(fsum(value * value for value in values))
+            if norm == 0.0:
+                if zero_scale_as_null and representation.zero_scale == "null":
+                    rows.append(None)
+                    continue
+                raise ValueError("series query representation has zero norm and cannot be encoded")
+            values = tuple(value / norm for value in values)
+        rows.append(tuple(_finite_float32(value) for value in values))
+    return tuple(rows)
+
+
 def embed_native_series_query(
     query: SeriesQuerySnapshot,
     representation: SeriesRepresentationSpec,
@@ -393,42 +641,20 @@ def embed_native_series_query(
         raise UnsupportedOperationError(
             "Native series query encoding requires a representation with encoder=None"
         )
-    by_channel = dict(query)
-    flattened: list[float] = []
-    for channel in representation.channels:
-        values = by_channel[channel]
-        if representation.normalization == "none":
-            normalized = values
-        else:
-            mean = fsum(values) / len(values)
-            centered = tuple(value - mean for value in values)
-            if representation.normalization == "center":
-                normalized = centered
-            else:
-                scale = sqrt(fsum(value * value for value in centered) / len(centered))
-                if scale == 0.0:
-                    raise ValueError(
-                        "series query representation has zero scale and cannot be encoded"
-                    )
-                normalized = tuple(value / scale for value in centered)
-        flattened.extend(normalized)
-
+    normalized = _normalize_series_snapshot(
+        query,
+        representation,
+        zero_scale_as_null=False,
+    )
+    assert normalized is not None
+    flattened = [value for _, values in normalized for value in values]
     if representation.unit_norm:
         norm = sqrt(fsum(value * value for value in flattened))
         if norm == 0.0:
             raise ValueError("series query representation has zero norm and cannot be encoded")
         flattened = [value / norm for value in flattened]
-
-    encoded: list[float] = []
-    for value in flattened:
-        try:
-            float32 = struct.unpack("!f", struct.pack("!f", value))[0]
-        except OverflowError:
-            raise ValueError("series query representation produced a non-finite value") from None
-        if not isfinite(float32):
-            raise ValueError("series query representation produced a non-finite value")
-        encoded.append(float32)
-    return EmbeddedSeriesQuery(tuple(encoded), representation.fingerprint)
+    encoded = tuple(_finite_float32(value) for value in flattened)
+    return EmbeddedSeriesQuery(encoded, representation.fingerprint)
 
 
 def series_embedding_model(
@@ -440,6 +666,7 @@ def series_embedding_model(
     dimension: int,
     input_length: int,
     input_channels: tuple[str, ...],
+    input_roles: tuple[SeriesChannelRole, ...],
     input_normalization: str,
     pooling: str,
     adapter_revision: str,
@@ -453,6 +680,7 @@ def series_embedding_model(
         dimension=dimension,
         input_length=input_length,
         input_channels=input_channels,
+        input_roles=input_roles,
         input_normalization=input_normalization,
         pooling=pooling,
         adapter_revision=adapter_revision,
@@ -494,7 +722,7 @@ def embed_series(
     batch_size: int = 256,
     null_policy: SeriesNullPolicy = "propagate",
 ) -> DataFrame:
-    """Append one native deterministic series representation lazily."""
+    """Append one native or prepared learned series representation lazily."""
     from duckpd._logical import (
         Column,
         ColumnId,
@@ -505,10 +733,6 @@ def embed_series(
     from duckpd.errors import UnsupportedOperationError
     from duckpd.frame import DataFrame
 
-    if representation.encoder is not None:
-        raise UnsupportedOperationError(
-            "embed_series() currently supports only native representations with encoder=None"
-        )
     if not columns:
         raise TypeError("columns must be a non-empty channel-to-column mapping")
     channel_mapping = dict(columns)
