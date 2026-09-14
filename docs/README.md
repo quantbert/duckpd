@@ -52,6 +52,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
 
 - [Competitive landscape](references/competitive-landscape.md) — relevant ideas,
   compatibility risks, benchmark targets, and primary implementation sources.
+- [Learned time-series embedding candidates](references/learned-time-series-embedding-candidates.md) —
+  detailed draft qualification proposal, evidence record, candidate ranking,
+  benchmark plan, and independent verification checklist.
 
 ## File conventions
 
