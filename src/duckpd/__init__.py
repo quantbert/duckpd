@@ -31,6 +31,7 @@ from duckpd.series_embeddings import (
     SeriesWindowSpec,
     series_representation,
 )
+from duckpd.series_providers import MomentEmbeddingProvider
 from duckpd.session import (
     ArrowUDFSpec,
     AttachedDatabase,
@@ -57,6 +58,7 @@ __all__ = [
     "FeatureStore",
     "MaterializationReport",
     "MergeError",
+    "MomentEmbeddingProvider",
     "ObjectStoreSecret",
     "PreparedModelInfo",
     "ProfileResult",

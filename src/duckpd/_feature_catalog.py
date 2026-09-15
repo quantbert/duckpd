@@ -98,7 +98,7 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
                 f"Embedding model {raw_name!r} has unknown fields: {', '.join(unknown)}"
             )
         backend = specification_data.get("backend", "fastembed")
-        if backend not in {"fastembed", "transformers", "custom"}:
+        if backend not in {"fastembed", "transformers", "moment", "custom"}:
             raise ValueError(f"Embedding model {raw_name!r} has unsupported backend: {backend!r}")
         revision = specification_data.get("revision")
         if not isinstance(revision, str) or re.fullmatch(r"[0-9a-fA-F]{40,64}", revision) is None:
@@ -119,6 +119,8 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
             raise ValueError(
                 f"Embedding model {raw_name!r} Transformers pooling must be 'cls' or 'mean'"
             )
+        if backend == "moment" and specification.pooling != "mean":
+            raise ValueError(f"Embedding model {raw_name!r} MOMENT pooling must be 'mean'")
         models[raw_name] = specification
     return models
 

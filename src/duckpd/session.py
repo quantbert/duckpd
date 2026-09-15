@@ -88,6 +88,7 @@ from duckpd.series_embeddings import (
     embed_native_series_query,
     snapshot_series_query,
 )
+from duckpd.series_providers import MomentEmbeddingProvider
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -450,6 +451,13 @@ class Session:
                     )
                 elif model.backend == "transformers":
                     provider = TransformersEmbeddingProvider(
+                        model,
+                        cache_dir=cache_dir,
+                        prepare_timeout_seconds=timeout_seconds,
+                        max_download_bytes=max_download_bytes,
+                    )
+                elif model.backend == "moment":
+                    provider = MomentEmbeddingProvider(
                         model,
                         cache_dir=cache_dir,
                         prepare_timeout_seconds=timeout_seconds,

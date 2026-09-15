@@ -345,10 +345,12 @@ class VectorFrameMethods:
                 "search_series requires series metadata matching the requested representation"
             )
         element_type, dimension = _vector_type(vector_column.duckdb_type)
-        if element_type != "FLOAT" or dimension != selected_representation.dimension:
+        if element_type != "FLOAT" or (
+            dimension is not None and dimension != selected_representation.dimension
+        ):
             raise UnsupportedOperationError(
-                "search_series requires a FLOAT column whose fixed dimension "
-                "matches its series representation metadata"
+                "search_series requires a FLOAT column whose dimension matches "
+                "its series representation metadata"
             )
         vector_metric, distance, tie_column, metadata = _search_metadata(
             self._frame,

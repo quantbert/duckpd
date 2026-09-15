@@ -962,6 +962,18 @@ def test_native_series_representation_round_trips_through_direct_parquet_sink(
     )
     values = restored.collect()["vector"]  # pyright: ignore[reportUnknownMemberType]
     np.testing.assert_array_equal(values.iloc[1], np.array([-0.5, 0.5], dtype=np.float32))
+    matches = (
+        restored[restored["vector"].notna()]
+        .vector.search_series(
+            {"value": [1.0, 2.0]},
+            column="vector",
+            metric="l2",
+            tie_breaker="row",
+        )
+        .collect()
+    )
+    assert matches["row"].tolist() == [2, 3]  # pyright: ignore[reportUnknownMemberType]
+    assert matches["_distance"].iloc[0] == 0.0  # pyright: ignore[reportUnknownMemberType]
 
 
 def _learned_windows(
@@ -1301,7 +1313,7 @@ def test_series_provider_registration_and_preparation_are_strict() -> None:
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
 
-    with pytest.raises(ValueError, match="backend='custom'"):
+    with pytest.raises(ValueError, match="backend='moment' or 'custom'"):
         replace(model, backend="fastembed")
     with pytest.raises(ValueError, match="specification"):
         session.register_embedding_provider(_learned_model(), provider)

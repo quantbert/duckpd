@@ -30,6 +30,7 @@ notebooks write reusable files under `demo/.artifacts/`.
 | [`order_index_window_workflows.ipynb`](notebooks/order_index_window_workflows.ipynb) | Stable order, indexing, window semantics, assignment, and persistence | Offline |
 | [`temporal_categorical_semantics.ipynb`](notebooks/temporal_categorical_semantics.ipynb) | Temporal rolling, datetime arithmetic, categoricals, and Arrow interchange | Offline |
 | [`time_series_embeddings.ipynb`](notebooks/time_series_embeddings.ipynb) | Native multi-channel series representations and exact retrieval | Offline |
+| [`moment_time_series_embeddings.ipynb`](notebooks/moment_time_series_embeddings.ipynb) | Built-in MOMENT provider, bounded GPU inference, persistence, and exact retrieval | Network access and PyTorch GPU environment |
 | [`event_windows_exact_fusion.ipynb`](notebooks/event_windows_exact_fusion.ipynb) | Event grids, availability, reaction retrieval, and exact late fusion | Offline |
 | [`vector_search.ipynb`](notebooks/vector_search.ipynb) | GPU text embedding, persisted model identity, and semantic search | Network access and PyTorch GPU environment |
 | [`feature_store.ipynb`](notebooks/feature_store.ipynb) | Catalog inspection, point-in-time alignment, caching, series search, and semantic search | Network access; GPU environment for embedding sections |

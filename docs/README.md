@@ -15,8 +15,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
   progressive examples, workflow selection, requirements, validation, and
   exact and experimental approximate retrieval constraints.
 - [Time-series representations and similarity search](api/time-series-embeddings.md) —
-  native rolling and event-aligned representations, exact retrieval, and the
-  application-owned custom provider boundary.
+  native rolling and event-aligned representations, exact retrieval, the built-in
+  MOMENT backend, and the application-owned custom-provider boundary.
 - [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
   supported arguments, intentional deviations, and unsupported behavior.
 

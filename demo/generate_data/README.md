@@ -152,6 +152,7 @@ uv pip install --python .venv-rocm/bin/python \
   'https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.9.1%2Brocm7.2.4.lw.git39497456-cp312-cp312-linux_x86_64.whl' \
   'https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/triton-3.5.1%2Brocm7.2.4.gita272dfa8-cp312-cp312-linux_x86_64.whl' \
   'transformers>=4.50,<5' \
+  'momentfm @ git+https://github.com/moment-timeseries-foundation-model/moment.git@38f7310ad594100747ca2a8357e9c7ca7d323e0e' \
   'exchange-calendars>=4.11,<5' \
   'ipykernel>=7,<8' \
   'ipywidgets>=8,<9' \
@@ -166,10 +167,11 @@ Register that interpreter as a Jupyter kernel:
   --display-name "DuckPD ROCm 7.2.4"
 ```
 
-In VS Code, open [`../notebooks/vector_search.ipynb`](../notebooks/vector_search.ipynb),
+In VS Code, open [`../notebooks/vector_search.ipynb`](../notebooks/vector_search.ipynb)
+or [`../notebooks/moment_time_series_embeddings.ipynb`](../notebooks/moment_time_series_embeddings.ipynb),
 choose **Select Kernel** in the upper-right, and select **DuckPD ROCm 7.2.4**.
 Restart the notebook kernel after changing it. The repository's normal `.venv`
-does not contain accelerator-specific PyTorch and Transformers packages.
+does not contain accelerator-specific PyTorch, Transformers, or MOMENT packages.
 
 Verify that PyTorch sees the GPU before generation:
 

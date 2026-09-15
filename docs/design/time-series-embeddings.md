@@ -1,11 +1,12 @@
 # Time-Series Embeddings and Event Similarity
 
-**Status: native representations, event windows, catalog declarations, and the
-application-owned custom learned-provider boundary are implemented. DuckPD ships
-no learned time-series model.**
+**Status: native representations, event windows, catalog declarations, the
+built-in MOMENT backend, and the application-owned custom learned-provider
+boundary are implemented. No learned representation is recommended as a
+production default.**
 
-This document defines the shipped native, catalog, custom-provider, and
-model-qualification contracts.
+This document defines the shipped native, catalog, built-in-provider,
+custom-provider, and model-qualification contracts.
 
 **Intended location:** `docs/design/time-series-embeddings.md`.
 
@@ -404,21 +405,21 @@ It uses the same `EmbeddingModelSpec` and session lifecycle as text:
 
 ```python
 encoder = pd.embedding_model(
-    "research/return-window-encoder",
-    revision="immutable-checkpoint-revision",
-    backend="custom",
-    dimension=128,
+    "AutonLab/MOMENT-1-small",
+    revision="411e288267f82cce86296dbe4d6c8bc533cc162f",
+    backend="moment",
+    dimension=512,
     normalize=True,
-    pooling="mean-valid-v1",
+    pooling="mean",
     input=pd.series_embedding_input(
-        length=60,
+        length=512,
         channels=("simple_return",),
         roles=("target",),
-        normalization="none",
+        normalization="moment-revin-affine-false-v1",
     ),
 )
 learned_returns = pd.series_representation(
-    window=60,
+    window=512,
     channels=("simple_return",),
     sampling="observations",
     step="PT1M",
@@ -434,14 +435,17 @@ The common model fields retain their text semantics: immutable model revision,
 output dimension, backend, output normalization, and pooling participate in the
 model fingerprint. The optional `SeriesEmbeddingInputSpec` adds fixed input
 length, unique ordered channels, one target/past-only/known-future role per
-channel, and provider-owned input normalization. Series inputs require
-`backend="custom"`; a backend string never authorizes DuckPD to import arbitrary
-code, install dependencies, or download a model.
+channel, and provider-owned input normalization. Series inputs support the
+built-in `backend="moment"` adapter or `backend="custom"`. A known backend
+authorizes only its corresponding DuckPD adapter; it never authorizes arbitrary
+code or dependency installation. Model preparation may download only the pinned
+checkpoint revision into a verified cache.
 
 Model preparation is explicit and eager:
 
 ```python
-# provider is an application-created SeriesEmbeddingProvider.
+# Built-in backends may be selected explicitly for device configuration.
+provider = pd.MomentEmbeddingProvider(encoder, device="cuda")
 session.register_embedding_provider(encoder, provider)
 info = session.prepare_embedding_model(encoder)
 
@@ -1734,9 +1738,9 @@ the core news-plus-market-reaction exploration workflow without learned models.
 
 ### Phase 3: feature-store catalog declarations
 
-Implemented as roadmap Phase 18: catalog version 1 resolves native and
-application-owned learned representation declarations without preparing or
-executing providers. Native catalog workflows remain model- and network-free.
+Implemented as roadmap Phase 18: catalog version 1 resolves native and learned
+representation declarations without preparing or executing providers. Native
+catalog workflows remain model- and network-free.
 
 **Exit gate:** catalog-version-1 fixtures, alias/ASOF metadata preservation,
 physical validation, offline behavior, and model trust-policy tests pass. No
@@ -1745,14 +1749,17 @@ catalog call generates or refreshes corpus embeddings.
 ### Phase 4: optional learned inference
 
 The model-agnostic provider lifecycle and bounded Arrow execution path are
-implemented for application-owned custom providers. DuckPD does not select,
-download, or ship a learned time-series model.
+implemented for application-owned custom providers and the built-in MOMENT
+backend. The backend adapter owns checkpoint loading and tensor conversion; the
+shared series API owns windows, batching, validation, persistence, metadata, and
+retrieval.
 
-**Exit gate:** custom provider calls are bounded; query and corpus encoding agree;
+**Exit gate:** provider calls are bounded; query and corpus encoding agree;
 attestation and output validation fail before partial output; no hidden
-normalization, padding, interpolation, or device fallback occurs. A first-party
-adapter requires a separate qualification showing material held-out value over
-the best relevant deterministic baseline.
+normalization, padding, interpolation, or device fallback occurs. Shipping an
+adapter does not qualify the model's retrieval quality. Recommending a learned
+representation still requires material held-out value over the best relevant
+deterministic baseline.
 
 ### Later research: aligned multimodal spaces
 

@@ -4,14 +4,18 @@ DuckPD supports model-free time-series similarity by turning ordered,
 fixed-length numeric windows into typed vectors. These vectors can be searched
 with the same exact vector engine used for other numeric data.
 
-The current implementation ships deterministic native encoding and an explicitly
-registered custom-provider boundary. DuckPD does not ship or recommend a learned
-time-series model. Native and application-owned learned paths use the same window,
-representation, metadata, and retrieval contracts described here.
+The current implementation ships deterministic native encoding, a built-in
+MOMENT backend, and an explicitly registered custom-provider boundary. The
+built-in adapter removes notebook boilerplate; it is an integration surface,
+not a recommendation that MOMENT is appropriate for every retrieval task.
+Native and learned paths use the same window, representation, metadata, storage,
+and retrieval contracts described here.
 
 The native rolling-window walkthrough is
 [`time_series_embeddings.ipynb`](../../demo/notebooks/time_series_embeddings.ipynb);
-the dedicated event workflow is
+the built-in MOMENT-provider walkthrough is
+[`moment_time_series_embeddings.ipynb`](../../demo/notebooks/moment_time_series_embeddings.ipynb);
+and the dedicated event workflow is
 [`event_windows_exact_fusion.ipynb`](../../demo/notebooks/event_windows_exact_fusion.ipynb).
 The lower-level architecture and proposed extensions are documented in the
 [time-series embedding design](../design/time-series-embeddings.md).
@@ -64,7 +68,7 @@ DuckPD therefore uses **representation** as the more precise general term:
 
 - A **native representation** is produced by deterministic DuckDB expressions.
 - A **learned representation** is produced by an explicitly selected and
-  prepared application-owned encoder.
+  prepared built-in or application-owned encoder.
 - Both are embeddings when their vectors are used as coordinates for
   similarity retrieval.
 
@@ -421,7 +425,7 @@ represent different channels, sampling rules, units, normalization, or models.
 - Observation or fixed-grid sampling and optional cadence.
 - A versioned application data contract.
 - Native normalization, unit normalization, and zero-scale policy.
-- The complete encoder identity when a learned encoder is used in the future.
+- The complete encoder identity when a learned encoder is used.
 - A versioned native vector layout.
 
 DuckPD serializes this contract canonically and hashes it into a SHA-256
@@ -551,9 +555,9 @@ matches = features[features["pattern"].notna()].vector.search_series(
 `FeatureStore.embedding_model(name)` are metadata-only lookups.
 Constructing the store, selecting features, calling `search_series()`, and
 explaining the plan do not prepare a learned encoder or run inference. Executing
-a learned search requires the exact provider to have been explicitly registered
-and prepared; corpus vectors already stored in the feature partition are not
-regenerated.
+a learned search requires the exact provider to have been prepared; custom
+providers must first be registered. Corpus vectors already stored in the feature
+partition are not regenerated.
 
 ## Limitations and common mistakes
 
@@ -662,26 +666,27 @@ prepare a model, download an artifact, or run inference.
 ## Learned encoders
 
 Learned encoders are an optional extension, not a replacement for native
-representations. They use the same model and session lifecycle as text:
+representations. They use the same model and session lifecycle as text. MOMENT
+is the first built-in time-series backend:
 
 ```python
 encoder = pd.embedding_model(
-    "research/return-window-encoder",
-    revision="immutable-checkpoint-revision",
-    backend="custom",
-    dimension=128,
+    "AutonLab/MOMENT-1-small",
+    revision="411e288267f82cce86296dbe4d6c8bc533cc162f",
+    backend="moment",
+    dimension=512,
     normalize=True,
-    pooling="mean-valid-v1",
+    pooling="mean",
     input=pd.series_embedding_input(
-        length=60,
+        length=512,
         channels=("simple_return",),
         roles=("target",),
-        normalization="checkpoint-defined-v1",
+        normalization="moment-revin-affine-false-v1",
     ),
 )
 
 representation = pd.series_representation(
-    window=60,
+    window=512,
     channels=("simple_return",),
     sampling="observations",
     data_contract="market/simple-return/split-adjusted/v1",
@@ -691,7 +696,8 @@ representation = pd.series_representation(
     encoder=encoder,
 )
 
-# Registration has no preparation or inference side effect.
+# Registration selects an explicit GPU, exactly like TransformersEmbeddingProvider.
+provider = pd.MomentEmbeddingProvider(encoder, device="cuda")
 session.register_embedding_provider(encoder, provider)
 prepared = session.prepare_embedding_model(encoder)
 learned = windows.embed_series(
@@ -701,6 +707,14 @@ learned = windows.embed_series(
     batch_size=256,
 )
 ```
+
+For CPU execution, `session.prepare_embedding_model(encoder)` can create the
+built-in MOMENT provider automatically. Other model families keep the same
+`embed_series()`, persistence, and `search_series()` surface, but require either
+a qualified built-in backend adapter or an application-owned
+`SeriesEmbeddingProvider` with `backend="custom"`. A backend adapter is necessary
+because foundation-model packages do not share checkpoint loaders, tensor
+layouts, masks, pooling behavior, or output objects.
 
 A learned encoder is only one component of the representation space. Input
 features, sampling, outer normalization, provider normalization, channel order,
@@ -789,24 +803,26 @@ for forecasting while producing poor retrieval neighborhoods.
 
 ### First-party provider policy
 
-DuckPD ships no learned time-series model or model-specific runtime. Applications
-own model selection, dependencies, artifact acquisition, preprocessing, and
-provider implementation. DuckPD owns the stable execution boundary: immutable
-model and representation identity, explicit registration and preparation,
-bounded Arrow batches, output validation, metadata propagation, and exact
-retrieval.
+DuckPD ships no learned model weights or model-runtime dependencies. It does ship
+the thin `MomentEmbeddingProvider` adapter; applications still own model
+selection and installation of PyTorch, `huggingface-hub`, and `momentfm`. The
+provider owns pinned checkpoint acquisition and tensor conversion. DuckPD's
+shared series layer owns immutable model and representation identity, explicit
+preparation, bounded Arrow batches, output validation, metadata propagation,
+persistence, and exact retrieval.
 
 TSPulse and TS2Vec were evaluated as first-party candidates and removed. TSPulse
 was restricted to one 512-point channel and excluded Python 3.14. TS2Vec required
 a DuckPD-maintained training and runtime stack. Neither demonstrated material
 held-out retrieval value over native or compact deterministic baselines. Their
-model-specific complexity therefore did not justify a permanent public API.
+architecture and training complexity therefore did not justify a permanent
+public API. MOMENT remains an external runtime behind a small adapter.
 
-A future built-in provider requires evidence on a named task that it materially
-beats the best relevant native, PCA, or statistical baseline across held-out
-entities and chronology while meeting runtime, memory, portability, licensing,
-and determinism requirements. Until then, the custom provider boundary is the
-only learned-series integration surface.
+Shipping a backend adapter is not a model recommendation. Recommending MOMENT or
+another learned representation for production still requires evidence on a
+named task that it materially beats the best relevant native, PCA, or
+statistical baseline across held-out entities and chronology while meeting
+runtime, memory, portability, licensing, and determinism requirements.
 
 ### Qualification requirements
 
@@ -873,3 +889,4 @@ reference rather than a production commitment.
 - [API compatibility and semantic guide](../COMPATIBILITY.md#11-native-time-series-representations)
 - [Event-window and exact-fusion notebook](../../demo/notebooks/event_windows_exact_fusion.ipynb)
 - [Time-series notebook](../../demo/notebooks/time_series_embeddings.ipynb)
+- [MOMENT provider notebook](../../demo/notebooks/moment_time_series_embeddings.ipynb)

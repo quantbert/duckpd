@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 NullTextPolicy = Literal["error", "empty"]
-EmbeddingBackend = Literal["fastembed", "transformers", "custom"]
+EmbeddingBackend = Literal["fastembed", "transformers", "moment", "custom"]
 EmbeddingMetadataOrigin = Literal["generated", "sidecar", "table", "catalog"]
 
 SeriesChannelRole = Literal["target", "past_covariate", "known_future_covariate"]
@@ -134,8 +134,10 @@ class EmbeddingModelSpec:
             raise ValueError("revision must identify an immutable model revision")
         if type(self.dimension) is not int or self.dimension <= 0:
             raise ValueError("dimension must be a positive integer")
-        if self.backend not in {"fastembed", "transformers", "custom"}:
-            raise ValueError("backend must be 'fastembed', 'transformers', or 'custom'")
+        if self.backend not in {"fastembed", "transformers", "moment", "custom"}:
+            raise ValueError(
+                "backend must be 'fastembed', 'transformers', 'moment', or 'custom'"
+            )
         if type(self.normalize) is not bool:
             raise TypeError("normalize must be a boolean")
         if type(self.pooling) is not str or not self.pooling:
@@ -145,10 +147,12 @@ class EmbeddingModelSpec:
         if self.input is not None:
             if type(self.input) is not SeriesEmbeddingInputSpec:
                 raise TypeError("input must be a SeriesEmbeddingInputSpec or None")
-            if self.backend != "custom":
-                raise ValueError("series embedding inputs require backend='custom'")
+            if self.backend not in {"moment", "custom"}:
+                raise ValueError("series embedding inputs require backend='moment' or 'custom'")
             if self.document_prefix or self.query_prefix:
                 raise ValueError("series embedding models must not define text prefixes")
+        elif self.backend == "moment":
+            raise ValueError("backend='moment' requires a series embedding input")
 
     @property
     def fingerprint(self) -> str:

@@ -353,6 +353,7 @@ Check out the runnable tutorials and interactive notebooks in [demo/](demo/READM
 * [`demo/notebooks/quickstart.ipynb`](demo/notebooks/quickstart.ipynb) — 5-minute interactive introduction.
 * [`demo/notebooks/feature_walkthrough.ipynb`](demo/notebooks/feature_walkthrough.ipynb) — Deep dive across the AlphaDojo stock-news dataset.
 * [`demo/notebooks/time_series_embeddings.ipynb`](demo/notebooks/time_series_embeddings.ipynb) — Native fixed-count series representations and exact retrieval.
+* [`demo/notebooks/moment_time_series_embeddings.ipynb`](demo/notebooks/moment_time_series_embeddings.ipynb) — Built-in MOMENT provider, GPU series embeddings, persistence, and exact retrieval.
 * [`demo/notebooks/event_windows_exact_fusion.ipynb`](demo/notebooks/event_windows_exact_fusion.ipynb) — Event grids, availability cutoffs, and exact late fusion.
 * [`demo/notebooks/vector_search.ipynb`](demo/notebooks/vector_search.ipynb) — GPU text embeddings and semantic search.
 * [`demo/notebooks/feature_store.ipynb`](demo/notebooks/feature_store.ipynb) — Catalog, cache, alignment, and embedding lifecycle walkthrough.

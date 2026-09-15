@@ -10,6 +10,11 @@ the [release policy](RELEASES.md).
 
 ### Added
 
+- A built-in `MomentEmbeddingProvider` and `backend="moment"` integrate pinned
+  MOMENT checkpoints with the shared model preparation, bounded Arrow inference,
+  persistence, and exact series-search lifecycle. The end-to-end
+  MOMENT-1-small notebook uses the provider without defining adapter classes.
+
 - A typed `SeriesEmbeddingInputSpec` lets the shared `embedding_model()` contract
   describe ordered fixed-window inputs. Text and learned-series providers now
   use the same `register_embedding_provider()`, `prepare_embedding_model()`, and
@@ -150,6 +155,12 @@ the [release policy](RELEASES.md).
   do not leave clients pinned to stale partition templates.
 - Remote projected embedding partitions preserve their catalog-declared
   fixed-size Arrow list schema after DuckDB Parquet projection.
+
+### Fixed
+
+- Series search now casts variable-size `FLOAT[]` columns restored from local
+  Parquet to the fixed dimension declared by verified sidecar metadata, so
+  persisted native and learned representations remain directly searchable.
 
 ## 0.1.4 - 2026-09-06
 

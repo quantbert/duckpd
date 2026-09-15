@@ -713,6 +713,11 @@ class DuckDBCompiler:
     def _compile_series_search(self, plan: SeriesSearchPlan) -> CompiledFrame:
         compiled = self._compile(plan.input)
         document = duckdb.SQLExpression(quote_identifier(compiled.bindings[plan.vector_column]))
+        vector_column = next(
+            column for column in plan.input.metadata.columns if column.id == plan.vector_column
+        )
+        if vector_column.duckdb_type.endswith("[]"):
+            document = document.cast(f"FLOAT[{plan.representation.dimension}]")
         query_udf = self._session._series_query_udf(plan.representation)
         query = duckdb.FunctionExpression(
             query_udf,

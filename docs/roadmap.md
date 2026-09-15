@@ -1052,8 +1052,9 @@ contracts are stable and independently useful.
       baselines without blocking the native release.
 - [x] Record preparation, inference, memory, and cache metrics without hidden
       normalization, device fallback, or planning-time downloads.
-- [x] Keep model-specific adapters outside core unless a reviewed qualification
-      demonstrates material value and acceptable maintenance cost.
+- [x] Keep model architectures and training code outside core. Thin runtime
+      adapters may ship when they preserve the generic provider contract;
+      recommending a model still requires reviewed qualification.
 
 Exit gate:
 
@@ -1074,11 +1075,13 @@ DuckPD-owned training producer, architecture port, artifact format, runtime
 fixture, and model-specific benchmark. Those costs were not justified by the
 evidence.
 
-DuckPD retains native time-series representations and the application-owned,
-shared `EmbeddingProvider` lifecycle. Future model-specific integrations require
-a separate qualification with a named retrieval task, held-out entity and
-chronology evaluation, material baseline improvement, and acceptable runtime,
-memory, portability, licensing, and maintenance costs.
+DuckPD retains native time-series representations and the shared
+`EmbeddingProvider` lifecycle. A thin dependency-backed adapter such as
+`MomentEmbeddingProvider` may expose an external runtime without importing its
+architecture or training stack into DuckPD. Shipping that loader is not a model
+recommendation. Model recommendations still require a named retrieval task,
+held-out entity and chronology evaluation, material baseline improvement, and
+acceptable runtime, memory, portability, licensing, and maintenance costs.
 
 ### Deferred embedding research
 
