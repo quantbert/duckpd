@@ -1,12 +1,11 @@
 # Time-Series Embeddings and Event Similarity
 
-**Status: native representations, event windows, catalog declarations, custom
-learned providers, the narrow TSPulse CPU control, and attested local TS2Vec
-training/inference implemented; neither learned model is qualified for financial
-retrieval.**
+**Status: native representations, event windows, catalog declarations, and the
+application-owned custom learned-provider boundary are implemented. DuckPD ships
+no learned time-series model.**
 
-This document defines the shipped native, catalog, custom-provider, TSPulse, and
-TS2Vec contracts plus the remaining model-qualification work.
+This document defines the shipped native, catalog, custom-provider, and
+model-qualification contracts.
 
 **Intended location:** `docs/design/time-series-embeddings.md`.
 
@@ -443,10 +442,9 @@ arbitrarily selected weights file. The adapter revision identifies its inference
 contract. Runtime package versions and resolved asset provenance are also
 reported during preparation.
 
-Initially, `backend="custom"` supports explicitly registered providers. A
-reviewed `"moment"` backend is added only when its adapter and checkpoint pass
-the qualification gates below. A string naming a backend does not authorize
-importing arbitrary code from a catalog or model repository.
+Only `backend="custom"` supports explicitly registered, application-owned
+providers. A backend string never authorizes DuckPD to import arbitrary code,
+install dependencies, or download a model from a catalog or repository.
 
 Model preparation is explicit and eager:
 
@@ -1577,57 +1575,39 @@ Validation claims must distinguish metadata checks, whole-input key checks where
 required, and per-batch value checks. A successful complete sink validates all
 rows it consumed; it does not certify an unconsumed upstream dataset.
 
-## Model candidates and qualification
+## Model selection and qualification
 
-The encoder interface remains model-agnostic, but the implementation plan is
-deliberately narrow: first-party providers are limited to TSPulse and TS2Vec.
-The [candidate review][learned-candidate-review] records the evidence behind
-that decision.
+DuckPD intentionally ships no first-party learned time-series provider. TSPulse
+and TS2Vec were implemented and evaluated as candidates, then removed because
+neither demonstrated material held-out retrieval value over native or compact
+deterministic baselines. TSPulse also imposed a narrow single-channel,
+fixed-window contract and an incomplete Python support matrix; TS2Vec required
+DuckPD to maintain a training producer, model architecture, artifact format, and
+PyTorch runtime.
 
-| Representation | Verified characteristic | Treatment |
-| --- | --- | --- |
-| Native, PCA, statistical, and bounded-DTW vectors | Deterministic or train-fitted controls with explicit feature meaning | Required baselines before learned-model selection |
-| TSPulse published search checkpoint | Immutable univariate checkpoint with a documented decoder/register extraction | Implemented as a CPU-only 512-point, 240-dimensional control using internal RevIN only |
-| TS2Vec trained on domain data | Input projection mixes channels before temporal convolutions; full-series and temporal states are available | Bounded external producer and attested local-bundle CPU inference implemented; model quality remains unqualified |
+The stable product boundary is model-agnostic. Applications may register a
+`SeriesEmbeddingProvider`; DuckPD validates its immutable identity, preparation
+attestation, bounded Arrow input, output shape and values, metadata propagation,
+and query/corpus compatibility. The application owns model selection, artifact
+acquisition, dependencies, preprocessing implementation, and model-specific
+qualification.
 
-Sources: [TSPulse implementation][model-tspulse] and
-[TS2Vec encoder][model-ts2vec]. Provider releases must pin immutable revisions
-rather than depend on moving branches.
-
-Important distinctions:
-
-- The first TSPulse provider is deliberately univariate. It must not imply joint
-  channel interaction or silently concatenate per-channel vectors.
-- TSPulse rejects outer input normalization and final unit normalization.
-  Fitted scaling or a changed output recipe requires a separately attested
-  artifact and representation identity.
-- A TS2Vec implementation is not a pretrained finance checkpoint. Training,
-  averaged-versus-raw weights, output dimension, and pooling belong to artifact
-  and representation identity.
-- Forecasting, classification, or self-supervised loss is not evidence of
-  nearest-neighbor relevance or incremental predictive utility.
-
-Training belongs in an external producer/research workflow. Frozen inference
-uses the existing provider boundary and does not require a DataFrame training
-API or variable-length tensor protocol. Retraining or changing a readout creates
-a new representation and requires compatible query/corpus re-encoding.
-
-Every shipped learned adapter must publish a qualification record containing:
+A future first-party adapter must publish a qualification record containing:
 
 - exact checkpoint revision and a digest over every numerical artifact;
 - source/package versions and source-code/weights license terms;
 - supported Python, platform, accelerator, and runtime matrix;
 - ordered channel schema, input length, dtype, masks, and missing-value behavior;
-- preprocessing, fitted state, tokenization, extraction, pooling, output
-  dimension, and unit-normalization policy;
+- preprocessing, fitted state, extraction, pooling, output dimension, and
+  unit-normalization policy;
 - CPU/memory, conversion overhead, throughput, batching, and cold-start results;
 - deterministic query/corpus agreement and batch-partition tolerance; and
-- joint retrieval results against native/PCA/statistical controls plus a
-  separately reported predictive-utility evaluation.
+- held-out retrieval results against the best relevant native, PCA, and
+  statistical controls.
 
-Neither built-in learned provider has passed the financial qualification gates.
-Provider availability permits controlled measurement; it does not imply a
-recommended default or material gain over conventional baselines.
+Provider availability alone is insufficient. A built-in adapter is justified
+only when its material gain on a named retrieval task survives held-out entities
+and chronology and outweighs its runtime and maintenance cost.
 
 ## Test plan
 
@@ -1786,19 +1766,15 @@ catalog call generates or refreshes corpus embeddings.
 
 ### Phase 4: optional learned inference
 
-The provider lifecycle and bounded Arrow execution path are implemented for
-custom providers, the immutable TSPulse control, and locally trained attested
-TS2Vec bundles. The TS2Vec producer streams bounded ticker shards, creates
-chronological embargoed partitions, fits preprocessing only on training points,
-and exports averaged safetensors plus complete provenance. Compare both learned
-providers with native, PCA, statistical, and bounded-DTW controls without adding
-another DataFrame/search API.
+The model-agnostic provider lifecycle and bounded Arrow execution path are
+implemented for application-owned custom providers. DuckPD does not select,
+download, or ship a learned time-series model.
 
-**Exit gate:** controlled behavior, held-out retrieval, predictive utility,
-bounded provider calls, deterministic query/corpus agreement, accurate resource
-reporting, no hidden normalization, and a documented use case where a learned
-adapter materially beats the best relevant baseline. Do not block native
-release on this gate.
+**Exit gate:** custom provider calls are bounded; query and corpus encoding agree;
+attestation and output validation fail before partial output; no hidden
+normalization, padding, interpolation, or device fallback occurs. A first-party
+adapter requires a separate qualification showing material held-out value over
+the best relevant deterministic baseline.
 
 ### Later research: aligned multimodal spaces
 
@@ -1830,12 +1806,9 @@ paths, source/compiler/executor/optimizer behavior, persistence, feature-store
 planning/catalog parsing, and associated embedding/vector tests. Repository
 references below are pinned to the reviewed commit.
 
-This is a design artifact, not an implementation or a claim that the full DuckPD
-test suite or any learned provider was executed. Proposed Python blocks are API
-usage fragments; model revision/digest placeholders require real qualified
-artifacts. The illustrative SQL is not represented as a tested patch. Document
-structure, reference completeness, JSON/Python fragment syntax, and independent
-normalization/event-grid reference checks are validated separately during drafting.
+This design records the implemented contract and its validation plan. Illustrative
+provider blocks remain API examples; applications supply real immutable revisions,
+artifact digests, and provider implementations.
 
 ## References
 
@@ -1865,15 +1838,9 @@ implementation-specific links are attached to their corresponding sections above
 [src-store]: https://github.com/quantbert/duckpd/blob/fc1fce3aca0fc8028f685188875d6ff93338fa66/src/duckpd/featurestore.py
 [src-catalog]: https://github.com/quantbert/duckpd/blob/fc1fce3aca0fc8028f685188875d6ff93338fa66/src/duckpd/_feature_catalog.py
 
-### Model and database sources
+### Database sources
 
-Primary learned implementation references are [TSPulse][model-tspulse] and
-[TS2Vec][model-ts2vec]. Native lowering relies on documented
-[window][duckdb-windows] and [array][duckdb-arrays] operations. Every provider
-release must pin its exact artifact and runtime revisions during qualification.
-
-[model-ts2vec]: https://github.com/zhihanyue/ts2vec/blob/main/ts2vec.py
-[learned-candidate-review]: ../references/learned-time-series-embedding-candidates.md
-[model-tspulse]: https://github.com/ibm-granite/granite-tsfm/blob/fe7a35697723e2a2f5246ae979474bfc554e26c0/tsfm_public/models/tspulse/modeling_tspulse.py
+Native lowering relies on documented [window][duckdb-windows] and
+[array][duckdb-arrays] operations.
 [duckdb-windows]: https://duckdb.org/docs/stable/sql/functions/window_functions.html
 [duckdb-arrays]: https://duckdb.org/docs/stable/sql/functions/array.html

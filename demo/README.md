@@ -11,9 +11,6 @@ uv run python demo/reduction_pipeline.py
 uv run python demo/generate_market_data.py
 uv run python demo/market_data_demo.py smoke
 uv run python demo/time_series_embeddings.py
-uv run --extra tspulse python demo/time_series_embeddings.py --provider tspulse
-uv run --extra ts2vec python demo/train_ts2vec.py
-uv run --extra ts2vec python demo/time_series_embeddings.py --provider ts2vec
 ```
 
 The embedding tutorials use an explicit PyTorch GPU provider. First create the
@@ -65,26 +62,15 @@ request that device explicitly and fail rather than falling back to CPU.
   dataset directly, perform exact `vector.search_text()` retrieval, and report
   the selected PyTorch runtime plus model-preparation and query-to-response
   timings.
-- `time_series_embeddings.py` uses the generated market-data smoke Parquet file.
-  Its default mode builds native return/range windows. `--provider tspulse`
-  embeds bounded 512-point univariate NVDA windows with the pinned control.
-  `--provider ts2vec` verifies a locally trained bundle and embeds bounded joint
-  close-return, bar-return, and intrabar-range windows.
-- `train_ts2vec.py` streams a bounded number of points per ticker from the same
-  Parquet file, applies chronological embargoed splits, fits training-only
-  channel statistics, reproduces TS2Vec's hierarchical contrastive objective,
-  and atomically exports averaged weights plus a complete attestation manifest.
+- `time_series_embeddings.py` uses the generated market-data smoke Parquet file
+  to build and search deterministic native return/range representations.
 - `generate_market_data.py` calibrates compressed bytes per row, then streams a
   deterministic OHLC time-series dataset directly to Parquet. The safe default
   creates an approximately 5 MB smoke file under `demo/data/`.
 
 The checked-in smoke dataset contains 323,618 deterministic synthetic OHLC rows
-across eight tickers, about 40,452 observations per ticker. It is suitable for
-validating a TS2Vec training producer, chronological split/embargo logic,
-checkpoint export, attestation, and DuckPD inference integration. Use the
-generated 100 MB or 1 GB variants for throughput and memory exercises. Because
-all variants share the same synthetic price process, results from them cannot
-qualify TS2Vec—or TSPulse—for real financial retrieval.
+across eight tickers, about 40,452 observations per ticker. Use the generated
+100 MB or 1 GB variants for throughput and memory exercises.
 
 - `market_data_demo.py` benchmarks and compares execution time and memory usage
 - `generate_data/` contains the deterministic Nasdaq Stockholm feature-store
@@ -118,12 +104,6 @@ qualify TS2Vec—or TSPulse—for real financial retrieval.
   order, grouped fixed-count arrays, native `embed_series()` normalization,
   raw-window `search_series()`, reusable `Session.embed_series_query()` values,
   incompatible-space rejection, and metadata-preserving Parquet persistence.
-- `DuckPD_TS2Vec_vs_TSPulse.ipynb` runs both optional CPU providers over the
-  same 512-observation query and 128 synthetic candidate endpoints. It compares
-  artifact and preprocessing contracts, preparation and bounded-inference
-  metrics, exact-cosine neighborhood overlap, repeatability, and a controlled
-  scale sensitivity without presenting synthetic results as financial model
-  qualification.
 - `DuckPD_Event_Windows_and_Exact_Fusion.ipynb` is a self-contained offline
   walkthrough of exact UTC event grids, revision-safe event keys, late-bar
   availability, incomplete-window handling, native reaction retrieval, explicit

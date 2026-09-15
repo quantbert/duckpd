@@ -279,13 +279,6 @@ class SeriesRepresentationSpec:
                 raise ValueError("encoder input_length must equal representation window")
             if self.encoder.input_channels != self.channels:
                 raise ValueError("encoder input_channels must equal representation channels")
-            if self.encoder.backend in {"tspulse", "ts2vec"} and (
-                self.normalization != "none" or self.unit_norm
-            ):
-                provider = "TSPulse" if self.encoder.backend == "tspulse" else "TS2Vec"
-                raise ValueError(
-                    f"{provider} representations require normalization='none' and unit_norm=False"
-                )
 
     @property
     def dimension(self) -> int:

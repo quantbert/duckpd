@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
-import numpy as np
 import pytest
 
 from benchmark.generate import (
@@ -30,13 +29,6 @@ from benchmark.metrics import (
 )
 from benchmark.report import generate_markdown_report
 from benchmark.runner import parse_args, resolve_sizes, resolve_workloads
-from benchmark.series_embeddings import (
-    _disjoint_endpoints,
-    _run_vector_controls,
-    _synthetic_series,
-    _validate_counts,
-    _windows,
-)
 from benchmark.tracks import results_json, run_tracks, scorecard
 from benchmark.workloads import WORKLOADS
 
@@ -370,84 +362,3 @@ def test_featurestore_remote_cache_benchmark(tmp_path: Path) -> None:
     assert result.warm_median_seconds > 0
     assert result.cache_bytes > 0
     assert json.loads(result.to_json())["rows"] == 1
-
-
-def test_series_embedding_controls_are_matched_and_deterministic(tmp_path: Path) -> None:
-    channels, values = _synthetic_series(40, seed=91)
-    selected_channels = channels[:2]
-    selected = values[:, :2]
-    training_endpoints = np.arange(15, 23, dtype=np.int64)
-    candidate_endpoints = np.arange(24, 32, dtype=np.int64)
-    training = _windows(selected, training_endpoints, window=8)
-    candidates = _windows(selected, candidate_endpoints, window=8)
-
-    first = _run_vector_controls(
-        scope="multivariate",
-        channels=selected_channels,
-        window=8,
-        training_windows=training,
-        candidate_windows=candidates,
-        endpoints=candidate_endpoints,
-        output_dimension=4,
-        k=3,
-        dtw_radius=2,
-        directory=tmp_path / "first",
-    )
-    (tmp_path / "second").mkdir()
-    second = _run_vector_controls(
-        scope="multivariate",
-        channels=selected_channels,
-        window=8,
-        training_windows=training,
-        candidate_windows=candidates,
-        endpoints=candidate_endpoints,
-        output_dimension=4,
-        k=3,
-        dtw_radius=2,
-        directory=tmp_path / "second",
-    )
-
-    assert [result.family for result in first] == ["native", "pca", "statistical", "dtw"]
-    assert [result.top_k_endpoints for result in first] == [
-        result.top_k_endpoints for result in second
-    ]
-    assert all(result.candidate_count == len(candidate_endpoints) for result in first)
-    assert all(result.query_endpoint == int(candidate_endpoints[-1]) for result in first)
-    assert all(result.top_k_endpoints[0] == result.query_endpoint for result in first)
-    assert all(result.correct for result in first)
-    assert first[0].dimension == 16
-    assert first[1].dimension == 4
-    assert first[2].dimension is not None
-    assert first[3].dimension is None
-
-
-def test_series_embedding_candidate_windows_do_not_overlap() -> None:
-    training, candidates, rows = _disjoint_endpoints(
-        window=8,
-        training_window_count=3,
-        candidate_count=4,
-    )
-
-    assert training.tolist() == [7, 15, 23]
-    assert candidates.tolist() == [31, 39, 47, 55]
-    assert rows == 56
-    assert int(candidates[0] - training[-1]) >= 8
-
-
-def test_series_embedding_benchmark_rejects_invalid_counts() -> None:
-    with pytest.raises(ValueError, match="candidate_count"):
-        _validate_counts(
-            training_window_count=8,
-            candidate_count=0,
-            batch_size=2,
-            k=1,
-            dtw_radius=2,
-        )
-    with pytest.raises(ValueError, match="must not exceed"):
-        _validate_counts(
-            training_window_count=8,
-            candidate_count=2,
-            batch_size=2,
-            k=3,
-            dtw_radius=2,
-        )
