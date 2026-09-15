@@ -4,14 +4,17 @@ DuckPD supports model-free time-series similarity by turning ordered,
 fixed-length numeric windows into typed vectors. These vectors can be searched
 with the same exact vector engine used for other numeric data.
 
-The current implementation is intentionally deterministic: it does not download
-or run a learned model. Optional learned encoders are planned, but they will use
-the same window, representation, metadata, and retrieval contracts described in
-this guide.
+The current implementation ships deterministic native encoding, explicitly
+registered custom providers, the optional pinned TSPulse control, and an
+optional TS2Vec provider for locally trained attested bundles. Neither learned
+provider is qualified or recommended for financial retrieval. All paths use the
+same window, representation, metadata, and retrieval contracts described here.
 
-The rolling-window walkthrough is
+The native rolling-window walkthrough is
 [`DuckPD_Time_Series_Embeddings.ipynb`](../../demo/DuckPD_Time_Series_Embeddings.ipynb);
-the dedicated event workflow is
+the learned-provider comparison is
+[`DuckPD_TS2Vec_vs_TSPulse.ipynb`](../../demo/DuckPD_TS2Vec_vs_TSPulse.ipynb);
+and the dedicated event workflow is
 [`DuckPD_Event_Windows_and_Exact_Fusion.ipynb`](../../demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb).
 The lower-level architecture and proposed extensions are documented in the
 [time-series embedding design](../design/time-series-embeddings.md).
@@ -63,8 +66,8 @@ representation.
 DuckPD therefore uses **representation** as the more precise general term:
 
 - A **native representation** is produced by deterministic DuckDB expressions.
-- A **learned representation** will be produced by an explicitly selected
-  encoder.
+- A **learned representation** is produced by an explicitly selected and
+  prepared custom or built-in encoder.
 - Both are embeddings when their vectors are used as coordinates for
   similarity retrieval.
 
@@ -648,11 +651,151 @@ The following behavior is implemented now:
 
 The following behavior is not implemented:
 
-- A bundled learned-series adapter or checkpoint.
+- Multivariate TSPulse, fitted outer scaling, alternate extraction, or
+  accelerator execution.
 - Variable-length learned inputs, implicit masks/padding, or context conversion.
 - General verified fixed-grid rolling windows outside event alignment.
 - Automatic or general approximate series search.
 - A joint multimodal model or shared text-to-series representation space.
+
+### TSPulse published control
+
+`tspulse_series_embedding_model(channel)` creates a built-in series-model
+specification: the immutable TSPulse search checkpoint with one target channel,
+512 observations, internal affine RevIN, an all-observed mask,
+decoder/register extraction, 240 raw float32 outputs, and CPU execution.
+The built-in contract rejects outer centering, outer z-score scaling, and final
+unit normalization; those operations would define a different representation
+from the published recipe.
+Preparation is explicit and downloads only the pinned config and safetensors:
+
+```python
+encoder = pd.tspulse_series_embedding_model("simple_return")
+representation = pd.series_representation(
+    window=512,
+    channels=("simple_return",),
+    sampling="observations",
+    step="PT1M",
+    data_contract="market/simple-return/split-adjusted/v1",
+    encoder=encoder,
+)
+
+prepared = session.prepare_series_embedding_model(encoder)
+learned = windows.embed_series(
+    columns={"simple_return": "return_window"},
+    into="return_embedding",
+    representation=representation,
+    batch_size=64,
+)
+```
+
+Install the runtime with `duckpd[tspulse]`. `granite-tsfm==0.3.9` limits this
+optional provider to Python 3.11–3.13. Core DuckPD still imports without the
+extra, and planning never imports the runtime or downloads model files.
+
+### TS2Vec locally trained bundles
+
+TS2Vec training remains outside DuckPD execution, but the repository includes a
+bounded producer for the generated synthetic OHLC dataset. It streams a capped
+number of points per ticker, creates chronological train/validation/test
+partitions separated by input-length embargoes, fits channel standardization on
+training points only, reproduces the hierarchical contrastive objective, and
+exports stochastic-weight-averaged weights without pickle:
+
+```bash
+uv run --extra ts2vec python demo/train_ts2vec.py
+```
+
+The resulting directory contains only `model.safetensors` and
+`duckpd-ts2vec-manifest.json`. The manifest pins the TS2Vec source revision,
+architecture, averaged-versus-raw choice, ordered channels and roles, context
+length, training-only mean and scale, full-series max pooling, output contract,
+training partitions, seed, losses, runtime versions, dataset digest, and weights
+digest.
+
+```python
+from pathlib import Path
+
+bundle = Path("demo/.tmp/ts2vec-market-smoke")
+encoder = pd.ts2vec_series_embedding_model(bundle)
+representation = pd.series_representation(
+    window=encoder.input_length,
+    channels=encoder.input_channels,
+    sampling="observations",
+    data_contract="demo/synthetic-ohlc/ts2vec-v1",
+    encoder=encoder,
+)
+
+prepared = session.prepare_series_embedding_model(
+    encoder,
+    artifact_dir=bundle,
+    max_artifact_bytes=512 * 1024 * 1024,
+)
+learned = windows.embed_series(
+    columns={
+        "close_return": "close_return_window",
+        "bar_return": "bar_return_window",
+        "intrabar_range": "intrabar_range_window",
+    },
+    into="ts2vec_embedding",
+    representation=representation,
+    batch_size=64,
+)
+```
+
+`ts2vec_series_embedding_model()` verifies the manifest and weight bytes without
+importing PyTorch. Explicit preparation re-verifies the bundle, loads only
+safetensors, reconstructs the pinned encoder, applies the attested training-only
+standardization, and runs deterministic all-observed CPU inference with
+full-series max pooling. Outer normalization and final unit normalization are
+rejected because either would define a different recipe. Install the runtime
+with `duckpd[ts2vec]`.
+
+The repository also carries a small, pinned Linux x86-64 golden fixture for the
+locked Python 3.12.13, PyTorch, safetensors, NumPy, and PyArrow environment. It
+generates a deterministic synthetic Parquet input, trains the bounded producer
+twice in separate processes, compares both exported bundles byte-for-byte, and
+checks real query and corpus inference:
+
+```bash
+make ts2vec-golden
+```
+
+This opt-in smoke test is intentionally excluded from the core-only suite. Its
+artifact and float32 output digests guard runtime reproducibility; they are not
+model-quality evidence.
+
+### Matched provider benchmark
+
+After producing the local TS2Vec bundle, run the complete learned-provider
+benchmark:
+
+```bash
+uv run --python 3.12.13 --extra ts2vec python demo/train_ts2vec.py
+make benchmark-series
+```
+
+The runner writes `benchmark/SERIES_EMBEDDINGS.json`. It uses one deterministic
+three-channel synthetic series, a training-only control partition, and
+nonoverlapping candidate windows. Comparisons remain within compatible spaces:
+TSPulse and all four controls consume the same univariate `bar_return` windows;
+TS2Vec and the controls consume the same ordered multivariate channels and
+attested TS2Vec window. The controls are native flattened vectors, PCA fitted
+only on training windows, compact statistical features, and radius-bounded DTW.
+
+Learned rows execute the complete DuckPD path: rolling arrays, bounded
+`embed_series()` inference, Parquet persistence, metadata recovery, eager typed
+query inference, and exact cosine search. Each result separates
+`python_arrow_boundary_seconds`, provider input and output conversion, model
+execution, persistence, query inference, and exact search. It also records the
+DuckPD/Python/platform identity, both model fingerprints, preparation time,
+output bytes, peak RSS, deterministic top-k endpoints, and same-scope
+neighborhood overlap.
+
+This track is runtime and neighborhood evidence only. Self-retrieval verifies
+the complete path; it is not a quality metric. The synthetic neighborhood
+overlap does not qualify either provider for financial retrieval or select a
+default.
 
 `series_embedding_model()` creates a side-effect-free learned-model
 specification. Planning and catalog lookup never import a runtime, prepare a
@@ -786,62 +929,37 @@ These are hypotheses to test. A model can also erase channel identity, normalize
 away important amplitude, encode irrelevant pretraining biases, or perform well
 for forecasting while producing poor retrieval neighborhoods.
 
-### Candidate model families
+### Focused provider path
 
-The following projects are useful implementation references and evaluation
-candidates. They are not endorsements, bundled dependencies, or claims of
-financial retrieval quality.
+The current [candidate review][candidate-review] limits planned first-party
+providers to TSPulse and TS2Vec. This is a scope decision, not a claim that
+either model has demonstrated financial retrieval quality.
 
-| Candidate | Relevant capability | Main qualification questions |
+| Candidate | Relevant capability | Planned role |
 | --- | --- | --- |
-| [Chronos-2][chronos2] | Public multivariate `embed()` returns per-variate, per-patch encoder states; forecasting supports past and known-future covariates | Which patch/token and variate pooling produces one retrieval vector? Should covariates enter as ordinary variates or through a lower-level adapter? How are channel roles and availability recorded? |
-| [TimesFM 3][timesfm] | Native multivariate forecasting with past-only and past-and-future covariates mixed through variate attention | There is no public fixed-vector embedding API. Which pinned transformer output and pooling are stable enough for an adapter? Can restricted pretrained weights be used in the intended deployment? |
-| [MOMENT][moment] | Exposes an embedding path for pretrained time-series models | Does internal normalization match the task? Are channels averaged? Which context lengths, masks, and checkpoint license are supported? |
-| [TS2Vec][ts2vec] | Contrastive encoder with full-series and temporal representations | Which training checkpoint is used? How are variable lengths pooled? Does a generic checkpoint transfer to the target domain? |
-| [PatchTST][patchtst] | Patch-based self-supervised encoder architecture | Which hidden layer and pooling define the vector? How are channels represented? Is the exact checkpoint reproducible? |
-| [Original Chronos-T5][chronos] | Public `embed()` exposes univariate encoder states and tokenizer scale | How are padding, EOS state, and sequence pooling fixed? Is there any advantage over Chronos-2 for the target retrieval task? |
-| [TRACE][trace] | Research on aligned text and time-series representations | Can alignment generalize to held-out financial events without leakage? What shared-space metadata and evaluation are required? |
+| [TSPulse][tspulse] published search checkpoint | Immutable retrieval-specific checkpoint with a documented decoder/register extraction | Implemented as a narrow, univariate, 512-point, 240-dimensional CPU control with internal RevIN only |
+| [TS2Vec][ts2vec] trained on domain data | Input projection mixes channels before temporal convolutions; full-series and temporal states are available | Train externally, then add frozen multivariate inference after an attested checkpoint exists |
 
-Chronos-2 and TimesFM 3 are the primary adapter candidates because both model
-multiple variates and covariates jointly. Chronos-2 is the more direct first
-embedding experiment: its public `embed()` accepts multivariate arrays and
-returns states shaped `(n_variates, num_patches + 2, d_model)`, with information
-shared across variates. It does not, however, return one database-ready vector,
-and that embedding entry point does not accept the named past/future-covariate
-dictionaries supported by `predict()`. DuckPD must pin a pooling rule and decide
-how semantic channel roles map to the multivariate embedding input.
+Native vectors, train-fitted PCA, compact statistical features, and bounded
+multivariate DTW remain mandatory baselines. No other learned provider is on the
+current implementation path. Training stays outside DuckPD; frozen inference
+uses the existing `SeriesEmbeddingProvider` and DataFrame/search APIs.
 
-TimesFM 3 is especially relevant for covariate-aware representations because it
-stacks targets, past-only covariates, and past/future covariates and mixes them
-with variate attention. Its PyTorch model can expose an internal transformer
-output shaped by variate and patch, but the public forecaster currently exposes
-forecasts rather than a stable embedding method. A TimesFM adapter would
-therefore pin an internal extraction point, pooling, preprocessing, and package
-revision as part of `adapter_revision`. TimesFM 3 pretrained weights currently
-use the TimesFM Non-Commercial License v1.0, so they cannot be the default for
-commercial or production use unless licensing changes or suitable weights are
-provided.
+TSPulse was implemented first because its immutable published checkpoint can
+exercise artifact verification and real inference without waiting for training.
+The provider rejects multichannel input, any outer input normalization, final
+unit normalization, alternate extractions, interpolation, padding, and
+accelerators. TS2Vec follows only after
+the producer workflow exports a frozen checkpoint with its channel schema,
+preprocessing, pooling, and training provenance attested.
 
-MOMENT, TS2Vec, PatchTST, and application-trained encoders remain useful
-custom-provider and benchmark candidates. The DataFrame API should not depend
-on one model family.
+### Qualification status
 
-### Phase 19 adapter qualification review
-
-Reviewed 2026-09-14. No built-in adapter is promoted. This is a deliberate
-negative qualification result: forecasting scores do not establish retrieval
-quality, and no candidate has a reviewed DuckPD retrieval benchmark against the
-native baselines.
-
-| Candidate | Immutable material reviewed | License and interface findings | Decision |
-| --- | --- | --- | --- |
-| Chronos-2 | `amazon/chronos-2` revision `29ec3766d36d6f73f0696f85560a422f50e8498c`; `chronos-forecasting` source `4dbf163c2734c089cdf7da2b86fde48862ff9c6f` | Code and weights are Apache-2.0. Public `embed()` returns `(n_variates, num_patches + 2, d_model)` states and model scale, not one vector; it does not expose the named target/past/future-covariate input used by forecasting. | Fits the custom-provider protocol after pooling, semantic role mapping, artifact-manifest digest, runtime matrix, and retrieval benchmark are pinned. Not built in now. |
-| TimesFM 3.0 | `google/timesfm-3.0-pytorch` revision `43046b85ec22d584a13f8098c2ed39c889e129c2`; source `8cb0628371af142e16b8c232cc9fbf667ffb12f9` (`timesfm` 3.0.2) | Source is Apache-2.0, but weights use `timesfm-non-commercial-license-v1.0` and forbid commercial/production use. The lower PyTorch model exposes transformer state only through auxiliary outputs; the public forecaster has no stable fixed-vector API. | License fails the intended deployment gate. Internal extraction and pooling are also unqualified. Not built in. |
-| PatchTST | Official source `204c21efe0b39603ad6e2ca640ef5896646ab1a9` | Source is Apache-2.0. The self-supervised backbone returns per-channel, per-patch states, but the repository provides training code rather than one canonical portable checkpoint. Channel-independent processing does not implement target/covariate role interaction. | Useful custom-provider benchmark candidate for an application-owned checkpoint. Exact checkpoint, pooling, normalization, masks, runtime, and retrieval gain remain unqualified. |
-
-PatchTST fits the comparison as an encoder architecture, not as a built-in model:
-its backbone is a cleaner extraction point than TimesFM's forecasting internals,
-but it lacks a single qualified artifact and native covariate-role semantics.
+Provider availability is not model qualification. TSPulse and TS2Vec now have
+artifact, runtime, shape, bounded-batch, query/corpus, pinned-golden,
+repeated-process determinism, and matched engineering benchmark evidence. They
+have not passed the held-out financial retrieval or predictive-utility gates
+and remain experimental controls rather than recommended models.
 
 ### Qualification requirements
 
@@ -902,6 +1020,7 @@ reference rather than a production commitment.
 ## Further reading
 
 - [Time-series embeddings and event similarity design](../design/time-series-embeddings.md)
+- [Learned time-series embedding candidate review][candidate-review]
 - [Implementation roadmap](../roadmap.md#phase-16--priority-1-native-time-series-representations)
 - [Event-window implementation roadmap](../roadmap.md#phase-17--priority-2-event-windows-and-exact-event-similarity)
 - [Vector search and text embeddings](vector-search-and-embeddings.md)
@@ -910,10 +1029,6 @@ reference rather than a production commitment.
 - [Time-series notebook](../../demo/DuckPD_Time_Series_Embeddings.ipynb)
 - [Scripted time-series example](../../demo/time_series_embeddings.py)
 
-[moment]: https://github.com/moment-timeseries-foundation-model/moment
 [ts2vec]: https://github.com/zhihanyue/ts2vec
-[patchtst]: https://github.com/yuqinie98/PatchTST
-[chronos]: https://github.com/amazon-science/chronos-forecasting
-[chronos2]: https://huggingface.co/amazon/chronos-2
-[timesfm]: https://github.com/google-research/timesfm
-[trace]: https://github.com/Graph-and-Geometric-Learning/TRACE-Multimodal-TSEncoder
+[tspulse]: https://huggingface.co/ibm-granite/granite-timeseries-tspulse-r1
+[candidate-review]: ../references/learned-time-series-embedding-candidates.md

@@ -15,8 +15,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) so GitHub can surface them automaticall
   progressive examples, workflow selection, requirements, validation, and
   exact and experimental approximate retrieval constraints.
 - [Time-series representations and similarity search](api/time-series-embeddings.md) —
-  model-free rolling and event-aligned window embeddings, exact reaction and
-  late-fusion retrieval, practical tradeoffs, and the path to qualified encoders.
+  native rolling and event-aligned representations, the pinned unqualified
+  TSPulse control, exact retrieval, and the path to externally trained TS2Vec.
 - [API Compatibility & Semantic Matrix](COMPATIBILITY.md) — public signatures,
   supported arguments, intentional deviations, and unsupported behavior.
 

@@ -4,6 +4,8 @@ from importlib.metadata import version
 
 from duckpd._executor import CommitReport, MaterializationReport, ProfileResult
 from duckpd._merging import merge_asof
+from duckpd._ts2vec import TS2VecProvider, ts2vec_series_embedding_model
+from duckpd._tspulse import TSPulseProvider, tspulse_series_embedding_model
 from duckpd.embeddings import (
     EmbeddedQuery,
     EmbeddingModelSpec,
@@ -70,6 +72,8 @@ __all__ = [
     "SeriesWindowSpec",
     "Session",
     "SyncReport",
+    "TS2VecProvider",
+    "TSPulseProvider",
     "TextEmbeddingProvider",
     "TransformersEmbeddingProvider",
     "VectorIndexInfo",
@@ -84,4 +88,6 @@ __all__ = [
     "read_parquet",
     "series_embedding_model",
     "series_representation",
+    "ts2vec_series_embedding_model",
+    "tspulse_series_embedding_model",
 ]

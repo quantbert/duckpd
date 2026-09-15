@@ -24,7 +24,7 @@ def _forbidden(path: str) -> bool:
     return (
         "__pycache__" in parts
         or path.endswith((".pyc", ".pyo"))
-        or any(part.startswith(".env") for part in parts)
+        or any(part.startswith(".env") and part != ".env-template" for part in parts)
         or any(part in {".git", ".venv", ".pytest_cache", ".ruff_cache"} for part in parts)
     )
 

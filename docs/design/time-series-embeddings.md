@@ -1,10 +1,12 @@
 # Time-Series Embeddings and Event Similarity
 
-**Status: native representations, event windows, and catalog declarations implemented;
-learned encoder execution proposed.**
+**Status: native representations, event windows, catalog declarations, custom
+learned providers, the narrow TSPulse CPU control, and attested local TS2Vec
+training/inference implemented; neither learned model is qualified for financial
+retrieval.**
 
-This document defines the shipped native and catalog contracts and the remaining
-learned-encoder design.
+This document defines the shipped native, catalog, custom-provider, TSPulse, and
+TS2Vec contracts plus the remaining model-qualification work.
 
 **Intended location:** `docs/design/time-series-embeddings.md`.
 
@@ -856,13 +858,10 @@ revisions, projection heads, preprocessing, dimension, normalization, training
 alignment identity, and permitted query/document modalities.
 
 Equal dimension or a user-supplied shared label is insufficient. Do not allow a
-caller to declare an arbitrary BGE text vector compatible with a MOMENT vector.
-The first release exposes no `multimodal.search()` API. A later design can add
-cross-modal typed queries once qualified aligned models exist for the intended
-data. TRACE is a relevant research reference, not a ready-made guarantee of
-financial event alignment; its public workflow includes separate pretraining
-and context-alignment stages and weather/TimeMMD data.
-[Source: official TRACE implementation][model-trace].
+caller to declare arbitrary text and series vectors compatible. The first
+release exposes no `multimodal.search()` API. A later design can add cross-modal
+typed queries only after a purpose-trained paired encoder is qualified for the
+intended data.
 
 ## Representation metadata and compatibility
 
@@ -1580,60 +1579,55 @@ rows it consumed; it does not certify an unconsumed upstream dataset.
 
 ## Model candidates and qualification
 
-The encoder interface is model-agnostic. The following findings inform adapter
-priorities; they are not retrieval-quality benchmarks on financial data.
+The encoder interface remains model-agnostic, but the implementation plan is
+deliberately narrow: first-party providers are limited to TSPulse and TS2Vec.
+The [candidate review][learned-candidate-review] records the evidence behind
+that decision.
 
-| Candidate | Verified interface or characteristic | Proposed treatment |
+| Representation | Verified characteristic | Treatment |
 | --- | --- | --- |
-| Native ordered vectors | Deterministic recipe defined here; no pretrained model | Required baseline and first release |
-| Chronos-2 | Public multivariate `embed()` returns `(n_variates, num_patches + 2, d_model)` states with cross-variate information; `predict()` separately supports past and known-future covariates | Primary embedding-adapter candidate; pin variate/patch pooling and define how semantic covariate roles map into the embedding input |
-| TimesFM 3.0 | Targets, past-only covariates, and past/future covariates are mixed by variate attention; auxiliary transformer states exist below the public forecasting API | Primary covariate-aware research candidate; requires a pinned internal extraction adapter and weights with suitable usage rights |
-| MOMENT | Explicit `embed()` returns representations; current implementation normalizes inputs internally and can average channels/patches | Custom-provider and benchmark candidate, subject to context, masks, channel preservation, licensing, and task qualification |
-| TS2Vec | Explicit `encode()` supports full-series and other pooled representations | Support through the custom-provider contract; suitable for a separately trained/checkpointed encoder |
-| PatchTST | Official self-supervised implementation exposes an encoder architecture | Experimental adapter needs an exact checkpoint, extraction location, channel policy, and pooling contract |
-| Original Chronos-T5 | `ChronosPipeline.embed()` explicitly returns encoder states and tokenizer state | Valid experimental representation candidate; pool states with explicit padding/EOS handling and scale policy |
-| TRACE | Explicit time-series/text alignment and retrieval research workflow | Later shared-space research, not a baseline finance-ready provider |
+| Native, PCA, statistical, and bounded-DTW vectors | Deterministic or train-fitted controls with explicit feature meaning | Required baselines before learned-model selection |
+| TSPulse published search checkpoint | Immutable univariate checkpoint with a documented decoder/register extraction | Implemented as a CPU-only 512-point, 240-dimensional control using internal RevIN only |
+| TS2Vec trained on domain data | Input projection mixes channels before temporal convolutions; full-series and temporal states are available | Bounded external producer and attested local-bundle CPU inference implemented; model quality remains unqualified |
 
-Sources: [MOMENT embedding implementation][model-moment], [TS2Vec encoder][model-ts2vec],
-[PatchTST self-supervised source][model-patchtst], [Chronos embedding implementation][model-chronos],
-[TimesFM official README][model-timesfm], [TimesFM 3.0 model card][model-timesfm-card],
-and [TRACE implementation][model-trace]. Model-source review date is 2026-09-10;
-provider releases must pin their own immutable revisions rather than depend on
-these moving reference branches.
+Sources: [TSPulse implementation][model-tspulse] and
+[TS2Vec encoder][model-ts2vec]. Provider releases must pin immutable revisions
+rather than depend on moving branches.
 
 Important distinctions:
 
-- A TS2Vec implementation is not automatically a pretrained finance checkpoint.
-  Its full-series pooling and context choices must be fixed by the adapter.
-- MOMENT's default channel averaging may discard distinctions important to a
-  multichannel feature family. A channel-preserving alternative changes the
-  representation and potentially its dimension; specify it rather than assuming
-  every `embed()` output is interchangeable.
-- Chronos-2's `embed()` accepts multivariate tensors and shares information
-  across variates, but it does not accept the named past/future-covariate input
-  dictionaries used by `predict()`. Its output is a variate-by-patch state tensor,
-  not a prequalified fixed-length retrieval vector. Pooling and channel-role
-  mapping belong to the adapter identity.
-- TimesFM 3 exposes multivariate and covariate-aware forecasting, and its model
-  has auxiliary transformer states, but its public forecaster has no fixed-vector
-  embedding API. An adapter must pin the internal extraction surface as well as
-  pooling. The released 3.0 weights are non-commercial and unsuitable as a
-  default production dependency under their current license.
-- Forecasting benchmarks are not evidence of nearest-neighbor relevance for
-  price-shape or news-reaction matching. No "best model" claim is made here.
+- The first TSPulse provider is deliberately univariate. It must not imply joint
+  channel interaction or silently concatenate per-channel vectors.
+- TSPulse rejects outer input normalization and final unit normalization.
+  Fitted scaling or a changed output recipe requires a separately attested
+  artifact and representation identity.
+- A TS2Vec implementation is not a pretrained finance checkpoint. Training,
+  averaged-versus-raw weights, output dimension, and pooling belong to artifact
+  and representation identity.
+- Forecasting, classification, or self-supervised loss is not evidence of
+  nearest-neighbor relevance or incremental predictive utility.
 
-Every shipped learned adapter must publish a qualification record containing the
-exact checkpoint and artifact digest, source/package versions, source-code and
-weights license identifiers, supported Python/platform/runtime matrix, required
-input length/channels, all internal normalization, mask/padding semantics, pooling,
-output dimension, CPU/memory behavior, determinism tolerances, and retrieval
-benchmark results against native baselines.
+Training belongs in an external producer/research workflow. Frozen inference
+uses the existing provider boundary and does not require a DataFrame training
+API or variable-length tensor protocol. Retraining or changing a readout creates
+a new representation and requires compatible query/corpus re-encoding.
 
-The first built-in adapter should be selected between Chronos-2 and TimesFM 3
-only after a retrieval benchmark and licensing review. Do not copy a guessed
-embedding dimension or assume an arbitrary 60-sample input is supported because
-the desired user window has that length. Until qualified, the stable release can
-contain only native encoding plus a custom-provider protocol.
+Every shipped learned adapter must publish a qualification record containing:
+
+- exact checkpoint revision and a digest over every numerical artifact;
+- source/package versions and source-code/weights license terms;
+- supported Python, platform, accelerator, and runtime matrix;
+- ordered channel schema, input length, dtype, masks, and missing-value behavior;
+- preprocessing, fitted state, tokenization, extraction, pooling, output
+  dimension, and unit-normalization policy;
+- CPU/memory, conversion overhead, throughput, batching, and cold-start results;
+- deterministic query/corpus agreement and batch-partition tolerance; and
+- joint retrieval results against native/PCA/statistical controls plus a
+  separately reported predictive-utility evaluation.
+
+Neither built-in learned provider has passed the financial qualification gates.
+Provider availability permits controlled measurement; it does not imply a
+recommended default or material gain over conventional baselines.
 
 ## Test plan
 
@@ -1792,15 +1786,19 @@ catalog call generates or refreshes corpus embeddings.
 
 ### Phase 4: optional learned inference
 
-Implement the provider lifecycle and Arrow execution path with custom providers,
-then evaluate Chronos-2 and TimesFM 3 as the first built-in adapters. Include
-exact asset pinning, runtime isolation, target/covariate roles,
-mask/context/channel semantics, pooling, licensing, and benchmark reports. Add
-MOMENT, TS2Vec, or other adapters without changing the DataFrame/search API.
+The provider lifecycle and bounded Arrow execution path are implemented for
+custom providers, the immutable TSPulse control, and locally trained attested
+TS2Vec bundles. The TS2Vec producer streams bounded ticker shards, creates
+chronological embargoed partitions, fits preprocessing only on training points,
+and exports averaged safetensors plus complete provenance. Compare both learned
+providers with native, PCA, statistical, and bounded-DTW controls without adding
+another DataFrame/search API.
 
-**Exit gate:** bounded provider calls, deterministic query/corpus agreement,
-accurate resource reporting, no hidden normalization, and a documented retrieval
-use case where the adapter is useful. Do not block native release on this gate.
+**Exit gate:** controlled behavior, held-out retrieval, predictive utility,
+bounded provider calls, deterministic query/corpus agreement, accurate resource
+reporting, no hidden normalization, and a documented use case where a learned
+adapter materially beats the best relevant baseline. Do not block native
+release on this gate.
 
 ### Later research: aligned multimodal spaces
 
@@ -1869,22 +1867,13 @@ implementation-specific links are attached to their corresponding sections above
 
 ### Model and database sources
 
-Primary implementation references are [Chronos-2][model-chronos2],
-[TimesFM 3][model-timesfm3], [MOMENT][model-moment], [TS2Vec][model-ts2vec],
-[PatchTST][model-patchtst], [original Chronos][model-chronos], and
-[TRACE][model-trace]. The [TimesFM model card][model-timesfm-card] records its
-checkpoint license. Native lowering relies on documented [window][duckdb-windows]
-and [array][duckdb-arrays] operations; actual adapter/runtime revisions must be
-pinned during implementation qualification.
+Primary learned implementation references are [TSPulse][model-tspulse] and
+[TS2Vec][model-ts2vec]. Native lowering relies on documented
+[window][duckdb-windows] and [array][duckdb-arrays] operations. Every provider
+release must pin its exact artifact and runtime revisions during qualification.
 
-[model-moment]: https://github.com/moment-timeseries-foundation-model/moment/blob/main/momentfm/models/moment.py
 [model-ts2vec]: https://github.com/zhihanyue/ts2vec/blob/main/ts2vec.py
-[model-patchtst]: https://github.com/yuqinie98/PatchTST/blob/main/PatchTST_self_supervised/src/models/patchTST.py
-[model-chronos]: https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos.py
-[model-chronos2]: https://github.com/amazon-science/chronos-forecasting/blob/main/src/chronos/chronos2/pipeline.py
-[model-timesfm]: https://github.com/google-research/timesfm/blob/master/README.md
-[model-timesfm3]: https://github.com/google-research/timesfm/blob/master/src/timesfm3/torch/model.py
-[model-timesfm-card]: https://huggingface.co/google/timesfm-3.0-pytorch
-[model-trace]: https://github.com/Graph-and-Geometric-Learning/TRACE-Multimodal-TSEncoder
+[learned-candidate-review]: ../references/learned-time-series-embedding-candidates.md
+[model-tspulse]: https://github.com/ibm-granite/granite-tsfm/blob/fe7a35697723e2a2f5246ae979474bfc554e26c0/tsfm_public/models/tspulse/modeling_tspulse.py
 [duckdb-windows]: https://duckdb.org/docs/stable/sql/functions/window_functions.html
 [duckdb-arrays]: https://duckdb.org/docs/stable/sql/functions/array.html

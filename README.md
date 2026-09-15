@@ -25,7 +25,7 @@ DuckPD is a lazy, out-of-core DataFrame library with a familiar pandas-shaped AP
 * **🛡️ Zero Silent Fallbacks:** If an operation is unsupported or ordering is ambiguous, DuckPD fails explicitly before query execution. Your dataset will never be silently materialized into in-memory pandas.
 * **🔌 Native Narwhals Lazy Backend:** Drop DuckPD directly into modern visualization and machine learning libraries (Plotly, Altair, etc.) via `nw.from_native(df)` for zero-copy, lazy DuckDB execution.
 * **🔍 Deep Observability:** Inspect physical plans, optimizer pushdown, operator timings, peak RSS, and DuckDB spill metrics with `df.explain()`, `df.explain_write()`, and `df.profile()`.
-* **Typed Semantic Retrieval:** Stream text through an optional pinned local ONNX model, persist verified `FLOAT[n]` embeddings, or run exact transient semantic top-k without pandas materialization.
+* **🔍 Typed Semantic Retrieval:** Stream text through an optional pinned local ONNX model; encode fixed time-series windows natively, through the pinned TSPulse control, or with an attested locally trained TS2Vec bundle; persist verified `FLOAT[n]` vectors or run exact transient top-k without pandas materialization.
 
 ---
 

@@ -58,6 +58,8 @@ from duckpd._logical import (
 )
 from duckpd._metadata import after_sort, sort_keys_for_labels, source_metadata
 from duckpd._quoting import quote_identifier, quote_literal
+from duckpd._ts2vec import TS2VecProvider
+from duckpd._tspulse import TSPulseProvider
 from duckpd._typing import ScalarValue
 from duckpd.embeddings import (
     EmbeddedQuery,
@@ -343,8 +345,14 @@ class Session:
     def prepare_series_embedding_model(
         self,
         model: SeriesEmbeddingModelSpec,
+        *,
+        cache_dir: str | Path | None = None,
+        artifact_dir: str | Path | None = None,
+        timeout_seconds: float | None = None,
+        max_download_bytes: int | None = None,
+        max_artifact_bytes: int | None = None,
     ) -> PreparedSeriesModelInfo:
-        """Eagerly prepare and fully attest one registered series provider."""
+        """Eagerly prepare and fully attest one series provider."""
         self._begin_execution()
         lock = self._series_embedding_prepare_locks.setdefault(model.fingerprint, Lock())
         with lock:
@@ -354,10 +362,39 @@ class Session:
                 return prepared
             provider = self._series_embedding_providers.get(model.fingerprint)
             if provider is None:
-                raise UnsupportedOperationError(
-                    "Series embedding model is not registered; call "
-                    "session.register_series_embedding_provider(model, provider)"
-                )
+                if model.backend == "tspulse":
+                    if artifact_dir is not None:
+                        raise ValueError("artifact_dir is supported only for TS2Vec")
+                    if max_artifact_bytes is not None:
+                        raise ValueError("max_artifact_bytes is supported only for TS2Vec")
+                    provider = TSPulseProvider(
+                        model,
+                        cache_dir=cache_dir,
+                        prepare_timeout_seconds=timeout_seconds,
+                        max_download_bytes=max_download_bytes,
+                    )
+                elif model.backend == "ts2vec":
+                    if artifact_dir is None:
+                        raise UnsupportedOperationError(
+                            "TS2Vec preparation requires artifact_dir pointing to "
+                            "an attested local bundle"
+                        )
+                    if cache_dir is not None:
+                        raise ValueError("cache_dir is not used for local TS2Vec bundles")
+                    if max_download_bytes is not None:
+                        raise ValueError("max_download_bytes is supported only for TSPulse")
+                    provider = TS2VecProvider(
+                        model,
+                        bundle_dir=artifact_dir,
+                        prepare_timeout_seconds=timeout_seconds,
+                        max_artifact_bytes=max_artifact_bytes,
+                    )
+                else:
+                    raise UnsupportedOperationError(
+                        "Custom series embedding models are not registered; call "
+                        "session.register_series_embedding_provider(model, provider)"
+                    )
+                self._series_embedding_providers[model.fingerprint] = provider
             started = perf_counter()
             info = provider.prepare()
             if type(info) is not PreparedSeriesModelInfo:
@@ -444,6 +481,11 @@ class Session:
         with guard:
             output = provider.embed_windows(batch)
         elapsed = perf_counter() - started
+        phase_metrics = (
+            provider.last_call_metrics
+            if isinstance(provider, (TS2VecProvider, TSPulseProvider))
+            else {}
+        )
         with self._series_embedding_metrics_lock:
             self._embedding_metrics["series_provider_calls"] = (
                 int(self._embedding_metrics.get("series_provider_calls", 0)) + 1
@@ -481,6 +523,15 @@ class Session:
                 )
                 + elapsed
             )
+            for phase, seconds in phase_metrics.items():
+                metric = f"series_{phase}"
+                kind_metric = f"series_{kind}_{phase}"
+                self._embedding_metrics[metric] = (
+                    float(self._embedding_metrics.get(metric, 0.0)) + seconds
+                )
+                self._embedding_metrics[kind_metric] = (
+                    float(self._embedding_metrics.get(kind_metric, 0.0)) + seconds
+                )
         return output
 
     def _validate_plan_series_models(self, plan: LogicalPlan) -> None:
@@ -1191,6 +1242,8 @@ class Session:
         name = f"__duckpd_embed_series_{key}"
 
         def run(raw_batch: object) -> ArrowUDFResult:
+            boundary_started = perf_counter()
+            provider_seconds = 0.0
             packed = cast("list[Any]", cast("pa.ChunkedArray[Any]", raw_batch).to_pylist())
             row_count = len(packed)
             scattered: list[list[float] | None] = [None] * row_count
@@ -1226,7 +1279,9 @@ class Session:
             for offset in range(0, len(valid_rows), plan.batch_size):
                 rows = valid_rows[offset : offset + plan.batch_size]
                 batch = _make_series_provider_batch(rows, plan.representation)
+                provider_started = perf_counter()
                 raw_output = self._run_series_provider_batch(model, batch, kind="corpus")
+                provider_seconds += perf_counter() - provider_started
                 output_rows = _finalize_series_embeddings(
                     raw_output,
                     plan.representation,
@@ -1242,6 +1297,14 @@ class Session:
                     if values is None:
                         output_zero_norm += 1
 
+            result = pa.array(
+                scattered,
+                type=pa.list_(pa.float32(), plan.representation.dimension),
+            )
+            python_boundary_seconds = max(
+                0.0,
+                perf_counter() - boundary_started - provider_seconds,
+            )
             with self._series_embedding_metrics_lock:
                 self._embedding_metrics["series_input_rows"] = (
                     int(self._embedding_metrics.get("series_input_rows", 0)) + row_count
@@ -1264,10 +1327,16 @@ class Session:
                     + propagated
                     + input_zero_scale
                 )
-            return pa.array(
-                scattered,
-                type=pa.list_(pa.float32(), plan.representation.dimension),
-            )
+                self._embedding_metrics["series_corpus_python_arrow_boundary_seconds"] = (
+                    float(
+                        self._embedding_metrics.get(
+                            "series_corpus_python_arrow_boundary_seconds",
+                            0.0,
+                        )
+                    )
+                    + python_boundary_seconds
+                )
+            return result
 
         self.register_arrow_udf(
             name,

@@ -10,14 +10,42 @@ the [release policy](RELEASES.md).
 
 ### Added
 
+- Added a reproducible TS2Vec/TSPulse benchmark over nonoverlapping eligible
+  windows with matched native, training-fitted PCA, statistical, and bounded-DTW
+  controls. Learned rows exercise rolling construction, provider inference,
+  Parquet persistence and metadata recovery, eager query encoding, and exact
+  search while reporting Python/Arrow boundary, provider conversion, model,
+  persistence, query, search, storage, and RSS costs separately. The result is
+  engineering evidence only and does not qualify either provider as a default.
+- Added `duckpd[ts2vec]`, a pinned MIT-licensed TS2Vec encoder port, bounded
+  external training producer, strict local safetensors bundle format, and
+  session-owned CPU inference provider. Bundles attest source revision,
+  architecture, averaged weights, channel schema, training-only preprocessing,
+  full-series max pooling, dataset and weight digests, chronological embargoed
+  partitions, seed, losses, and runtime. A pinned opt-in Linux x86-64 golden
+  fixture now trains the producer twice in separate processes, verifies
+  byte-identical bundles, and checks real query/corpus inference against fixed
+  artifact and float32 output digests. The generated synthetic bundle proves
+  the engineering path only; it is not a qualified financial model.
+
+- Added the optional `duckpd[tspulse]` provider for IBM's immutable TSPulse
+  search checkpoint. The deliberately narrow CPU contract accepts one complete
+  512-point target channel, uses internal affine RevIN and an all-observed mask,
+  extracts the 240-value decoder/register representation, and performs no outer
+  input or output normalization. Explicit preparation verifies the pinned
+  config, safetensors, and canonical DuckPD manifest before local-only loading;
+  it also records the runtime source/version and declared licenses. Provider
+  availability is experimental and does not claim financial retrieval
+  qualification.
+
 - Session-owned custom `SeriesEmbeddingProvider` registration and explicit
   preparation now drive learned `embed_series()`, `search_series()`, and eager
   series-query encoding. The Arrow boundary enforces ordered target/past/
   known-future roles, fixed context, complete-row masks, bounded calls,
   deterministic shared preprocessing, strict float32 output validation,
   non-thread-safe serialization, lifecycle/resource metrics, and failure-safe
-  cache promotion. Chronos-2, TimesFM 3, and PatchTST were reviewed; none is
-  bundled without a qualifying retrieval benchmark and deployable license.
+  cache promotion. TSPulse and TS2Vec are the only first-party series providers;
+  both remain experimental until held-out qualification is complete.
 
 - Typed `DataFrame.event_windows()` constructs lazy exact fixed-grid arrays for
   event rows with explicit entity and revision-safe event keys, UTC floor/ceil

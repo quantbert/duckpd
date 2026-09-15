@@ -1,8 +1,10 @@
 # Draft proposal: learned time-series embedding candidates
 
-**Status:** research draft for independent verification; no adapter is approved by this document.
+**Status:** TSPulse and TS2Vec providers implemented as unqualified controls.
 
 **Research date:** 2026-09-11
+
+**Independent review date:** 2026-09-14
 
 **Related contracts:** [time-series embedding API][api-series],
 [time-series embedding design][design-series], and
@@ -10,45 +12,62 @@
 
 ## Executive decision
 
-DuckPD should qualify **IBM TSPulse** before spending more implementation effort
-on forecasting-oriented foundation models. TSPulse is the strongest candidate
-found in this review because it combines:
+DuckPD will focus first-party learned-series work on exactly two providers:
+**TSPulse** and **TS2Vec**. The fixed multivariate evaluation schema should
+combine semantically ordered channels such as returns, volume surprise,
+intrabar range, liquidity or spread, market return, and sector return. Training
+belongs in an external producer/research workflow; DuckPD owns only frozen,
+attested inference through the existing provider boundary.
 
-- a checkpoint specialized for semantic time-series search;
-- a public embedding extraction helper;
-- a fixed, compact register representation;
-- an immutable Hugging Face revision and checksummed weights;
-- Apache-2.0 source and weights;
-- explicit CPU deployment support; and
-- published zero-shot retrieval results against MOMENT and Chronos.
+The implementation order is:
 
-The proposed evaluation order is:
+1. Implement the immutable TSPulse search checkpoint as a narrow univariate
+   control: 512 observations, one target channel, internal RevIN only,
+   decoder/register extraction, 240 float32 values, and CPU execution.
+2. Train TS2Vec outside DuckPD on eligible domain data and export a frozen
+   artifact with ordered channels, preprocessing, pooling, weights, and
+   provenance.
+3. Verify that artifact through the built-in local-bundle provider.
+4. Compare both against native, train-fitted PCA, compact statistical, and
+   bounded multivariate-DTW baselines.
 
-1. **TSPulse** search checkpoint as the primary learned candidate.
-2. **MOMENT-1-small** as a learned control.
-3. **VQShape** as an experimental shape-token challenger.
-4. DuckPD's shipped native representations as mandatory baselines.
+The first TSPulse provider intentionally excludes multivariate adaptation,
+independent channel concatenation, fitted outer scaling, alternate readouts,
+interpolation, padding, and accelerators. Each would create a different
+representation or support contract and requires separate evidence.
 
-This is a proposal to run a qualification benchmark, not a proposal to promote
-TSPulse immediately. No reviewed evidence yet shows that TSPulse improves
-DuckPD's named financial, market-pattern, or event-reaction retrieval tasks.
-The external TSPulse benchmark establishes relevance and priority, not product
-qualification.
+No reviewed evidence yet identifies a winner on financial retrieval or proves
+incremental predictive utility. The benchmark must evaluate retrieval geometry
+and predictive usefulness separately.
 
-## Review outcome at a glance
+## Focused provider set
 
-| Candidate | Search-oriented checkpoint | Reproducible weights | Stable fixed-vector path | Permissive license | Current DuckPD fit | Proposed disposition |
-| --- | --- | --- | --- | --- | --- | --- |
-| TSPulse search revision | Yes | Strong: immutable revision and LFS SHA-256 | Strong for one channel: 240-dimensional register vector | Apache-2.0 | Good on Python 3.11–3.13; Python 3.14 unavailable; multichannel retrieval semantics unqualified | Implement first as a custom-provider experiment |
-| MOMENT-1-small | General representation mode | Strong: immutable revision and LFS SHA-256 | Strong: default 512-dimensional pooled vector | MIT | Package dependency pins are stale; default pooling erases channel identity | Use as learned benchmark control |
-| VQShape 256/512 | Shape tokenization, not retrieval-specific | Weak until DuckPD attests the mutable GitHub release asset | Potentially usable token or histogram vector, but exact pooling must be pinned | MIT | Requires explicit 512-length policy; official path treats channels independently | Experimental third candidate |
-| TRACE | Yes, cross-modal retrieval | Research checkpoint exists | Different aligned text/series contract | No declared repository license found | Does not match the current single-modality provider contract | Reject for current adapter; revisit for aligned retrieval research |
-| TS2Vec | Representation learning | No canonical universal checkpoint | Full-series vector API exists | BSD-style repository license should be rechecked at a pinned revision | Requires application-specific training and old dependencies | Custom trained provider only |
-| TimeSiam | Representation learning | No standalone general checkpoint found | Requires choosing lineage and pooling behavior | Repository license must be verified | Training and fine-tuning workflow rather than portable inference artifact | Defer |
-| T-Rep | Representation learning | No canonical universal checkpoint | Encoder API exists after training | License must be verified | Explicitly incompatible with PyTorch 2.0 and expects dataset training | Reject for built-in use |
-| TOTEM | Tokenized representations | Model zoo is not distributed as an immutable, checksummed package | Requires adapter-defined vectorization | No declared repository license found | Artifact and licensing gates fail | Reject for built-in use |
-| UniTS | General time-series model | Task-specific release assets, no published digests | No stable semantic retrieval vector API | MIT source | Released files are task-specific and release is mutable | Defer |
-| Forecasting models | Usually yes | Varies | Usually exposes patch/variate states, not one declared vector | Varies | Requires DuckPD-owned extraction and pooling with no direct retrieval evidence | Lower priority than TSPulse |
+| Candidate | Artifact/training path | Principal value | Main unresolved risk | Disposition |
+| --- | --- | --- | --- | --- |
+| TSPulse published search checkpoint | Immutable public checkpoint and pinned runtime | Immediate real-model control for the provider and artifact lifecycle | Published evidence is univariate and non-financial; outer-scaling recipe is ambiguous | Implement first with internal RevIN only |
+| TS2Vec trained on DuckPD-domain data | Train and attest an application-owned checkpoint | Compact joint multivariate learned baseline | Pooling may erase event position; training labels and negatives may be economically wrong | External producer and frozen inference implemented; qualification pending |
+
+Other learned architectures remain outside the planned provider surface. They
+may be reconsidered only after TSPulse and TS2Vec have measured failure modes
+that justify additional maintenance and runtime burden.
+
+## Independent review disposition
+
+The independent review confirmed:
+
+- the TSPulse revision, weight-file digest and size, package pin, Python bound,
+  preprocessing description, decoder/register dimension, and reported
+  retrieval-table transcription;
+- TS2Vec's MIT-licensed reviewed revision and genuine joint-channel input path;
+- TSPulse univariate qualification is a recipe reproduction, not evidence of
+  joint-channel behavior;
+- external training is in scope while training inside DuckPD is not;
+- distance metric belongs to a benchmark/search recipe, while output
+  normalization remains part of representation identity; and
+- Python 3.14 support is a promotion gate, not a gate for isolated research.
+
+Claims about financial quality, adapted-model behavior, and predictive utility
+remain unproven.
 
 ## Scope and decision standard
 
@@ -100,7 +119,7 @@ Primary sources were used for material findings: model repositories, immutable
 artifact APIs, package indexes, official notebooks, source files, and papers.
 The final section lists the exact sources a verifier should revisit.
 
-## Candidate 1: IBM TSPulse
+## TSPulse: published control and adapted joint candidate
 
 ### Why TSPulse changes the shortlist
 
@@ -114,7 +133,7 @@ forecasting score does.
 The model remains unqualified for DuckPD because the published benchmark is not
 financial or event-window retrieval, does not compare against DuckPD's native
 representations, and does not establish DuckPD runtime or determinism behavior.
-It is nevertheless the best-supported candidate to test first.
+It is nevertheless the best-supported off-the-shelf retrieval control found.
 
 ### Exact artifact record
 
@@ -129,7 +148,8 @@ repository's default anomaly-detection branch.
 | Weights file | `model.safetensors` |
 | Weights size | 4,305,624 bytes |
 | Weights SHA-256 | `b9332ae796ec7c313f991ed32dbec62c29a8e673281decb7308f955bdda7aae0` |
-| Safetensors parameter count | 1,084,330 float32 parameters |
+| Hugging Face metadata parameter count | 1,084,330 float32 parameters |
+| Independently counted stored tensor elements | 1,068,958 float32 elements across 224 tensors |
 | Config Git blob ID | `97bfe54c22c81913dc49e6efba0b198045ace32e` |
 | Model license metadata | Apache-2.0 |
 | Source package | `granite-tsfm` |
@@ -247,9 +267,32 @@ Consequences:
 - Using target, past covariate, and known-future covariate channels together
   would overstate the checkpoint's qualified semantics.
 
-The first DuckPD experiment should therefore be univariate and target-only.
-Multichannel handling must remain unsupported until a separate pooling or
-fine-tuning contract is benchmarked.
+The published-recipe reproduction should therefore be univariate and
+target-only. The primary product experiment must instead train and attest a
+multichannel TSPulse adaptation.
+
+### Proposed multivariate adaptation
+
+The paper and source expose a distinct adaptation path: retain pretrained
+weights, enable identity-initialized decoder channel mixing, and train on the
+target multivariate schema. DuckPD should compare four separately fingerprinted
+variants:
+
+1. original univariate search recipe;
+2. independent per-channel register vectors with ordered concatenation;
+3. trained decoder channel mixing plus a compact joint readout; and
+4. trained mixing/readout plus an auxiliary predictive head.
+
+The first trained readout should produce one 256-dimensional vector from
+role-ordered decoder states. Compare register-only pooling with a timing-aware
+readout that can retain temporal states. Log every newly initialized or
+shape-mismatched parameter when the channel count changes; a successful load
+must not conceal an untrained multivariate path.
+
+This adaptation creates a new model artifact and representation. It does not
+inherit the published checkpoint's retrieval claims. Backbone unfreezing,
+retrieval supervision, scale-retaining side features, and predictive auxiliary
+losses should be explicit ablations rather than bundled into the first result.
 
 ### Missing values and masks
 
@@ -342,7 +385,7 @@ entire provider path, not cite these figures as its own performance.
 - CPU determinism, cross-platform tolerance, and accelerator equivalence have
   not been measured for DuckPD.
 
-### Proposed narrow adapter contract
+### Proposed published-recipe control contract
 
 The following is a benchmark proposal, not an approved public model spec:
 
@@ -359,44 +402,167 @@ The following is a benchmark proposal, not an approved public model spec:
 | Model mask mode | `mask_type="user"`; prove all-observed mask versus `None` |
 | Extraction | `component="decoder"`, `mode="register"` |
 | Output | Flatten `[batch, 1, 240]` to `[batch, 240]` |
-| Distance | Raw L2 first, matching published evaluation |
+| Search recipe | Raw L2 first, matching published evaluation; metric is not representation identity |
 | Unit normalization | Disabled for exact-recipe comparison; benchmark cosine/unit-normalized as a separate representation |
 | Outer scaling | Unresolved; benchmark cookbook scaler and internal-only paths separately |
 | Internal scaling | Affine RevIN, minimum scale 0.001 |
 | Provider | Existing custom series provider until qualification passes |
 | Device | CPU first; accelerator is a separate provider/runtime record |
 
-The representation fingerprint must distinguish every variation above. In
-particular, raw L2 and unit-normalized cosine results must not share a
-fingerprint, and fitted outer-scaler state must be part of artifact identity.
+The representation fingerprint must distinguish model, preprocessing,
+extraction, pooling, and output-normalization variations. A raw vector searched
+with L2 or cosine retains one representation fingerprint; the benchmark record
+must identify the metric as part of its search recipe. Unit-normalizing the
+stored vector changes the representation and therefore its fingerprint. Fitted
+outer-scaler state must be covered by artifact identity.
 
 ### TSPulse promotion gates
 
-TSPulse should become a built-in optional adapter only if all of these pass:
+Any TSPulse adapter should become built-in only if all of these pass:
 
 1. Immutable preparation verifies every downloaded byte before loading.
 2. A canonical DuckPD artifact manifest is computed and persisted.
-3. The exact adapter produces 240 finite values for every accepted input.
+3. The adapter produces the declared number of finite values for every accepted
+   input.
 4. Batch partitioning does not change output beyond a declared tolerance.
 5. Repeated CPU runs and process restarts satisfy the determinism tolerance.
-6. The model improves at least one named retrieval task over its best native
-   baseline by a predeclared material threshold.
+6. The adapted multivariate model improves at least one named joint retrieval
+   task over its best native and trained baseline by a predeclared material
+   threshold.
 7. The gain survives entity-held-out and chronology-held-out evaluation.
 8. The result survives realistic perturbations without destroying sensitivity
-   to economically meaningful level, direction, or timing distinctions.
+   to economically meaningful level, direction, dependency, or timing.
 9. Cold start, peak RSS, throughput, and storage remain within declared budgets.
 10. Python 3.14 is supported upstream or DuckPD explicitly documents and tests a
     narrower optional-adapter matrix.
 
-## Candidate 2: MOMENT-1-small
+## Joint TS2Vec trained on DuckPD-domain data
+
+### Verified architecture and license
+
+At source revision `b0088e14a99706c05451316dc6db8d3da9351163`,
+TS2Vec accepts `[batch, time, channels]`. Its first learned operation is
+`Linear(input_dims, hidden_dims)`, so channel values are mixed before the
+dilated temporal convolution stack. This is genuine joint input processing,
+not independent encoding followed by pooling.
+
+The standard inference path uses the stochastic-weight-averaged network in
+evaluation mode. `encoding_window="full_series"` max-pools timestamp states
+to one vector per example. The reviewed source is MIT-licensed.
+
+### Why it is the first trained baseline
+
+TS2Vec answers the central experiment with relatively little machinery:
+
+- fixed channel count and order map directly to DuckPD's model specification;
+- output dimension is chosen at training time;
+- one full-series vector already exists;
+- temporal states remain available in the producer workflow; and
+- no public checkpoint is needed because DuckPD can attest the exported model.
+
+The proposed first variants use 128- and 256-dimensional output and train on
+the same eligible windows used for TSPulse adaptation. Reproduce the standard
+hierarchical contrastive objective before altering it. Compare standard max
+pooling with one timing-aware or temporal-pyramid readout.
+
+### Risks and controls
+
+- Full-series max pooling may erase event position and order.
+- Random negatives can push economically similar or synchronized market
+  windows apart.
+- Highly overlapping windows can exaggerate the effective training sample.
+- The upstream encoder modifies input tensors in place while replacing missing
+  values and applying masks. A provider must own or copy mutable input memory;
+  it must not assume a tensor sharing Arrow memory is safe.
+- The historical training environment is not the required inference
+  environment. Modernize only the frozen inference component and prove output
+  parity.
+- Export whether the averaged or raw network is used. That choice belongs in
+  artifact and adapter identity.
+
+Training must use a streaming or sharded producer outside DuckPD rather than
+materializing an unbounded corpus through the upstream in-memory `fit()` API.
+
+## Chronos-2-small pretrained multivariate challenger
+
+### Recorded artifact metadata and verified interface
+
+| Field | Observed value |
+| --- | --- |
+| Model | `autogluon/chronos-2-small` |
+| Immutable revision | `ddec01313e50b6bc58ebaa92ede81bc24a3d9f9a` |
+| Weights SHA-256 | `492290ae82bb89f9769e3479ce90b3179de1f33e600c34daa0352531538b23cd` |
+| Weights size | 111,749,048 bytes |
+| Hugging Face safetensors metadata total | 27,934,624 float32 elements |
+| License | Apache-2.0 |
+| Pipeline source reviewed | `4dbf163c2734c089cdf7da2b86fde48862ff9c6f` |
+
+The public `Chronos2Pipeline.embed()` accepts `[batch, variates, history]`.
+Its documentation states that information is shared among variates within each
+example. It returns one tensor per example shaped
+`[variates, num_patches + 2, d_model]` plus per-series location and scale. The
+extra tokens represent a register and a masked output-patch token.
+
+This is a documented multivariate extraction surface, not an undocumented
+hidden-state hack. It still does not define a database-ready search vector.
+
+### Proposed experiment and risks
+
+Compare a fixed role-ordered readout of observed-history states with a learned
+role-aware readout. Treat register-only extraction as an ablation. Evaluate
+whether returned location/scale values should enter a separate state-aware
+readout.
+
+Chronos grouping must keep channels from one logical window together and
+separate unrelated rows. Prove that a query embedded alone agrees with the same
+query under different provider batch partitioning. Do not confuse the older
+Chronos baseline in the TSPulse paper with this distinct Chronos-2-small model.
+Its forecasting origin provides no financial retrieval guarantee.
+
+## MantisV2 compact representation challenger
+
+### Recorded artifact metadata and verified architecture
+
+| Field | Observed value |
+| --- | --- |
+| Model | `paris-noah/MantisV2` |
+| Immutable revision | `8f6ca35cb54ab14b120618943c6fca5ddf5a76a6` |
+| Weights SHA-256 | `49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1` |
+| Weights size | 16,771,648 bytes |
+| Hugging Face safetensors metadata total | 4,188,690 float32 elements |
+| License | Apache-2.0 |
+| Source revision reviewed | `9018b98b4c1e093d2fa618338695cd57146d3cd0` |
+
+MantisV2's base encoder accepts one channel. It derives original-signal,
+difference, mean, and standard-deviation features, then exposes CLS, mean, or
+combined token extraction. Default hidden width is 256; combined extraction is
+512 values per independently encoded channel.
+
+The package also provides a trainable `LinearChannelCombiner` that projects the
+channel axis before base-model encoding. This is a real learned joint adapter,
+though less expressive than unrestricted time-by-channel attention.
+
+### Proposed experiment and packaging blocker
+
+Run frozen ordered per-channel concatenation as a control, then train the
+channel combiner and a compact joint readout. Compare CLS and combined
+extraction only on development data.
+
+`mantis-tsfm==1.1.0` permits Python 3.14 but requires `pandas<3.0`; DuckPD
+requires `pandas>=3.0,<3.1`. The standard packages cannot share one supported
+environment. Run Mantis in a separate benchmark environment until upstream
+publishes compatible dependencies or an inference-only integration is
+deliberately maintained.
+
+## MOMENT-1-small historical learned control
 
 ### Role in the proposal
 
-MOMENT is the best learned control because it exposes an explicit embedding
-mode and is already compared directly with TSPulse in the TSPulse retrieval
-paper. It should not be the first integration because it is much larger, loses
-that external retrieval comparison, and has a problematic published package
-surface.
+MOMENT exposes an explicit embedding mode and is compared directly with
+TSPulse in the published retrieval paper. Retain it to reproduce that historical
+comparison, not as the primary joint candidate: it is much larger, loses the
+reported retrieval comparison, averages channels by default, and has a
+problematic published package surface.
 
 ### Exact artifact record
 
@@ -474,7 +640,7 @@ Use MOMENT-1-small as a benchmark control with:
 Do not promote it unless it independently beats native baselines and its
 package/runtime story is resolved.
 
-## Candidate 3: VQShape
+## VQShape lower-priority experimental control
 
 ### Why retain it
 
@@ -528,22 +694,13 @@ reassembly required for DuckPD still need source-level verification.
 
 ### Disposition
 
-Retain only as a third, experimental candidate. Before running it, pin the
-source commit, hash the chosen release archive and all contained checkpoints,
-inspect the exact token/histogram tensor shapes, and declare one deterministic
-row-level vector. Do not implement hidden interpolation.
+Retain only as a lower-priority experimental candidate behind MantisV2. Before
+running it, pin the source commit, hash the chosen release archive and all
+contained checkpoints, inspect the exact token/histogram tensor shapes, and
+declare one deterministic row-level vector. Do not implement hidden
+interpolation.
 
 ## Screened-out candidates
-
-### TS2Vec
-
-TS2Vec has a clean full-series encoding concept: after training,
-`encode(..., encoding_window="full_series")` returns one vector per series.
-However, the official workflow trains a new model on each dataset, writes its
-checkpoint into a run directory, and recommends Python 3.8 with PyTorch 1.8.1,
-NumPy 1.19.2, and pandas 1.0.1. No canonical universal pretrained checkpoint
-was found in the reviewed repository. TS2Vec remains suitable for an
-application-owned trained custom provider, not a DuckPD-owned built-in artifact.
 
 ### TimeSiam
 
@@ -573,11 +730,16 @@ retrieval quality.
 
 ### UniTS
 
-UniTS has MIT-licensed source and downloadable release assets, but the reviewed
-`ckpt` release is mutable, publishes no asset digests, and consists of
-fine-tuned task-specific `.pth` files. No stable zero-shot semantic embedding
-interface was found. Revisit only if an immutable general checkpoint and fixed
-retrieval representation are published.
+UniTS has MIT-licensed source, explicit sequence and variable attention, and an
+own-data training path. Its reviewed `ckpt` release is mutable, publishes no
+asset digests, and consists of task-specific `.pth` files rather than one
+stable zero-shot search artifact.
+
+Those facts reject an off-the-shelf built-in adapter, not the architecture as a
+research candidate. Place UniTS in the second round if simpler joint encoders
+plateau. Train or adapt one explicit channel schema and include dataset prompts,
+task configuration, readout weights, and every numerical file in artifact
+identity.
 
 ### TRACE
 
@@ -588,277 +750,385 @@ artifact provenance, supported domains, and aligned-space metadata are resolved,
 TRACE should remain research for a future direct text-to-series feature rather
 than a current series adapter.
 
-### Forecasting-first models
+### Other forecasting-first models
 
-Chronos, TimesFM, TinyTimeMixer, PatchTST, and related forecasting models remain
+TimesFM, TinyTimeMixer, PatchTST, and related forecasting models remain
 architectural references. Their hidden states may be useful, but most require
 DuckPD to invent a patch/variate pooling rule, and forecasting accuracy does not
-establish historical retrieval quality. Chronos can remain a comparison if
-benchmark capacity permits. TimesFM 3's noncommercial weights fail the intended
-production-deployment gate. These candidates should not displace a direct
-retrieval model from the first qualification run.
+establish historical retrieval quality. Chronos-2-small is handled separately
+above because its public `embed()` is multivariate. TimesFM 3's noncommercial
+weights still fail the intended production-deployment gate.
 
 ## Proposed DuckPD qualification benchmark
 
-### Research question
+### Research questions
 
-For which declared retrieval tasks, if any, does a pinned learned encoder
-produce materially better held-out neighbors than DuckPD's native
-representations after accounting for latency, memory, storage, operational
-complexity, and stability?
+The benchmark must answer two questions independently:
 
-The benchmark must not collapse this into one global winner. A learned model may
-win shift-tolerant motif retrieval while native centered returns remain better
-for exact event-reaction shape or direction-sensitive retrieval.
+1. Which representation best retrieves held-out windows under a declared
+   multivariate financial relevance definition?
+2. Do learned search vectors, richer encoder states, or neighbor-derived
+   features add out-of-sample predictive information beyond strong conventional
+   and native baselines?
 
-### Representations
+A model may win one question and lose the other. Neither forecasting loss nor
+attractive example neighbors answer both.
+
+### Fixed multivariate data contract
+
+Start with one instrument/window per example and one fixed, ordered feature
+schema. A reasonable initial schema is:
+
+1. instrument return;
+2. volume surprise;
+3. intrabar range;
+4. spread or another timestamp-trustworthy liquidity measure;
+5. market return; and
+6. sector return.
+
+Use only channels available with trustworthy timestamps. Define units,
+adjustment policy, sampling interval, session handling, and availability for
+every channel. Keep instrument identifiers out of the numerical vector unless
+identity dependence is intentional. A changing universe of instruments as
+channels is a different masked-membership problem and is out of scope.
+
+Do not stretch a trading session to 512 observations to satisfy a checkpoint.
+Use naturally defined 512-observation windows for matched TSPulse experiments,
+and test shorter natural windows separately for trainable models.
+
+### Distinguish three channel capabilities
+
+Report these as separate baselines rather than labeling all of them
+"multivariate":
+
+| Capability | Information path | Interpretation |
+| --- | --- | --- |
+| Independent encoding plus mean pooling | Each channel is encoded separately, then averaged | Channel identity can disappear; inadequate as the sole product foundation |
+| Independent encoding plus ordered concatenation | Each channel retains a separate vector block | Preserves roles, but learns no dependency or lag relationship |
+| Joint representation learning | Input projection, attention, mixer, or trained fusion combines channels | Required candidate class for the primary product experiment |
+
+Ordered concatenation remains useful. Under squared L2 it adds per-channel
+distances; it does not learn which cross-channel relationships matter. If an
+independent encoder discarded timing, concatenation cannot recover it.
+
+### Three evaluation suites
+
+| Suite | Question | Essential design |
+| --- | --- | --- |
+| Controlled multivariate fixtures | Does the representation preserve or ignore the intended dependency, lag, role, sign, and scale distinctions? | Hold channel marginals approximately fixed while changing their relationships |
+| Historical market and event retrieval | Do neighbors satisfy an independent financial relevance rubric? | Deduplicated events, held-out chronology and instruments, graded relevance |
+| Predictive usefulness | Does the frozen representation add out-of-sample information? | Walk-forward probes and neighbor features with explicit label availability |
+
+Controlled fixtures are behavior tests, not market-generalization evidence.
+Include same-event-family/different-reaction and
+different-event-family/similar-reaction pairs.
+
+### Controlled joint-channel tests
+
+Every trained finalist must be tested with:
+
+1. target-only input;
+2. full multichannel input;
+3. joint mixing disabled where the architecture supports it;
+4. one channel shuffled within controlled strata, preserving its marginal
+   distribution while disrupting relationships;
+5. removal of each informative covariate group; and
+6. correct versus incorrect channel-role assignment.
+
+Fixtures should cover:
+
+- the same price path with an earlier versus later volume shock;
+- matching marginals with positive versus negative channel dependence;
+- market-wide versus instrument-specific movement after controlling for market
+  return;
+- continuation versus reversal within one event family; and
+- identical numerical values assigned to different semantic roles.
+
+Swapping `(identity, values)` pairs can legitimately leave a set-based model
+unchanged. Swapping only values while identities remain fixed should generally
+change a role-sensitive representation.
+
+### Representations and baselines
 
 At minimum compare:
 
-1. raw fixed return window;
-2. centered return window;
-3. z-score-normalized return window;
-4. unit-normalized native window;
-5. TSPulse decoder/register embedding with internal RevIN only;
-6. TSPulse decoder/register embedding with the exact safely fitted cookbook
-   outer scaler;
-7. MOMENT-1-small default univariate mean embedding; and
-8. VQShape's selected token or histogram vector if its contract is resolved.
+1. raw multichannel fixed windows;
+2. centered, z-scored, and unit-normalized native variants where their semantics
+   fit the task;
+3. train-fitted PCA of the native multichannel vector at the same output budget
+   as learned candidates;
+4. compact relational/statistical features covering return distribution,
+   volatility profile, drawdown/recovery, volume surprise, contemporaneous
+   channel correlation, and selected lag correlations;
+5. bounded multivariate DTW on an evaluation subset with a declared warping
+   constraint;
+6. TS2Vec joint 128- and 256-dimensional models;
+7. the original univariate TSPulse decoder/register representation; and
+8. a multivariate TSPulse adaptation only after the narrow published control
+   and external training path are independently verified.
 
-Every preprocessing or output-normalization variation is a separate
-representation space with a separate fingerprint. Do not tune the query
-representation independently from the indexed representation.
+Evaluate a common output-size budget and each model's natural output. A compact
+learned vector must not receive credit merely because the native baseline was
+left at thousands of coordinates without PCA.
 
-### Retrieval tasks
+Each preprocessing or output-normalization variation is a separate
+representation space and fingerprint. Distance metric and top-k belong to the
+search-recipe record, not the current representation fingerprint.
 
-Build labeled suites for distinct product meanings:
+### Retrieval tasks and invariance policy
 
-- trend continuation and trend reversal;
+Build independently labeled suites for:
+
+- trend continuation and reversal;
 - impulse, overshoot, and recovery;
 - volatility burst and decay;
 - level shift versus transient spike;
-- flat or low-information periods;
 - periodic and repeated motifs;
-- event-linked immediate reaction;
-- event-linked delayed reaction; and
-- same event family with materially different reaction direction.
+- market-wide versus idiosyncratic movement;
+- aligned price/volume/liquidity reactions;
+- event-linked immediate and delayed reaction; and
+- same event family with materially different direction or magnitude.
 
-The labels must encode what counts as relevant rather than deriving relevance
-from whichever representation is under test.
+Declare two useful meanings separately:
 
-### Splits and leakage controls
+- **Shape similarity:** selected scale or level changes may be nuisances.
+- **State similarity:** amplitude, volatility, volume surprise, liquidity, and
+  market context contribute to relevance.
 
-- Hold out entities so near-duplicate windows from one instrument do not appear
-  in both index and query sets.
-- Hold out later chronology where the intended product is forward deployment.
-- Fit any corpus scaler on the index/training split only.
-- Exclude overlapping windows across query and index boundaries.
-- Deduplicate event observations and vendor revisions.
-- Prevent the same underlying synthetic seed from appearing in both sides under
-  only a trivial augmentation.
-- Report in-domain and out-of-domain results separately.
-- Record whether Bitcoin or any other candidate pretraining source overlaps an
-  evaluation domain; do not treat model-card training-data lists as complete
-  contamination evidence.
+Do not make scale retention conditional on a query. Train separate readouts or
+store separate representation columns if both meanings are needed.
 
-### Perturbations
+Test controlled positive scaling, additive offset where meaningful, Gaussian
+and heavy-tailed noise, time shift, local warp, sign reversal, and
+jointly-aligned crop. Independently shifting volume, reversing sign, or applying
+large event-relative warps may change the label and must not be treated as an
+automatic positive augmentation.
 
-Test controlled changes independently and in combinations:
+### Training, development, index, and final-query separation
 
-- positive scaling;
-- additive offset where meaningful;
-- Gaussian and heavy-tailed noise;
-- small and large time shifts;
-- local temporal warp;
-- sign reversal;
-- missing prefix, suffix, block, and isolated values in a separately declared
-  missingness experiment; and
-- benign resampling changes performed before fixed-window construction.
+Use at least four logical roles:
 
-Invariance is not universally desirable. For example, sign reversal may
-preserve shape family but invert economic meaning. Report coarse family and
-fine-grained direction-sensitive results separately.
+1. encoder training;
+2. finite development/model selection;
+3. untouched final queries; and
+4. the historical candidate pool eligible for each query.
 
-### Quality metrics
+These roles need not be four simple date blocks. For each fold:
 
-For each task and representation, report:
+- fit scalers, PCA, codebooks, seasonal baselines, encoder weights, and readouts
+  only on eligible training data;
+- lock model and search recipes before final evaluation;
+- purge or group overlapping windows and forward-label intervals;
+- group duplicate events, revisions, and vendor copies under stable IDs;
+- evaluate later chronology, unseen instruments, and their intersection;
+- use block- or event-group resampling for uncertainty; and
+- report unique time coverage and event count, not only the number of highly
+  overlapping windows.
 
-- Precision@k and Recall@k;
-- MRR@k;
-- AP@k;
-- nDCG@k;
-- neighborhood overlap and rank correlation across perturbations;
-- class-conditional and regime-conditional results;
-- failure slices, not only macro averages; and
-- confidence intervals across seeds or resampled query sets.
+Candidate observations may enter the historical index over time while the
+encoder remains frozen. For predictive neighbor features at cutoff `t`, a
+neighbor's input and outcome label must both be available. A completed input
+with an unfinished future outcome is eligible for retrospective shape search,
+not outcome aggregation.
 
-Use at least `k in {1, 3, 10}` where candidate-set size supports it. Predeclare
-the primary metric for each task before tuning preprocessing.
+Match information content between predictive queries and historical examples.
+A five-minute post-event query must compare with the same relative prefix, not
+with an encoded sixty-minute completed reaction. Aligning partial inputs with
+full outcomes requires a separate supervised asymmetric encoder.
 
-### Runtime metrics
+### Training objectives
 
-Measure the complete DuckPD path:
+Begin with disciplined, separately ablated objectives:
 
-- model preparation download and verification time;
-- cold import and first-inference time;
-- warm batches per second and rows per second;
-- Arrow-to-tensor and tensor-to-Arrow conversion time;
-- model compute time separately;
-- peak process RSS;
-- accelerator memory where applicable;
-- output bytes per row;
-- exact index-build time;
-- exact query latency at realistic corpus sizes; and
-- end-to-end materialization or sink time.
+- masked reconstruction of aligned time blocks;
+- reconstruction of selected channel groups from other channels;
+- contrastive agreement under mild label-preserving views; and
+- future-target or later-latent prediction using only eligible training labels.
 
-Use batch sizes that include 1 and the expected production range. Test partial
-final batches. Keep CPU qualification independent from accelerator results.
+Prevent trivial reconstruction through redundant OHLC-derived channels by
+masking related groups together. For contrastive learning, define treatment of
+overlapping windows, duplicate events, and synchronized market moves; every
+other batch row is not automatically a useful negative.
 
-### Determinism and numerical checks
+If hard-negative sampling becomes a demonstrated bottleneck, compare
+minibatch- or sampled-neighbor soft targets and a JEPA/self-distillation
+objective. Keep every teacher feature and neighbor sample inside the training
+partition. Record embedding variance, effective rank, and neighbor concentration
+to detect collapse. The reviewed SoftCLT reference code has no confirmed license,
+so study the paper without incorporating its source until rights are resolved.
 
-- Repeat the same batch in one process and across fresh processes.
-- Change batch partitioning while preserving row order.
-- Change thread counts.
-- Compare supported CPU architectures and operating systems.
-- Compare CPU and accelerator outputs only under an explicitly declared
-  tolerance; do not assume bit identity.
-- Verify every accepted output is finite and exactly dimensioned.
-- Confirm constant, near-constant, maximum-magnitude, and minimum-scale windows
-  do not produce unstable values.
-- Confirm input arrays are not mutated by the provider.
+Keep a shared encoder's search readout and predictive readout distinct. The
+search projection may intentionally discard information required by prediction.
+Retain temporal states in the producer workflow and test them separately.
 
-### Proposed promotion threshold
+### Quality and predictive metrics
 
-Before running the benchmark, select a primary task and declare a material gain
-threshold. A defensible initial rule is:
+For retrieval, predeclare nDCG@10 or Recall@10 as the primary metric. Also
+report Precision@k, MRR, AP, graded-relevance results, class/regime slices,
+direction and lag failures, perturbation stability, neighbor concentration,
+and block-resampled confidence intervals.
 
-- statistically supported improvement on the primary held-out nDCG@10 or
-  Recall@10 metric;
-- no material regression on the direction-sensitive safety slice;
-- acceptable stability under declared benign perturbations;
-- bounded memory and cold-start behavior; and
-- no unresolved artifact, license, runtime, or Python-matrix gate.
+For predictive usefulness, compare:
 
-The exact numerical threshold should be chosen from application value and
-native-baseline variance, not invented after results are known. If no learned
-candidate clears it, retain the custom-provider protocol and promote nothing.
+| Input | Purpose |
+| --- | --- |
+| Conventional price, volume, volatility, and market features | Practical baseline |
+| Native or PCA window features | Test whether recent history is sufficient |
+| Learned search vector | Test the compact representation |
+| Frozen temporal encoder states/readout | Test information lost by search compression |
+| Conventional plus learned features | Measure incremental value |
+| Conventional plus historical-neighbor summaries | Test the retrieval service itself |
 
-## Proposed implementation sequence after verification
+Start with linear or ridge probes and one matched strong tabular model. Use
+predeclared return, volatility, and direction horizons. Report error and rank
+correlation for returns, declared target error for volatility, and calibration
+plus discrimination for probabilities. Full trading-strategy evaluation
+belongs downstream.
 
-1. Reverify every TSPulse identifier and license against immutable sources.
-2. Build a throwaway provider outside the public built-in registry.
-3. Prepare and attest the model under DuckPD's existing artifact lifecycle.
-4. Prove one complete 512-point target channel maps to exactly 240 finite
-   decoder/register values.
-5. Reproduce a small official TSPulse search result before changing
-   preprocessing.
-6. Run the DuckPD benchmark with native representations, TSPulse, and MOMENT.
-7. Resolve outer scaling through evidence rather than convenience.
-8. Publish the full runtime and retrieval record, including negative slices.
-9. Promote a built-in optional adapter only if the predeclared gate passes.
-10. Update API, design, compatibility, roadmap, changelog, package extras, and
-    examples together if promotion occurs.
+### Runtime, storage, and determinism
 
-A first implementation should not add multichannel pooling, interpolation,
-padding, imputation, fine-tuning, forecasting, text alignment, automatic model
-download, or ANN-specific behavior. Those are separate contracts.
+Measure preparation, cold import, first inference, warm throughput,
+Arrow-to-tensor conversion, model compute, tensor-to-Arrow conversion, peak
+RSS, device memory, persistence, exact index construction, eligible-population
+filtering, and exact query latency. The current provider uses bounded Python row
+snapshots rather than a zero-copy tensor handoff; this overhead may dominate a
+small model and must be reported before optimization.
 
-## Independent verification checklist
+For 10 million float32 vectors with six channels, arithmetic storage before
+metadata, indexing, compression, or replicas is:
 
-The reviewing agent should explicitly verify or correct each item below:
+| Representation | Dimension | Storage |
+| --- | ---: | ---: |
+| Native 512 by 6 | 3,072 | 122.88 GB |
+| Independent TSPulse registers concatenated | 1,440 | 57.60 GB |
+| Mantis combined outputs concatenated | 3,072 | 122.88 GB |
+| Joint compact readout | 256 | 10.24 GB |
 
-### TSPulse artifact and license
+Repeat identical batches within and across processes, vary batch partitioning
+and thread counts, test partial batches, verify fixed finite dimensions, and
+confirm provider inputs are not mutated. Query/corpus agreement and
+batch-partition invariance are mandatory. CPU and accelerator equivalence use a
+declared tolerance rather than presumed bit identity.
 
-- [ ] The named search branch still resolves to
+### Staged decision
+
+| Stage | Work | Exit criterion |
+| --- | --- | --- |
+| A | Implement and attest the narrow immutable TSPulse provider | **Implemented:** real 512-point univariate corpus/query encoding completed through the DuckPD path; model quality remains unqualified |
+| B | Fix channel schema, relevance labels, splits, native/PCA/statistical/DTW controls | Fixtures distinguish desired invariance from meaningful change |
+| C | Train joint TS2Vec externally and export a frozen artifact | **Implemented on synthetic data:** reproducible averaged checkpoint with complete preprocessing, pooling, and training provenance; real-data training remains |
+| D | Compare TSPulse and TS2Vec under matched eligible data and output budgets | Determine whether either learned representation beats strong conventional controls |
+| E | Adapt TSPulse only if the narrow control and TS2Vec results justify training | Attribute any gain to adaptation rather than hidden preprocessing or leakage |
+
+Choose material-improvement and allowable direction/lag-regression thresholds
+from baseline variance and product value before final evaluation. If neither
+learned candidate passes, retain native representations and the custom-provider
+protocol without recommending a built-in model.
+
+## Implementation status and sequence
+
+Completed:
+
+1. `backend="tspulse"` resolves through the existing provider lifecycle.
+2. Preparation verifies the immutable TSPulse config and weights before loading.
+3. CPU execution, internal RevIN, an all-observed mask, decoder/register
+   extraction, and raw 240-dimensional output are pinned.
+4. Corpus and query paths execute through bounded Arrow batches with the real
+   `granite-tsfm==0.3.9` runtime.
+5. A pinned real-runtime golden fixture and repeated-process smoke runs produce
+   the same 240-dimensional float32 output.
+6. The bounded TS2Vec producer exports deterministic averaged safetensors from
+   the generated market dataset with chronological embargoed splits,
+   training-only standardization, and complete manifest provenance.
+7. `backend="ts2vec"` verifies and runs that multivariate bundle through the
+   same bounded corpus/query provider path.
+
+Next:
+
+1. Build native, PCA, statistical, and bounded-DTW evaluation controls.
+2. Train the same attested TS2Vec recipe on eligible real domain data.
+3. Run held-out retrieval, predictive, runtime, golden-output, and determinism
+   suites.
+
+The experiments require no new DataFrame operation, training API, or
+variable-length provider protocol.
+
+Provider `prepare()` must verify the complete manifest and bytes itself. The
+session validates agreement between the returned attestation and requested
+specification; it cannot independently prove arbitrary custom-provider files
+were rehashed. Training cutoff, artifact publication/preparation time, and each
+window's availability time are distinct provenance values.
+
+Retraining, changing a readout, adding a predictive objective, or changing
+fitted preprocessing creates a new representation fingerprint and requires
+corpus re-encoding. Same dimensionality does not make successive checkpoints
+compatible.
+
+Automatic interpolation, imputation, training inside execution, text alignment,
+automatic download during planning, and ANN-specific behavior remain separate
+contracts.
+
+## Verification record and remaining checks
+
+### Independently confirmed
+
+- [x] TSPulse search revision resolves to
   `b12164578f7b893ada0028c00d292ba10383d25a`.
-- [ ] `model.safetensors` SHA-256 and size match this document.
-- [ ] The source tag `v0.3.9` resolves to the stated commit.
-- [ ] The PyPI wheel SHA-256 and Python requirement match this document.
-- [ ] Apache-2.0 applies separately to source and weights with no hidden model
-  terms or acceptable-use restriction.
-- [ ] Any `NOTICE` obligations relevant to redistribution are captured.
+- [x] Downloaded `model.safetensors` is 4,305,624 bytes with SHA-256
+  `b9332ae796ec7c313f991ed32dbec62c29a8e673281decb7308f955bdda7aae0`.
+- [x] The safetensors header contains 224 stored tensors totaling 1,068,958
+  float32 elements; Hugging Face separately reports 1,084,330 parameters.
+- [x] `granite-tsfm` tag `v0.3.9` resolves to
+  `fe7a35697723e2a2f5246ae979474bfc554e26c0`.
+- [x] Package metadata reports `granite-tsfm==0.3.9` and Python
+  `>=3.11,<3.14`; wheel digest matches the proposal.
+- [x] Decoder/register extraction is 240 values per channel for the pinned
+  TSPulse checkpoint.
+- [x] TSPulse uses univariate pretraining; decoder channel mixing requires
+  adaptation.
+- [x] Cookbook preprocessing fits an outer standard scaler on the index/training
+  data and reuses it for queries.
+- [x] TSPulse Tables 28–29 aggregate values were transcribed correctly.
+- [x] TS2Vec source revision
+  `b0088e14a99706c05451316dc6db8d3da9351163` is MIT-licensed, mixes input
+  channels before temporal convolutions, and exposes full-series max pooling.
+- [x] DuckPD's current representation fingerprint does not include search
+  distance; distance is an explicit search argument.
 
-### TSPulse semantics
+### Still required before experiments or promotion
 
-- [ ] `get_embeddings()` at the pinned source revision returns `[B, C, D]`.
-- [ ] Decoder/register output is exactly 240 values per channel for the pinned
-  checkpoint.
-- [ ] The register slice is the intended published search representation.
-- [ ] Model evaluation disables stochastic masking and dropout.
-- [ ] `mask_type="user"` plus no mask is equivalent to an all-observed mask, or
-  the adapter pins the differing behavior.
-- [ ] The exact official retrieval preprocessing is reconstructed, including
-  the corpus-fitted outer standard scaler.
-- [ ] The model's internal RevIN behavior, affine parameters, epsilon, and
-  minimum-scale handling are captured completely.
-- [ ] Univariate pretraining and the lack of qualified zero-shot channel-role
-  interaction are correctly characterized.
-
-### Published evidence
-
-- [ ] Table 28 and Table 29 values were transcribed correctly.
-- [ ] The evaluated MOMENT and Chronos variants are identified exactly.
-- [ ] Euclidean distance and any output normalization are identified exactly.
-- [ ] Query generation, index construction, and possible query/index ancestry
-  are understood before treating scores as independent generalization evidence.
-- [ ] Runtime table units, hardware, batch size, shape, and measured boundary are
-  transcribed correctly.
-- [ ] Official reproducibility code matches the paper's reported benchmark,
-  rather than only demonstrating a similar workflow.
-
-### MOMENT
-
-- [ ] The model revision, safetensors digest, parameter count, and MIT terms are
-  correct.
-- [ ] The exact source used with the immutable checkpoint is selected.
-- [ ] Default embedding reduction averages channels and then valid patches as
-  described.
-- [ ] RevIN, finite-value replacement, mask semantics, and output dtype are
-  captured.
-- [ ] Published `momentfm==0.1.4` dependency pins and the status of a compatible
-  0.1.5 release are rechecked.
-
-### VQShape and exclusions
-
-- [ ] VQShape's exact token and histogram shapes and normalization are traced
-  from the pinned source.
-- [ ] The proposed release archive is downloaded and independently hashed.
-- [ ] VQShape's source and checkpoint licenses are independently confirmed.
-- [ ] TRACE and TOTEM truly lack applicable license grants rather than merely
-  missing GitHub license detection.
-- [ ] No newer immutable generic checkpoints have appeared for TS2Vec,
-  TimeSiam, T-Rep, TOTEM, UniTS, or another retrieval-specific model.
-
-### DuckPD integration
-
-- [ ] The proposed one-channel adapter can be expressed without changing the
-  current provider protocol.
-- [ ] Python 3.14 policy is resolved before any built-in claim.
-- [ ] Fingerprints cover scaler state, extraction point, distance semantics,
-  output normalization, source revision, and complete artifact manifest.
-- [ ] The benchmark labels and splits answer a product question and cannot be
-  solved through overlap or event duplication.
+- [ ] Reproduce the official TSPulse retrieval benchmark, including exact
+  comparator checkpoints and output normalization.
+- [ ] Prove evaluation mode disables stochastic masking/dropout and determine
+  whether a missing mask and all-observed mask are identical.
+- [ ] Record all applicable source, model, and redistribution notice terms.
+- [ ] Pin the TS2Vec training and inference environments.
+- [ ] Define one immutable ordered financial channel schema.
+- [ ] Verify query-alone, query-in-batch, and changed-batch-partition output
+  agreement.
+- [ ] Resolve Python 3.14 before a built-in TSPulse support promise; isolated
+  research may use the recorded Python 3.11–3.13 matrix.
+- [ ] Export and independently hash the trained TS2Vec bundle.
+- [ ] Run all three evaluation suites; no source review substitutes for measured
+  financial results.
 
 ## Open questions
 
-1. Does external standard scaling change TSPulse neighbors after internal
-   affine RevIN, and is any gain stable across chronology-held-out data?
-2. Does raw L2 outperform unit-normalized cosine for DuckPD's target tasks?
-3. Does TSPulse's desired shift invariance erase timing distinctions needed for
-   event-reaction retrieval?
-4. Does pretraining on Bitcoin create a meaningful advantage or a
-   contamination concern for any proposed market benchmark?
-5. Can TSPulse be made available on Python 3.14 without an unsupported fork?
-6. Is a single return channel sufficient for the valuable retrieval tasks, or
-   does the product need learned target/volume/volatility interaction?
-7. If multichannel behavior is required, is fine-tuning TSPulse preferable to
-   defining an untrained concatenation or mean-pooling convention?
-8. Does VQShape's histogram representation provide useful interpretability at
-   acceptable retrieval quality?
-9. Which native representation is the actual strongest baseline for each named
-   task?
-10. What improvement is valuable enough to justify PyTorch, model preparation,
-    cold start, and long-term artifact support?
+1. Does joint TS2Vec beat native, PCA, statistical, and bounded-DTW baselines
+   when trained on the same eligible windows?
+2. Does the narrow TSPulse control add useful retrieval geometry before any
+   multivariate adaptation?
+3. Does a later TSPulse adaptation retain a pretrained advantage over TS2Vec,
+   or only add complexity?
+4. Does raw L2, cosine on raw vectors, or explicit unit normalization best match
+   each declared relevance rubric?
+5. Does RevIN erase economically useful amplitude, volatility, liquidity, or
+   volume state?
+6. Which TS2Vec pooling preserves event timing at a practical storage budget?
+7. Do learned vectors or historical-neighbor summaries add predictive value
+   beyond conventional features and native/PCA windows?
+8. What material gain justifies PyTorch, training, artifact lifecycle,
+   re-encoding, cold start, and long-term support?
 
 ## Sources
 
@@ -881,7 +1151,21 @@ The reviewing agent should explicitly verify or correct each item below:
 - [`granite-tsfm` source repository][granite-source]
 - [`granite-tsfm` Apache-2.0 license][granite-license]
 
-### MOMENT
+### Joint candidates and multivariate challengers
+
+- [Pinned TS2Vec encoder source][ts2vec-encoder]
+- [Pinned TS2Vec full-series pooling source][ts2vec-pooling]
+- [Pinned TS2Vec MIT license][ts2vec-license]
+- [Chronos-2-small immutable artifact metadata][chronos-small-artifact]
+- [Pinned Chronos-2 multivariate embedding pipeline][chronos-pipeline]
+- [MantisV2 immutable artifact metadata][mantis-artifact]
+- [Pinned MantisV2 architecture][mantis-source]
+- [Pinned Mantis channel combiner][mantis-adapter]
+- [Pinned Mantis package metadata][mantis-package]
+- [Joint multivariate transformer reference implementation][joint-transformer]
+- [SoftCLT paper][softclt-paper]
+
+### Controls and screened candidates
 
 - [MOMENT-1-small model card][moment-card]
 - [MOMENT-1-small immutable artifact metadata][moment-artifact]
@@ -889,12 +1173,8 @@ The reviewing agent should explicitly verify or correct each item below:
 - [MOMENT embedding implementation][moment-source]
 - [`momentfm` PyPI metadata][moment-pypi]
 - [MOMENT representation-learning tutorial][moment-tutorial]
-
-### VQShape and screened candidates
-
 - [VQShape repository and usage][vqshape]
 - [VQShape checkpoint release][vqshape-release]
-- [TS2Vec repository and usage][ts2vec]
 - [TimeSiam repository and usage][timesiam]
 - [T-Rep repository and usage][trep]
 - [TOTEM repository][totem]
@@ -923,10 +1203,20 @@ The reviewing agent should explicitly verify or correct each item below:
 [moment-tutorial]: https://github.com/moment-timeseries-foundation-model/moment/blob/main/tutorials/representation_learning.ipynb
 [vqshape]: https://github.com/YunshiWen/VQShape
 [vqshape-release]: https://github.com/YunshiWen/VQShape/releases/tag/v0.1.0-cls
-[ts2vec]: https://github.com/zhihanyue/ts2vec
 [timesiam]: https://github.com/thuml/TimeSiam
 [trep]: https://github.com/Let-it-Care/T-Rep
 [totem]: https://github.com/SaberaTalukder/TOTEM
 [units]: https://github.com/mims-harvard/UniTS
 [units-release]: https://github.com/mims-harvard/UniTS/releases/tag/ckpt
 [trace]: https://github.com/Graph-and-Geometric-Learning/TRACE-Multimodal-TSEncoder
+[ts2vec-encoder]: https://github.com/zhihanyue/ts2vec/blob/b0088e14a99706c05451316dc6db8d3da9351163/models/encoder.py
+[ts2vec-pooling]: https://github.com/zhihanyue/ts2vec/blob/b0088e14a99706c05451316dc6db8d3da9351163/ts2vec.py
+[ts2vec-license]: https://github.com/zhihanyue/ts2vec/blob/b0088e14a99706c05451316dc6db8d3da9351163/LICENSE
+[chronos-small-artifact]: https://huggingface.co/api/models/autogluon/chronos-2-small/revision/ddec01313e50b6bc58ebaa92ede81bc24a3d9f9a?blobs=true
+[chronos-pipeline]: https://github.com/amazon-science/chronos-forecasting/blob/4dbf163c2734c089cdf7da2b86fde48862ff9c6f/src/chronos/chronos2/pipeline.py
+[mantis-artifact]: https://huggingface.co/api/models/paris-noah/MantisV2/revision/8f6ca35cb54ab14b120618943c6fca5ddf5a76a6?blobs=true
+[mantis-source]: https://github.com/vfeofanov/mantis/blob/9018b98b4c1e093d2fa618338695cd57146d3cd0/src/mantis/architecture/version2.py
+[mantis-adapter]: https://github.com/vfeofanov/mantis/blob/9018b98b4c1e093d2fa618338695cd57146d3cd0/src/mantis/adapters/diff_adapter.py
+[mantis-package]: https://github.com/vfeofanov/mantis/blob/9018b98b4c1e093d2fa618338695cd57146d3cd0/pyproject.toml
+[joint-transformer]: https://github.com/gzerveas/mvts_transformer
+[softclt-paper]: https://arxiv.org/html/2312.16424v4

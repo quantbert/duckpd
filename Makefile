@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test remote-db-setup remote-db-test remote-db-cleanup lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all benchmark-tracks optimizer-gate bump release-check clean publish
+.PHONY: help install test ts2vec-golden remote-db-setup remote-db-test remote-db-cleanup lint format format-check typecheck compatibility-check check build package-smoke demos-smoke benchmark benchmark-all benchmark-tracks benchmark-series optimizer-gate bump release-check clean publish
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -10,6 +10,11 @@ install: ## Sync the locked development environment
 
 test: ## Run tests with the configured coverage requirements
 	uv run pytest
+
+ts2vec-golden: ## Train twice and verify the pinned TS2Vec runtime fixture
+	DUCKPD_TS2VEC_REAL_TESTS=1 uv run --python 3.12.13 --extra ts2vec pytest \
+		-o addopts='--strict-config --strict-markers' tests/test_ts2vec_real_runtime.py
+
 
 REMOTE_POSTGRES_CONTAINER ?= duckpd-postgres
 REMOTE_MYSQL_CONTAINER ?= duckpd-mysql
@@ -113,6 +118,9 @@ REPETITIONS ?= 3
 THREADS ?= 4
 REPORT ?= benchmark/REPORT.md
 
+TS2VEC_BUNDLE ?= demo/.tmp/ts2vec-market-smoke
+SERIES_REPORT ?= benchmark/SERIES_EMBEDDINGS.json
+
 benchmark: ## Run benchmarks across file sizes and generate Markdown report
 	uv run python -m benchmark --sizes $(SIZES) --repetitions $(REPETITIONS) --threads $(THREADS) --report $(REPORT)
 
@@ -121,6 +129,11 @@ benchmark-all: ## Run benchmarks across all preset sizes including 5GB and 50GB
 
 benchmark-tracks: ## Run validated cold/warm tracks and evidence scorecard
 	uv run python -m benchmark.tracks --rows 100000 --output benchmark/TRACKS.json --scorecard-output benchmark/SCORECARD.json
+
+benchmark-series: ## Compare learned series providers with matched controls
+	uv run --python 3.12.13 --extra ts2vec --extra tspulse \
+		python -m benchmark.series_embeddings \
+		--ts2vec-bundle $(TS2VEC_BUNDLE) --output $(SERIES_REPORT)
 
 optimizer-gate: ## Verify optimizer correctness and regression threshold
 	uv run python scripts/benchmark_optimizer.py --rows 250000 --iterations 7

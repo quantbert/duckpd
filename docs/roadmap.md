@@ -1063,6 +1063,74 @@ Exit gate:
       bounded, failures leave no promoted cache or output, and qualification
       records the exact model artifact and runtime.
 
+### Phase 20 — Priority 4: TS2Vec and TSPulse series providers
+
+Goal: ship first-party, opt-in inference providers for TS2Vec and TSPulse while
+keeping model training, artifact production, and benchmark selection outside
+DuckPD. Provider availability does not imply that either model is qualified as
+the best financial representation.
+
+- [x] Add explicit `backend="tspulse"` and `backend="ts2vec"` resolution through
+      the existing `SeriesEmbeddingProvider` lifecycle without another
+      DataFrame operation. TS2Vec requires an explicit attested local bundle.
+- [x] Define and enforce the canonical TSPulse frozen-artifact manifest covering
+      weights, architecture configuration, extraction, normalization, runtime
+      source/version, licenses, and SHA-256 digests. Reject unverified files and
+      representation mismatches before reading corpus data.
+- [x] Extend the TS2Vec manifest with ordered channel schema, training-only
+      preprocessing, pooling/readout state, averaged weights, runtime, dataset
+      digest, seeds, losses, and chronological training provenance. Reject
+      arbitrary pickled model objects.
+- [x] Implement TSPulse's immutable 512-point univariate decoder/register
+      checkpoint. Return exactly 240 float32 values and pin internal RevIN,
+      all-observed masking, no outer fitted scaling, decoder/register extraction,
+      raw output, and CPU execution.
+- [x] Add a bounded external TS2Vec producer over the generated market dataset
+      and frozen multivariate inference. Pin averaged weights, output dimension,
+      pooling, complete-window policy, ordered channels, and training
+      provenance.
+- [ ] Support multivariate TSPulse only through a separately trained and
+      attested decoder-mixing/readout artifact. Do not present independent
+      per-channel encoding or the unadapted search checkpoint as joint learned
+      channel interaction.
+- [x] Keep TSPulse in its own `duckpd[tspulse]` optional extra so importing core
+      DuckPD remains lightweight. Enforce Python 3.11–3.13 because
+      `granite-tsfm==0.3.9` excludes Python 3.14.
+- [x] Keep the TS2Vec PyTorch/safetensors runtime in its own optional extra.
+- [x] Cover the TSPulse contract, wrong dimensions/channels, changed artifact
+      bytes, preparation failure, query/corpus agreement, bounded batches,
+      non-thread-safe execution, and session cleanup without placing heavyweight
+      weights or network access in the core test suite.
+- [x] Add a pinned TSPulse golden fixture and opt-in real-runtime smoke test,
+      keeping heavyweight weights and network access out of the core test suite.
+- [x] Add a pinned optional TS2Vec real-runtime golden fixture. Manual smoke
+      training, repeated deterministic export, and real bundle inference pass.
+- [x] Benchmark TS2Vec and TSPulse through the complete DuckPD path, separating
+      Arrow/Python conversion, model execution, persistence, and exact-search
+      costs. Compare them against native, PCA, statistical, and bounded-DTW
+      baselines under the same channel schema and eligible data.
+- [x] Document both providers as experimental until held-out multivariate
+      retrieval and predictive-utility results justify a stronger support
+      claim. A failed quality gate retains the working provider API but blocks
+      any recommended-default or best-model claim.
+
+Exit gate:
+
+- [x] A core-only installation imports and executes without the TSPulse extra.
+- [x] The pinned TSPulse specification prepares explicitly, verifies its complete
+      manifest, consumes bounded Arrow batches, and returns fixed-size float32
+      vectors for both corpus and query paths.
+- [x] Pinned golden output and repeated-process determinism checks pass for the
+      real TSPulse runtime.
+- [x] Missing extras, unsupported Python versions, incompatible artifacts,
+      incorrect channel schemas, and unsupported TSPulse joint configurations
+      fail with actionable errors before partial output or promoted cache state.
+- [x] A generated TS2Vec bundle verifies without pickle, loads averaged weights,
+      consumes bounded multivariate batches, and returns its declared fixed-size
+      float32 vector for both corpus and query paths.
+- [x] Documentation distinguishes provider implementation, runtime support, and
+      measured model qualification.
+
 ### Deferred embedding research
 
 The following have no scheduled implementation priority: hosted embedding
@@ -1175,8 +1243,8 @@ decomposed into independently testable milestones below.
         through Phase 17.
 33. [x] Integrate deterministic series representations into the single catalog
         version 1 schema through Phase 18.
-34. [ ] Qualify optional learned series encoders only after the native and
-        catalog contracts pass their exit gates in Phase 19.
+34. [x] Complete the generic optional learned-series provider lifecycle and
+        qualification boundary in Phase 19.
 
 ### Completed Linux-beta workstreams
 
