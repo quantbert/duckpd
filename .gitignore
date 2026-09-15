@@ -11,11 +11,9 @@ dist/
 data/
 *.egg-info/
 *.duckdb.tmp/
-demo/data/
-demo/.tmp/
+demo/.artifacts/
+demo/benchmarks/data/
 demo/generate_data/source_data/
-demo/language_summary.csv
-demo/stock_news_summary.parquet
 benchmark/data/
 # Byte-compiled / optimized / DLL files
 __pycache__/

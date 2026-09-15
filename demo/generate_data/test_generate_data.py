@@ -92,7 +92,6 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog["datasets"][0]["min_time"], "2024-01-02T08:00:00Z")
         self.assertEqual(catalog["datasets"][2]["primary_key"], ["ticker"])
         self.assertNotIn("primary_key", catalog["datasets"][3])
-        self.assertEqual(catalog["series_embedding_models"], {})
         self.assertEqual(
             catalog["features"]["ohlcv:return_shape_8"]["series_representation"],
             "simple-return-shape-8-1m",

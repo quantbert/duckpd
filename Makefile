@@ -103,11 +103,9 @@ package-smoke: build ## Inspect artifacts and clean-install on supported Python 
 		uv run python scripts/package_smoke.py dist --python $$python || exit 1; \
 	done
 
-demos-smoke: ## Run the inexpensive executable demos
-	uv run python demo/basic_pipeline.py
-	uv run python demo/parquet_pipeline.py
-	uv run python demo/reduction_pipeline.py
-	uv run python demo/generate_market_data.py smoke
+demos-smoke: ## Generate and benchmark the small market-data fixture
+	uv run python demo/benchmarks/generate_market_data.py smoke
+	uv run python demo/benchmarks/market_data.py smoke --repetitions 1
 
 SIZES ?= 5mb 50mb 500m
 REPETITIONS ?= 3

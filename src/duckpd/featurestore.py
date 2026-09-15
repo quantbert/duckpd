@@ -51,7 +51,6 @@ from duckpd.embeddings import (
 from duckpd.series import Series
 from duckpd.series_embeddings import (
     SeriesColumnSpec,
-    SeriesEmbeddingModelSpec,
     SeriesRepresentationSpec,
     _series_schema_error,
 )
@@ -151,12 +150,11 @@ class FeatureStore:
         self._dataset_entries: dict[str, dict[str, Any]] = {}
         self._feature_entries: dict[str, dict[str, Any]] = {}
         self._embedding_models: dict[str, EmbeddingModelSpec] = {}
-        self._series_embedding_models: dict[str, SeriesEmbeddingModelSpec] = {}
         self._series_representations: dict[str, SeriesRepresentationSpec] = {}
         catalog_started = perf_counter()
         self._load_catalog()
         catalog_elapsed = perf_counter() - catalog_started
-        if self._embedding_models or self._series_embedding_models or self._series_representations:
+        if self._embedding_models or self._series_representations:
             self._session._embedding_catalog_access_seconds += catalog_elapsed
         for model in self._embedding_models.values():
             self._session._register_catalog_embedding_model(
@@ -269,14 +267,12 @@ class FeatureStore:
             dataset_index,
             feature_index,
             embedding_models,
-            series_embedding_models,
             series_representations,
         ) = validate_catalog(catalog_data)
         self._catalog = catalog_data
         self._dataset_entries = dataset_index
         self._feature_entries = feature_index
         self._embedding_models = embedding_models
-        self._series_embedding_models = series_embedding_models
         self._series_representations = series_representations
 
     def catalog(self) -> dict[str, Any]:
@@ -301,15 +297,6 @@ class FeatureStore:
             return self._embedding_models[name]
         except KeyError:
             raise ValueError(f"Unknown catalog embedding model: {name!r}") from None
-
-    def series_embedding_model(self, name: Any) -> SeriesEmbeddingModelSpec:
-        """Return one immutable series-encoder specification from the catalog."""
-        if not isinstance(name, str) or not name:
-            raise ValueError("series embedding model name must be a non-empty string")
-        try:
-            return self._series_embedding_models[name]
-        except KeyError:
-            raise ValueError(f"Unknown catalog series embedding model: {name!r}") from None
 
     def series_representation(self, name: Any) -> SeriesRepresentationSpec:
         """Return one immutable resolved series representation from the catalog."""

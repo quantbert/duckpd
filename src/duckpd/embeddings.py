@@ -7,8 +7,8 @@ import importlib
 import json
 import os
 import shutil
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
@@ -27,6 +27,81 @@ NullTextPolicy = Literal["error", "empty"]
 EmbeddingBackend = Literal["fastembed", "transformers", "custom"]
 EmbeddingMetadataOrigin = Literal["generated", "sidecar", "table", "catalog"]
 
+SeriesChannelRole = Literal["target", "past_covariate", "known_future_covariate"]
+
+
+@dataclass(frozen=True)
+class SeriesEmbeddingInputSpec:
+    """Immutable ordered-window input contract for an embedding model."""
+
+    length: int
+    channels: tuple[str, ...]
+    roles: tuple[SeriesChannelRole, ...]
+    normalization: str
+
+    def __post_init__(self) -> None:
+        if type(self.length) is not int or self.length <= 0:
+            raise ValueError("length must be a positive integer")
+        if (
+            type(self.channels) is not tuple
+            or not self.channels
+            or any(type(channel) is not str or not channel for channel in self.channels)
+            or len(self.channels) != len(set(self.channels))
+        ):
+            raise ValueError("channels must be a non-empty tuple of unique names")
+        if (
+            type(self.roles) is not tuple
+            or len(self.roles) != len(self.channels)
+            or any(
+                role not in {"target", "past_covariate", "known_future_covariate"}
+                for role in self.roles
+            )
+        ):
+            raise ValueError("roles must align with channels and contain valid series roles")
+        if "target" not in self.roles:
+            raise ValueError("roles must contain at least one target channel")
+        if type(self.normalization) is not str or not self.normalization:
+            raise ValueError("normalization must be a non-empty string")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": "series",
+            "length": self.length,
+            "channels": list(self.channels),
+            "roles": list(self.roles),
+            "normalization": self.normalization,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> SeriesEmbeddingInputSpec:
+        data = dict(value)
+        fields = {"kind", "length", "channels", "roles", "normalization"}
+        unknown = sorted(set(data) - fields)
+        if unknown:
+            raise ValueError(f"series embedding input has unknown fields: {', '.join(unknown)}")
+        if data.pop("kind", None) != "series":
+            raise ValueError("embedding input kind must be 'series'")
+        for field_name in ("channels", "roles"):
+            raw = data.get(field_name)
+            if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+                raise TypeError(f"{field_name} must be an array")
+            data[field_name] = tuple(cast("Sequence[object]", raw))
+        return cls(**data)  # type: ignore[arg-type]
+
+
+def series_embedding_input(
+    *,
+    length: int,
+    channels: tuple[str, ...],
+    roles: tuple[SeriesChannelRole, ...],
+    normalization: str,
+) -> SeriesEmbeddingInputSpec:
+    """Create a typed ordered-window input contract for an embedding model."""
+    return SeriesEmbeddingInputSpec(length, channels, roles, normalization)
+
+
+EmbeddingInputSpec = SeriesEmbeddingInputSpec | None
+
 
 class _FastEmbedModel(Protocol):
     def embed(self, texts: Sequence[str]) -> Iterable[Iterable[float]]: ...
@@ -36,7 +111,7 @@ class _FastEmbedModel(Protocol):
 
 @dataclass(frozen=True)
 class EmbeddingModelSpec:
-    """Immutable text-embedding semantics carried by logical plans and columns."""
+    """Immutable model and input semantics carried by plans and vector columns."""
 
     model: str
     revision: str
@@ -46,6 +121,7 @@ class EmbeddingModelSpec:
     pooling: str = "model-default"
     document_prefix: str = ""
     query_prefix: str = ""
+    input: EmbeddingInputSpec = None
 
     def __post_init__(self) -> None:
         if type(self.model) is not str or not self.model:
@@ -66,6 +142,13 @@ class EmbeddingModelSpec:
             raise ValueError("pooling must be non-empty")
         if type(self.document_prefix) is not str or type(self.query_prefix) is not str:
             raise TypeError("document_prefix and query_prefix must be strings")
+        if self.input is not None:
+            if type(self.input) is not SeriesEmbeddingInputSpec:
+                raise TypeError("input must be a SeriesEmbeddingInputSpec or None")
+            if self.backend != "custom":
+                raise ValueError("series embedding inputs require backend='custom'")
+            if self.document_prefix or self.query_prefix:
+                raise ValueError("series embedding models must not define text prefixes")
 
     @property
     def fingerprint(self) -> str:
@@ -75,7 +158,45 @@ class EmbeddingModelSpec:
 
     def to_dict(self) -> dict[str, object]:
         """Return the canonical catalog and sidecar representation."""
-        return cast("dict[str, object]", asdict(self))
+        result: dict[str, object] = {
+            "model": self.model,
+            "revision": self.revision,
+            "dimension": self.dimension,
+            "backend": self.backend,
+            "normalize": self.normalize,
+            "pooling": self.pooling,
+            "document_prefix": self.document_prefix,
+            "query_prefix": self.query_prefix,
+        }
+        if self.input is not None:
+            result["input"] = self.input.to_dict()
+        return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> EmbeddingModelSpec:
+        data = dict(value)
+        fields = {
+            "model",
+            "revision",
+            "dimension",
+            "backend",
+            "normalize",
+            "pooling",
+            "document_prefix",
+            "query_prefix",
+            "input",
+        }
+        unknown = sorted(set(data) - fields)
+        if unknown:
+            raise ValueError(f"embedding model has unknown fields: {', '.join(unknown)}")
+        raw_input = data.get("input")
+        if raw_input is not None:
+            if not isinstance(raw_input, Mapping):
+                raise TypeError("embedding model input must be an object or null")
+            data["input"] = SeriesEmbeddingInputSpec.from_dict(
+                cast("Mapping[str, object]", raw_input)
+            )
+        return cls(**data)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -112,13 +233,18 @@ class PreparedModelInfo:
 
 
 @runtime_checkable
-class TextEmbeddingProvider(Protocol):
-    """Batch-oriented provider contract used by DuckPD's Arrow execution boundary."""
+class EmbeddingProvider(Protocol):
+    """Preparation contract shared by every embedding provider."""
 
     @property
     def specification(self) -> EmbeddingModelSpec: ...
 
     def prepare(self) -> PreparedModelInfo: ...
+
+
+@runtime_checkable
+class TextEmbeddingProvider(EmbeddingProvider, Protocol):
+    """Batch-oriented text provider used by DuckPD's Arrow execution boundary."""
 
     def embed_documents(self, texts: Sequence[str]) -> pa.Array[Any]: ...
 
@@ -610,17 +736,19 @@ def embedding_model(
     pooling: str = "model-default",
     document_prefix: str = "",
     query_prefix: str = "",
+    input: EmbeddingInputSpec = None,
 ) -> EmbeddingModelSpec:
     """Create a side-effect-free immutable embedding model specification."""
     return EmbeddingModelSpec(
-        model,
-        revision,
-        dimension,
-        backend,
-        normalize,
-        pooling,
-        document_prefix,
-        query_prefix,
+        model=model,
+        revision=revision,
+        dimension=dimension,
+        backend=backend,
+        normalize=normalize,
+        pooling=pooling,
+        document_prefix=document_prefix,
+        query_prefix=query_prefix,
+        input=input,
     )
 
 

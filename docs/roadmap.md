@@ -1022,7 +1022,7 @@ Exit gate:
 Goal: publish and retrieve deterministic series representations through the
 same catalog version 1 metadata path established for text embeddings.
 
-- [x] Add strict `series_embedding_models`, `series_representations`, and
+- [x] Add strict shared `embedding_models`, `series_representations`, and
       `series_representation` declarations to `catalog_version: 1`.
 - [x] Resolve declared `FLOAT[D]` types during planning and validate physical
       types, dimensions, nullability, and representation identity when binding
@@ -1040,22 +1040,20 @@ Exit gate:
       their representation and without model or network activity during
       planning.
 
-### Phase 19 — Priority 4: optional learned series encoders
+### Phase 19 — Priority 4: application-owned learned series encoders
 
-Goal: add learned inference only after the native representation and retrieval
+Goal: expose learned inference only after the native representation and retrieval
 contracts are stable and independently useful.
 
-- [x] Add a session-owned `SeriesEmbeddingProvider` lifecycle with explicit
-      preparation, bounded Arrow batches, masks, ordered target/past-only/
-      known-future covariate roles, context length, pooling, and output validation.
-- [x] Evaluate immutable Chronos-2 and TimesFM 3 adapters; qualify a built-in
-      checkpoint only if its license permits the intended use and a reviewed
-      retrieval benchmark demonstrates value over native representations for a
-      named task. Do not block native release on this result.
+- [x] Add ordered series input contracts to the session-owned
+      `EmbeddingProvider` lifecycle with explicit preparation, bounded Arrow
+      batches, masks, target/past-only/known-future roles, and output validation.
+- [x] Evaluate model-specific candidates against named retrieval tasks and native
+      baselines without blocking the native release.
 - [x] Record preparation, inference, memory, and cache metrics without hidden
       normalization, device fallback, or planning-time downloads.
-- [x] Add further adapters without changing the DataFrame, typed-query, or exact
-      search contracts.
+- [x] Keep model-specific adapters outside core unless a reviewed qualification
+      demonstrates material value and acceptable maintenance cost.
 
 Exit gate:
 
@@ -1076,8 +1074,8 @@ DuckPD-owned training producer, architecture port, artifact format, runtime
 fixture, and model-specific benchmark. Those costs were not justified by the
 evidence.
 
-DuckPD retains native time-series representations and the application-owned
-`SeriesEmbeddingProvider` interface. Future model-specific integrations require
+DuckPD retains native time-series representations and the application-owned,
+shared `EmbeddingProvider` lifecycle. Future model-specific integrations require
 a separate qualification with a named retrieval task, held-out entity and
 chronology evaluation, material baseline improvement, and acceptable runtime,
 memory, portability, licensing, and maintenance costs.
@@ -1119,9 +1117,9 @@ decomposed into independently testable milestones below.
 7. [x] Initial numeric/boolean null and dtype semantics plus basic `count`,
        `size`, `sum`, `mean`, `min`, and `max` reductions. Broader dtype policy
        and advanced reductions remain in Phases 2 and 3.
-   - [x] Add a runnable reduction showcase covering `numeric_only`, `skipna`,
-         `min_count`, hidden indexes, assigned expressions, and explicit
-         execution counts in `demo/reduction_pipeline.py`.
+   - [x] Cover `numeric_only`, null handling, assigned expressions, and explicit
+         execution boundaries in `demo/notebooks/quickstart.ipynb` and the
+         reduction contract tests.
 8. [x] Initial `GroupBy.agg` with pandas semantic rewrites (`as_index`, `sort`,
        `dropna`, named aggregation, and null/dtype handling).
 9. [x] Initial `DataFrame.merge` and `DataFrame.join` with pandas null-key

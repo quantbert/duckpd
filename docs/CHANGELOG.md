@@ -10,14 +10,11 @@ the [release policy](RELEASES.md).
 
 ### Added
 
-
-- Session-owned custom `SeriesEmbeddingProvider` registration and explicit
-  preparation now drive optional learned `embed_series()`, `search_series()`,
-  and eager series-query encoding. The Arrow boundary enforces ordered
-  target/past/known-future roles, fixed context, complete-row masks, bounded
-  calls, deterministic shared preprocessing, strict float32 output validation,
-  non-thread-safe serialization, lifecycle/resource metrics, and failure-safe
-  preparation.
+- A typed `SeriesEmbeddingInputSpec` lets the shared `embedding_model()` contract
+  describe ordered fixed-window inputs. Text and learned-series providers now
+  use the same `register_embedding_provider()`, `prepare_embedding_model()`, and
+  `inspect_prepared_embedding_models()` lifecycle while retaining
+  modality-specific bounded inference methods.
 
 
 - Typed `DataFrame.event_windows()` constructs lazy exact fixed-grid arrays for
@@ -122,10 +119,14 @@ the [release policy](RELEASES.md).
   extras, training producer, model-specific benchmarks, and public helpers.
   Neither provider demonstrated material retrieval value over native or compact
   deterministic baselines. Applications can still integrate learned encoders
-  through the model-agnostic `SeriesEmbeddingProvider` contract.
+  through the model-agnostic `EmbeddingModelSpec` and provider lifecycle.
 
 ### Changed
 
+- Reorganized `demo/` into canonical notebooks, market-data benchmark utilities,
+  and feature-store generation tools. Duplicate script versions and checked-in
+  generated outputs were removed; notebook artifacts now use ignored
+  `demo/.artifacts/`.
 - Fixed-duration rolling now rejects unordered timestamps, null timestamps,
   and duplicate timestamps within a group instead of returning
   engine-dependent peer results.

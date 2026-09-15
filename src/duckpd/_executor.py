@@ -513,10 +513,16 @@ def _embedding_operations(
                     "dimension": node.representation.dimension,
                     "normalization": node.representation.normalization,
                     "internal_normalization": (
-                        None if encoder is None else encoder.input_normalization
+                        None
+                        if encoder is None or encoder.input is None
+                        else encoder.input.normalization
                     ),
                     "pooling": None if encoder is None else encoder.pooling,
-                    "input_roles": None if encoder is None else list(encoder.input_roles),
+                    "input_roles": (
+                        None
+                        if encoder is None or encoder.input is None
+                        else list(encoder.input.roles)
+                    ),
                     "unit_norm": node.representation.unit_norm,
                     "batch_size": node.batch_size,
                     "null_policy": node.null_policy,
@@ -549,10 +555,16 @@ def _embedding_operations(
                     "dimension": node.representation.dimension,
                     "normalization": node.representation.normalization,
                     "internal_normalization": (
-                        None if encoder is None else encoder.input_normalization
+                        None
+                        if encoder is None or encoder.input is None
+                        else encoder.input.normalization
                     ),
                     "pooling": None if encoder is None else encoder.pooling,
-                    "input_roles": None if encoder is None else list(encoder.input_roles),
+                    "input_roles": (
+                        None
+                        if encoder is None or encoder.input is None
+                        else list(encoder.input.roles)
+                    ),
                     "unit_norm": node.representation.unit_norm,
                     "filter_placement": (
                         "before_search" if isinstance(node.input, FilterPlan) else "none"
@@ -1639,12 +1651,7 @@ class Executor:
         vector_operations = _vector_operations(plan)
         embedding_operations = _embedding_operations(
             plan,
-            frozenset(
-                {
-                    *self._session._prepared_embedding_models,
-                    *self._session._prepared_series_embedding_models,
-                }
-            ),
+            frozenset(self._session._prepared_embedding_models),
             {
                 fingerprint: policy.auto_prepare
                 for fingerprint, policy in self._session._catalog_embedding_policies.items()
@@ -1866,12 +1873,7 @@ class Executor:
             embedding_metrics=embedding_metrics or None,
             embedding_operations=_embedding_operations(
                 plan,
-                frozenset(
-                    {
-                        *self._session._prepared_embedding_models,
-                        *self._session._prepared_series_embedding_models,
-                    }
-                ),
+                frozenset(self._session._prepared_embedding_models),
                 {
                     fingerprint: policy.auto_prepare
                     for fingerprint, policy in self._session._catalog_embedding_policies.items()

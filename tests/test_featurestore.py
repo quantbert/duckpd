@@ -156,7 +156,6 @@ def _add_series_catalog(root: Path) -> SeriesRepresentationSpec:
 
     catalog_path = root / "catalog.json"
     catalog = json.loads(catalog_path.read_text())
-    catalog["series_embedding_models"] = {}
     catalog["series_representations"] = {
         "return-shape-3": _catalog_series_representation(representation)
     }
@@ -636,7 +635,7 @@ def test_daily_partition_and_history_lookback_validation() -> None:
             }
         ],
     }
-    datasets, _, _, _, _ = validate_catalog(valid)
+    datasets, _, _, _ = validate_catalog(valid)
     assert datasets["prices"]["_history_lookback"] == timedelta(days=7)
 
     for field, value, message in (
@@ -2024,7 +2023,7 @@ def test_catalog_embedding_declarations_reject_unsafe_variants(
     catalog = json.loads(catalog_path.read_text())
     specification = catalog["embedding_models"]["catalog-model"]
     if change == "unsupported_backend":
-        specification["backend"] = "custom"
+        specification["backend"] = "unknown"
     elif change == "mutable_revision":
         specification["revision"] = "main"
     elif change == "fastembed_normalization":
@@ -2213,18 +2212,19 @@ def test_catalog_series_schema_registries_and_references_are_strict(
     native = _add_series_catalog(feature_store_fixture)
     catalog_path = feature_store_fixture / "catalog.json"
     catalog = json.loads(catalog_path.read_text())
-    model = duckpd.series_embedding_model(
+    model = duckpd.embedding_model(
         "test/series-encoder",
         revision="0123456789abcdef0123456789abcdef01234567",
-        artifact_sha256="a" * 64,
-        backend="onnx-runtime",
+        backend="custom",
         dimension=3,
-        input_length=3,
-        input_channels=("return",),
-        input_roles=("target",),
-        input_normalization="none",
+        normalize=False,
         pooling="last",
-        adapter_revision="adapter-v1",
+        input=duckpd.series_embedding_input(
+            length=3,
+            channels=("return",),
+            roles=("target",),
+            normalization="none",
+        ),
     )
     learned = duckpd.series_representation(
         window=3,
@@ -2233,7 +2233,7 @@ def test_catalog_series_schema_registries_and_references_are_strict(
         data_contract="simple-return/v1",
         encoder=model,
     )
-    catalog["series_embedding_models"]["learned"] = model.to_dict()
+    catalog.setdefault("embedding_models", {})["learned"] = model.to_dict()
     catalog["series_representations"]["learned"] = _catalog_series_representation(
         learned,
         encoder="learned",
@@ -2241,7 +2241,7 @@ def test_catalog_series_schema_registries_and_references_are_strict(
     catalog_path.write_text(json.dumps(catalog))
 
     store = FeatureStore(feature_store_fixture)
-    assert store.series_embedding_model("learned") == model
+    assert store.embedding_model("learned") == model
     assert store.series_representation("return-shape-3") == native
     assert store.series_representation("learned") == learned
     exposed = store.catalog()
@@ -2255,7 +2255,7 @@ def test_catalog_series_schema_registries_and_references_are_strict(
         FeatureStore(feature_store_fixture)
 
     invalid = json.loads(json.dumps(catalog))
-    invalid["series_embedding_models"]["learned"]["extra"] = True
+    invalid["embedding_models"]["learned"]["extra"] = True
     catalog_path.write_text(json.dumps(invalid))
     with pytest.raises(ValueError, match="unknown fields"):
         FeatureStore(feature_store_fixture)
@@ -2267,9 +2267,9 @@ def test_catalog_series_schema_registries_and_references_are_strict(
         FeatureStore(feature_store_fixture)
 
     invalid = json.loads(json.dumps(catalog))
-    invalid["series_embedding_models"]["learned"]["revision"] = "main"
+    invalid["embedding_models"]["learned"]["revision"] = "main"
     catalog_path.write_text(json.dumps(invalid))
-    with pytest.raises(ValueError, match="immutable model revision"):
+    with pytest.raises(ValueError, match="immutable commit digest"):
         FeatureStore(feature_store_fixture)
 
     invalid = json.loads(json.dumps(catalog))
@@ -2354,18 +2354,19 @@ def test_catalog_learned_series_declarations_never_prepare_during_planning(
     _add_series_catalog(feature_store_fixture)
     catalog_path = feature_store_fixture / "catalog.json"
     catalog = json.loads(catalog_path.read_text())
-    model = duckpd.series_embedding_model(
+    model = duckpd.embedding_model(
         "test/series-encoder",
         revision="0123456789abcdef0123456789abcdef01234567",
-        artifact_sha256="b" * 64,
-        backend="onnx-runtime",
+        backend="custom",
         dimension=3,
-        input_length=3,
-        input_channels=("return",),
-        input_roles=("target",),
-        input_normalization="none",
+        normalize=False,
         pooling="last",
-        adapter_revision="adapter-v1",
+        input=duckpd.series_embedding_input(
+            length=3,
+            channels=("return",),
+            roles=("target",),
+            normalization="none",
+        ),
     )
     learned = duckpd.series_representation(
         window=3,
@@ -2374,7 +2375,7 @@ def test_catalog_learned_series_declarations_never_prepare_during_planning(
         data_contract="simple-return/v1",
         encoder=model,
     )
-    catalog["series_embedding_models"]["learned"] = model.to_dict()
+    catalog.setdefault("embedding_models", {})["learned"] = model.to_dict()
     catalog["series_representations"]["learned"] = _catalog_series_representation(
         learned,
         encoder="learned",
@@ -2390,7 +2391,7 @@ def test_catalog_learned_series_declarations_never_prepare_during_planning(
         end="2024-01-02T08:05:00Z",
         alignment="exact",
     )
-    assert store.series_embedding_model("learned") == model
+    assert store.embedding_model("learned") == model
     assert store.series_representation("learned") == learned
     assert session.execution_count == 0
     assert session.inspect_prepared_embedding_models() == ()
@@ -2404,7 +2405,6 @@ def test_catalog_learned_series_declarations_never_prepare_during_planning(
         searched.collect()
     assert session.execution_count == 0
     assert session.inspect_prepared_embedding_models() == ()
-    assert session.inspect_prepared_series_embedding_models() == ()
 
 
 def test_catalog_series_timeseries_dimension_is_checked_when_bound(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckpd
-from demo.market_data_demo import benchmark_file, human_size, parse_args
+from demo.benchmarks.market_data import benchmark_file, human_size, parse_args
 
 
 def test_human_size_formatting() -> None:

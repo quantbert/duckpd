@@ -8,10 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from duckpd.embeddings import EmbeddingModelSpec
-from duckpd.series_embeddings import (
-    SeriesEmbeddingModelSpec,
-    SeriesRepresentationSpec,
-)
+from duckpd.series_embeddings import SeriesRepresentationSpec
 
 _EMBEDDING_MODEL_FIELDS = frozenset(
     {
@@ -23,6 +20,7 @@ _EMBEDDING_MODEL_FIELDS = frozenset(
         "pooling",
         "document_prefix",
         "query_prefix",
+        "input",
     }
 )
 
@@ -34,7 +32,6 @@ _CATALOG_FIELDS = frozenset(
         "datasets",
         "features",
         "embedding_models",
-        "series_embedding_models",
         "series_representations",
     }
 )
@@ -101,7 +98,7 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
                 f"Embedding model {raw_name!r} has unknown fields: {', '.join(unknown)}"
             )
         backend = specification_data.get("backend", "fastembed")
-        if backend not in {"fastembed", "transformers"}:
+        if backend not in {"fastembed", "transformers", "custom"}:
             raise ValueError(f"Embedding model {raw_name!r} has unsupported backend: {backend!r}")
         revision = specification_data.get("revision")
         if not isinstance(revision, str) or re.fullmatch(r"[0-9a-fA-F]{40,64}", revision) is None:
@@ -109,7 +106,7 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
                 f"Embedding model {raw_name!r} revision must be an immutable commit digest"
             )
         try:
-            specification = EmbeddingModelSpec(**specification_data)
+            specification = EmbeddingModelSpec.from_dict(specification_data)
         except (TypeError, ValueError) as error:
             raise ValueError(f"Invalid embedding model {raw_name!r}: {error}") from None
         if backend == "fastembed" and (
@@ -126,36 +123,9 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
     return models
 
 
-def _validate_series_embedding_models(
-    value: Any,
-) -> dict[str, SeriesEmbeddingModelSpec]:
-    if value is None:
-        return {}
-    if not isinstance(value, Mapping):
-        raise ValueError("Catalog series_embedding_models must be a mapping")
-    models: dict[str, SeriesEmbeddingModelSpec] = {}
-    for raw_name, raw_specification in cast("Mapping[object, object]", value).items():
-        if not isinstance(raw_name, str) or not raw_name:
-            raise ValueError("Catalog series embedding model keys must be non-empty strings")
-        if not isinstance(raw_specification, Mapping):
-            raise ValueError(f"Series embedding model {raw_name!r} must be a mapping")
-        data = dict(cast("Mapping[str, object]", raw_specification))
-        raw_channels = data.get("input_channels")
-        if isinstance(raw_channels, Sequence) and not isinstance(raw_channels, (str, bytes)):
-            data["input_channels"] = tuple(cast("Sequence[object]", raw_channels))
-        raw_roles = data.get("input_roles")
-        if isinstance(raw_roles, Sequence) and not isinstance(raw_roles, (str, bytes)):
-            data["input_roles"] = tuple(cast("Sequence[object]", raw_roles))
-        try:
-            models[raw_name] = SeriesEmbeddingModelSpec.from_dict(data)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"Invalid series embedding model {raw_name!r}: {error}") from None
-    return models
-
-
 def _validate_series_representations(
     value: Any,
-    models: Mapping[str, SeriesEmbeddingModelSpec],
+    models: Mapping[str, EmbeddingModelSpec],
 ) -> dict[str, SeriesRepresentationSpec]:
     if value is None:
         return {}
@@ -185,7 +155,7 @@ def _validate_series_representations(
             raise ValueError(f"Series representation {raw_name!r} channels must be an array")
         data["channels"] = tuple(cast("Sequence[object]", raw_channels))
         raw_encoder = data.pop("encoder", None)
-        encoder: SeriesEmbeddingModelSpec | None = None
+        encoder: EmbeddingModelSpec | None = None
         if raw_encoder is not None:
             if not isinstance(raw_encoder, str) or not raw_encoder:
                 raise ValueError(
@@ -197,7 +167,7 @@ def _validate_series_representations(
             except KeyError:
                 raise ValueError(
                     f"Series representation {raw_name!r} references unknown "
-                    f"series embedding model {raw_encoder!r}"
+                    f"embedding model {raw_encoder!r}"
                 ) from None
         try:
             representations[raw_name] = SeriesRepresentationSpec(
@@ -292,7 +262,6 @@ def validate_catalog(
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
     dict[str, EmbeddingModelSpec],
-    dict[str, SeriesEmbeddingModelSpec],
     dict[str, SeriesRepresentationSpec],
 ]:
     """Validate the complete catalog version 1 schema."""
@@ -304,12 +273,9 @@ def validate_catalog(
         raise ValueError(f"Catalog has unknown fields: {', '.join(unknown_catalog_fields)}")
 
     embedding_models = _validate_embedding_models(catalog.get("embedding_models"))
-    series_embedding_models = _validate_series_embedding_models(
-        catalog.get("series_embedding_models")
-    )
     series_representations = _validate_series_representations(
         catalog.get("series_representations"),
-        series_embedding_models,
+        embedding_models,
     )
     dataset_entries_raw = catalog.get("datasets")
     if not isinstance(dataset_entries_raw, list) or not dataset_entries_raw:
@@ -492,7 +458,6 @@ def validate_catalog(
         dataset_index,
         feature_index,
         embedding_models,
-        series_embedding_models,
         series_representations,
     )
 

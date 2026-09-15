@@ -280,7 +280,7 @@ return_shape = pd.series_representation(
 )
 ```
 
-Proposed constructor:
+Public constructor:
 
 ```text
 series_representation(
@@ -293,7 +293,7 @@ series_representation(
     normalization: Literal["none", "center", "zscore"] = "none",
     unit_norm: bool = False,
     zero_scale: Literal["error", "null"] = "error",
-    encoder: SeriesEmbeddingModelSpec | None = None,
+    encoder: EmbeddingModelSpec | None = None,
 ) -> SeriesRepresentationSpec
 ```
 
@@ -363,7 +363,7 @@ valid = embedded[embedded["return_shape"].notna()]
 valid.write_parquet("return-patterns.parquet")
 ```
 
-Proposed signature:
+Public signature:
 
 ```text
 DataFrame.embed_series(
@@ -399,23 +399,23 @@ not accept arbitrary Python callbacks or row-dependent encoder configuration.
 
 ### Model specification and preparation
 
-A learned encoder is a component of a representation, not the complete space:
+A learned encoder is a component of a representation, not the complete space.
+It uses the same `EmbeddingModelSpec` and session lifecycle as text:
 
 ```python
-# Illustrative custom checkpoint. Replace the revision and digest placeholders
-# with values from a qualified, immutable checkpoint manifest.
-encoder = pd.series_embedding_model(
+encoder = pd.embedding_model(
     "research/return-window-encoder",
     revision="immutable-checkpoint-revision",
-    artifact_sha256="<64-lowercase-hex-digest>",
     backend="custom",
     dimension=128,
-    input_length=60,
-    input_channels=("simple_return",),
-    input_roles=("target",),
-    input_normalization="none",
+    normalize=True,
     pooling="mean-valid-v1",
-    adapter_revision="return-encoder-adapter-v1",
+    input=pd.series_embedding_input(
+        length=60,
+        channels=("simple_return",),
+        roles=("target",),
+        normalization="none",
+    ),
 )
 learned_returns = pd.series_representation(
     window=60,
@@ -430,28 +430,20 @@ learned_returns = pd.series_representation(
 )
 ```
 
-`SeriesEmbeddingModelSpec` fields are exactly those in the example. The
-constructor is `pd.series_embedding_model(model, *, ...)`; all fields shown are
-required. `dimension` and `input_length` are positive integers,
-`input_channels` is a nonempty tuple of unique names, `input_roles` has one
-`target`, `past_covariate`, or `known_future_covariate` entry per channel, and
-`artifact_sha256` is a validated SHA-256 digest of a canonical artifact
-manifest. The manifest hashes
-all numerical assets and configuration required by the adapter, not merely one
-arbitrarily selected weights file. The adapter revision identifies its inference
-contract. Runtime package versions and resolved asset provenance are also
-reported during preparation.
-
-Only `backend="custom"` supports explicitly registered, application-owned
-providers. A backend string never authorizes DuckPD to import arbitrary code,
-install dependencies, or download a model from a catalog or repository.
+The common model fields retain their text semantics: immutable model revision,
+output dimension, backend, output normalization, and pooling participate in the
+model fingerprint. The optional `SeriesEmbeddingInputSpec` adds fixed input
+length, unique ordered channels, one target/past-only/known-future role per
+channel, and provider-owned input normalization. Series inputs require
+`backend="custom"`; a backend string never authorizes DuckPD to import arbitrary
+code, install dependencies, or download a model.
 
 Model preparation is explicit and eager:
 
 ```python
-# provider is an application-created object implementing the protocol below.
-session.register_series_embedding_provider(encoder, provider)
-info = session.prepare_series_embedding_model(encoder)
+# provider is an application-created SeriesEmbeddingProvider.
+session.register_embedding_provider(encoder, provider)
+info = session.prepare_embedding_model(encoder)
 
 learned = windows.embed_series(
     columns={"simple_return": "return_window"},
@@ -461,38 +453,29 @@ learned = windows.embed_series(
 )
 ```
 
-Preparation verifies the actual resolved revision, artifact manifest digest,
-input contract, pooling implementation, and output dimension. It must not merely
-hash a declared revision while loading the provider's default checkpoint.
-Unprepared or mismatched encoders fail before data scanning or remote feature
-partition acquisition attributable to the execution.
-
-`SeriesEmbeddingModelSpec` also exposes canonical `to_dict()` / `from_dict()` and
-a computed `fingerprint`. `PreparedSeriesModelInfo` is immutable and records
-`model_fingerprint`, `resolved_revision`, `artifact_sha256`, `backend`,
-`adapter_revision`, `input_length`, `input_channels`, `input_roles`,
-`input_normalization`, `pooling`, `dimension`, `cache_path`,
-`execution_providers`, `runtime_versions`, and `preparation_seconds`.
-Preparation validates all declared fields against the
-loaded adapter rather than trusting a provider's reported dimension alone.
+`EmbeddingModelSpec` exposes canonical `to_dict()` / `from_dict()` and a computed
+`fingerprint`. `PreparedModelInfo` is the common preparation result and records
+the model fingerprint, backend, optional verified cache path and artifact digest,
+execution providers, and preparation time. The registered provider's
+specification must equal the requested model, and preparation must return the
+same model fingerprint. Unprepared or mismatched encoders fail before data
+scanning attributable to execution.
 
 No implicit truncation, interpolation, padding, or context-length conversion is
-allowed. The initial adapter contract requires `representation.window ==
-encoder.input_length` and identical declared channels. Supporting a 60-point
-query with a checkpoint requiring a different context length needs an explicitly
-versioned adapter/specification extension, including mask semantics. It is not a
-silent convenience behavior.
+allowed. The representation window and channels must equal the typed model input
+contract. Supporting a different context length needs an explicitly versioned
+model/input contract, including mask semantics; it is not silent convenience.
 
-`input_normalization` documents normalization performed inside the encoder in
-addition to representation preprocessing. Supported values are adapter-defined
-and validated, not free-form options that change inference without changing the
-fingerprint. A model with internal normalization is not assumed to preserve
-absolute volatility simply because the outer recipe uses `"none"`.
+The input contract's `normalization` documents preprocessing performed inside
+the provider in addition to representation preprocessing. Values are
+provider-defined and fingerprinted. A model with internal normalization is not
+assumed to preserve absolute volatility simply because the outer recipe uses
+`"none"`.
 
 Forecasting foundation models distinguish target variates, past-only
-covariates, known-future covariates, and sometimes static covariates. The first
-learned contract records ordered numeric roles through parallel
-`input_channels` and `input_roles` tuples. Static/categorical channels,
+covariates, known-future covariates, and sometimes static covariates. The series
+input contract records ordered numeric roles through parallel `channels` and
+`roles` tuples. Static/categorical channels,
 future-horizon inputs, availability policies beyond `data_contract`, and
 variable-length masks require a later versioned specification. Corpus and query
 representations enforce the same current schema.
@@ -569,12 +552,12 @@ corpus recipe, except that invalid/null output is an error rather than a missing
 corpus row. Learned representations require the exact explicitly prepared
 session provider.
 
-As an additive compatibility improvement, extend `Series.vector.distance()` and
-`DataFrame.vector.search()` to accept both this new type and the existing text
-`EmbeddedQuery`. A typed query requires matching column metadata and dimension.
-Existing plain numeric sequences keep working as the intentionally unverified
-low-level path. Passing `.values` strips the semantic compatibility guarantee.
-The existing text fingerprint algorithm and query type do not change.
+`Series.vector.distance()` and `DataFrame.vector.search()` accept both
+`EmbeddedSeriesQuery` and the existing text `EmbeddedQuery`. A typed query
+requires matching column metadata and dimension. Plain numeric sequences remain
+the intentionally unverified low-level path. Passing `.values` strips the
+semantic compatibility guarantee. The existing text fingerprint algorithm and
+query type do not change.
 
 Null corpus vectors are not silently skipped by search. Users filter them before
 ranking; otherwise the existing invalid-vector failure policy applies. Ties use
@@ -978,14 +961,14 @@ without semantic checks. Its use should be visible in explain output as
 Parquet sidecar manifest versions are independent of the feature-store
 `catalog_version`, which remains 1. Keep reading the existing
 `<path>.duckpd-embeddings.json` sidecar manifest version 1 format for legacy
-text-only artifacts. New writes that contain only text metadata may retain that
-format. Add a separate, versioned `<path>.duckpd-series.json` companion for
-series window and representation metadata. A file containing both modalities
+text-only artifacts. Writes containing only text metadata may retain that format.
+Series window and representation metadata use the separate, versioned
+`<path>.duckpd-series.json` companion. A file containing both modalities
 has both companions and uses the generation-bound envelopes below; the
 serialized legacy `EmbeddingModelSpec` objects and their fingerprints remain
 unchanged.
 
-The new series sidecar envelope contains:
+The series sidecar envelope contains:
 
 ```text
 version: 1
@@ -1064,10 +1047,9 @@ DuckPD has one catalog schema, identified by `catalog_version: 1`. Text
 embedding and series-representation declarations extend that schema in place;
 there are no catalog versions 2 or 3.
 
-The series extension defines `series_embedding_models` and
-`series_representations` registries plus `series_representation` references on
-feature or table-column declarations. Existing text `embedding_models` and
-`embedding_model` fields remain unchanged. The parser, generator, examples, and
+Series representations share the existing `embedding_models` registry and add a
+`series_representations` registry plus `series_representation` references on
+feature or table-column declarations. The parser, generator, examples, and
 public API use the complete catalog version 1 schema atomically.
 
 A deterministic example is:
@@ -1075,7 +1057,6 @@ A deterministic example is:
 ```json
 {
   "catalog_version": 1,
-  "series_embedding_models": {},
   "series_representations": {
     "return_shape_60_1m": {
       "version": 1,
@@ -1152,10 +1133,10 @@ UTC-day contract: `year=YYYY/month=MM/day=DD/part.parquet`. The
 each complete representation at its availability and preserves the required
 data history. They are not made true by the JSON field.
 
-A learned recipe sets `encoder` to a registry key in `series_embedding_models`.
-Canonical `SeriesRepresentationSpec.to_dict()` instead embeds the resolved model
-object; the catalog loader resolves aliases before constructing that canonical
-object or its fingerprint. Registry definitions match the model fields above.
+A learned recipe sets `encoder` to a registry key in `embedding_models`.
+Canonical `SeriesRepresentationSpec.to_dict()` instead embeds the resolved
+common model object; the catalog loader resolves aliases before constructing
+that canonical object or its fingerprint.
 Unknown fields inside either specification are rejected. Human descriptions and
 producer audit metadata belong in separately defined metadata fields, not
 unrecognized encoding options.
@@ -1208,9 +1189,9 @@ matches = valid.vector.search_series(
 )
 ```
 
-`FeatureStore.series_representation(name)` is a metadata-only lookup.
-`FeatureStore.series_embedding_model(name)` exposes the exact declared learned
-encoder identity without preparing or executing it.
+`FeatureStore.series_representation(name)` and
+`FeatureStore.embedding_model(name)` are metadata-only lookups. The latter
+returns either text or learned-series model identity without preparing it.
 
 ### Model acquisition policy
 
@@ -1263,17 +1244,17 @@ as part of a search call. Those remain explicit producer workflows.
 
 ### Arrow provider interface
 
-The implemented core protocol uses existing optional-provider conventions:
+The series execution protocol extends the common preparation contract:
 
 ```python
-class SeriesEmbeddingProvider(Protocol):
+class SeriesEmbeddingProvider(EmbeddingProvider, Protocol):
     @property
-    def specification(self) -> SeriesEmbeddingModelSpec: ...
+    def specification(self) -> EmbeddingModelSpec: ...
 
     @property
     def thread_safe(self) -> bool: ...
 
-    def prepare(self) -> PreparedSeriesModelInfo: ...
+    def prepare(self) -> PreparedModelInfo: ...
 
     def embed_windows(
         self,
@@ -1299,16 +1280,14 @@ belongs to the provider, not public SQL or a serialized opaque callable. Empty
 valid batches do not call inference. Custom providers are registered objects in
 the session, not executable configuration stored inside a logical plan.
 
-`thread_safe` is an immutable capability for the lifetime of a registration.
-DuckPD serializes calls when it is false. `prepare()` is the provider's attestation
-boundary for custom backends: its result must report the resolved revision,
-canonical artifact-manifest digest, adapter revision, input contract, pooling,
-dimension, runtime versions, and execution providers. Core compares every
-reported semantic field with the registered specification and rejects omissions
-or mismatches. Core does not pretend it can independently discover arbitrary
-custom model assets; a provider that cannot produce and verify the declared
-manifest digest cannot be prepared. Built-in providers additionally perform
-backend-specific independent artifact inspection before returning this report.
+`thread_safe` is immutable for the lifetime of a registration. DuckPD serializes
+calls when it is false. `prepare()` uses the shared provider lifecycle and
+returns `PreparedModelInfo`. Core verifies its model fingerprint and records its
+backend, optional cache path and artifact digest, execution providers, and
+preparation time. Core does not pretend it can independently discover arbitrary
+custom model assets; applications own provider-specific artifact verification.
+Any future first-party provider must additionally perform backend-specific
+independent artifact inspection.
 
 A qualified provider must use evaluation/inference mode, no stochastic dropout,
 no training-state updates, and no statistics shared between corpus rows. Batch
@@ -1336,7 +1315,7 @@ promise that all existing source constructors perform zero metadata I/O.
 
 Constructing `embed_series()` or `search_series()` must not perform inference,
 model downloads, dependency installation, corpus scans, or preparation. Explicit
-`prepare_series_embedding_model()` and `embed_series_query()` are eager by design.
+`prepare_embedding_model()` and `embed_series_query()` are eager by design.
 
 ### Resource behavior
 
@@ -1371,9 +1350,9 @@ explicit integrity pass or requested count must be separately visible.
 
 ## Logical plans, compilation, and optimizer rules
 
-### New typed objects
+### Typed objects
 
-Use the following initial internal boundaries:
+The implementation uses these internal boundaries:
 
 | Object | Responsibility |
 | --- | --- |
@@ -1394,8 +1373,8 @@ model instances, credentials, or SQL fragments as their semantic definition.
 For a native recipe the compiler lowers it to projections and list/array
 expressions. For a learned recipe it lowers to the bounded Arrow provider
 boundary. Both produce the same ordinary fixed-size vector column contract.
-A common numerical distance compiler can serve existing vector search and the
-new series search; do not duplicate the metric definitions.
+A common numerical distance compiler serves existing vector search and series
+search; metric definitions are not duplicated.
 
 ### Native lowering requirements
 
@@ -1478,9 +1457,9 @@ schema][src-logical], and [metadata transition helpers][src-metadata].
 
 ### Source/module implementation map
 
-| File | Planned changes |
+| File | Implemented responsibility |
 | --- | --- |
-| `src/duckpd/series_embeddings.py` (new) | Specs, canonicalization, typed queries, provider protocol, validation, public constructors |
+| `src/duckpd/series_embeddings.py` | Series specs, canonicalization, typed queries, provider protocol, validation, public constructors |
 | `src/duckpd/event_windows.py` | Event-window API validation and plan construction; no model dependency |
 | `src/duckpd/window.py` | Fixed-count `to_array()` for selected/grouped receivers; preserve grouped assignment alignment |
 | `src/duckpd/_logical.py` | Array-window expression, four new plans, additive column metadata, expression/plan unions |
@@ -1488,15 +1467,14 @@ schema][src-logical], and [metadata transition helpers][src-metadata].
 | `src/duckpd/_compiler.py` | Native array/normalization lowering, event grid, provider call, shared search lowering |
 | `src/duckpd/_executor.py` | Preflight, new plan traversal/validation, progress and resource metrics, failure cleanup |
 | `src/duckpd/_optimizer.py` | Binary-plan traversal, liveness/expression mapping, conservative barriers and explain serialization |
-| `src/duckpd/session.py` | Provider registration/preparation, immutable query storage, bounded cache, sidecar/table metadata lifecycle |
+| `src/duckpd/session.py` | Shared provider registration/preparation, immutable query storage, bounded cache, sidecar/table metadata lifecycle |
 | `src/duckpd/frame.py` | `embed_series()`, `event_windows()`, metadata assertion, alias/sink integration |
 | `src/duckpd/series.py` | Typed-query distance integration points and representation propagation through Series projections |
 | `src/duckpd/vector.py` | `search_series()`, typed numeric/text query compatibility validation, existing exact/ANN rules retained |
 | `src/duckpd/featurestore.py` | Registry lookup, typed declared columns, alias/exact/ASOF metadata propagation |
-| `src/duckpd/_feature_catalog.py` | Strict catalog-version-1 series registry validation |
-| `src/duckpd/__init__.py` | Export new public specifications, constructors, and typed query |
-| Optional provider module/package | Reviewed adapter and dependency isolation; no import-time model/runtime loading in core |
-| `tests/` and `docs/COMPATIBILITY.md` | New contract tests and truthful support matrix; preserve existing text/vector tests |
+| `src/duckpd/_feature_catalog.py` | Strict shared model and series-representation registry validation |
+| `src/duckpd/__init__.py` | Export common model/input specifications, constructors, and typed queries |
+| `tests/` and `docs/COMPATIBILITY.md` | Contract tests and support matrix; existing text/vector behavior remains covered |
 
 This map describes responsibilities rather than prescribing a large up-front
 refactor. Reuse small existing helpers where their semantics actually match.
@@ -1585,12 +1563,12 @@ fixed-window contract and an incomplete Python support matrix; TS2Vec required
 DuckPD to maintain a training producer, model architecture, artifact format, and
 PyTorch runtime.
 
-The stable product boundary is model-agnostic. Applications may register a
-`SeriesEmbeddingProvider`; DuckPD validates its immutable identity, preparation
-attestation, bounded Arrow input, output shape and values, metadata propagation,
-and query/corpus compatibility. The application owns model selection, artifact
-acquisition, dependencies, preprocessing implementation, and model-specific
-qualification.
+The stable product boundary is model-agnostic. Applications register every
+provider through the shared `EmbeddingProvider` lifecycle; a
+`SeriesEmbeddingProvider` adds bounded ordered-window inference. DuckPD validates
+immutable model identity, output shape and values, metadata propagation, and
+query/corpus compatibility. The application owns model selection, artifacts,
+dependencies, preprocessing implementation, and model-specific qualification.
 
 A future first-party adapter must publish a qualification record containing:
 
@@ -1756,9 +1734,9 @@ the core news-plus-market-reaction exploration workflow without learned models.
 
 ### Phase 3: feature-store catalog declarations
 
-Implement registries and typed metadata propagation in catalog version 1 after
-the companion text registry contract is resolved. Support deterministic catalogs
-first; add qualified portable model backends under explicit preparation policy.
+Implemented as roadmap Phase 18: catalog version 1 resolves native and
+application-owned learned representation declarations without preparing or
+executing providers. Native catalog workflows remain model- and network-free.
 
 **Exit gate:** catalog-version-1 fixtures, alias/ASOF metadata preservation,
 physical validation, offline behavior, and model trust-policy tests pass. No

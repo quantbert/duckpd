@@ -166,10 +166,10 @@ Register that interpreter as a Jupyter kernel:
   --display-name "DuckPD ROCm 7.2.4"
 ```
 
-In VS Code, open `DuckPD_Vector_Search.ipynb`, choose **Select Kernel** in the
-upper-right, and select **DuckPD ROCm 7.2.4**. Restart the notebook kernel after
-changing it. The repository's normal `.venv` does not contain the
-accelerator-specific PyTorch and Transformers packages.
+In VS Code, open [`../notebooks/vector_search.ipynb`](../notebooks/vector_search.ipynb),
+choose **Select Kernel** in the upper-right, and select **DuckPD ROCm 7.2.4**.
+Restart the notebook kernel after changing it. The repository's normal `.venv`
+does not contain accelerator-specific PyTorch and Transformers packages.
 
 Verify that PyTorch sees the GPU before generation:
 
@@ -246,17 +246,6 @@ uv run --env-file .env python hfupload.py \
 The uploader supports Hugging Face buckets and dataset repositories. The uploader
 rebuilds the catalog and the generated dataset card before it transfers files.
 
-## Library Demo
-
-Run the remote cache and query example from this directory:
-
-```bash
-uv run --env-file .env python demo.py
-```
-
-The example reads `HF_DESTINATION` and `HF_TOKEN` from the environment. It stores
-downloaded fragments in `demo/feature_cache`. The launch directory does not change
-the cache location.
 
 ## Testing
 

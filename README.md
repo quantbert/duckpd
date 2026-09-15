@@ -200,7 +200,7 @@ training_frame.write_parquet("training/features.parquet")
 ```
 
 See the
-[interactive walkthrough](demo/featurestore_demo/DuckPD_FeatureStore_Walkthrough.ipynb),
+[interactive walkthrough](demo/notebooks/feature_store.ipynb),
 [compatibility contract](docs/COMPATIBILITY.md), and
 [feature-store architecture](docs/design/featurestore-architecture.md).
 Benchmark cold remote fetching against warm local-cache execution with
@@ -350,20 +350,18 @@ For in-depth architectural specifications and design decisions:
 
 Check out the runnable tutorials and interactive notebooks in [demo/](demo/README.md):
 
-* 📘 [`demo/DuckPD_Quickstart.ipynb`](demo/DuckPD_Quickstart.ipynb) — 5-minute interactive introduction.
-* 📈 [`demo/DuckPD_Features_Walkthrough.ipynb`](demo/DuckPD_Features_Walkthrough.ipynb) — Deep-dive across 3.9M rows of AlphaDojo stock news data.
-* 🔬 [`demo/DuckPD_Order_Index_Window_Workflows.ipynb`](demo/DuckPD_Order_Index_Window_Workflows.ipynb) — Differential walkthrough of rolling windows, `.loc`/`.iloc` mechanics, and persistence.
-* ⏱️ [`demo/DuckPD_Temporal_and_Categorical_Semantics.ipynb`](demo/DuckPD_Temporal_and_Categorical_Semantics.ipynb) — Fixed-duration rolling windows, `.dt` rounding & timezone conversions, and categorical semantics with `groupby(observed=False)`.
-* [`demo/DuckPD_Time_Series_Embeddings.ipynb`](demo/DuckPD_Time_Series_Embeddings.ipynb) — Native fixed-count series representations and exact reaction retrieval.
-* [`demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb`](demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb) — Exact event grids, availability cutoffs, revision-safe keys, and full-population late fusion.
+* [`demo/notebooks/quickstart.ipynb`](demo/notebooks/quickstart.ipynb) — 5-minute interactive introduction.
+* [`demo/notebooks/feature_walkthrough.ipynb`](demo/notebooks/feature_walkthrough.ipynb) — Deep dive across the AlphaDojo stock-news dataset.
+* [`demo/notebooks/time_series_embeddings.ipynb`](demo/notebooks/time_series_embeddings.ipynb) — Native fixed-count series representations and exact retrieval.
+* [`demo/notebooks/event_windows_exact_fusion.ipynb`](demo/notebooks/event_windows_exact_fusion.ipynb) — Event grids, availability cutoffs, and exact late fusion.
+* [`demo/notebooks/vector_search.ipynb`](demo/notebooks/vector_search.ipynb) — GPU text embeddings and semantic search.
+* [`demo/notebooks/feature_store.ipynb`](demo/notebooks/feature_store.ipynb) — Catalog, cache, alignment, and embedding lifecycle walkthrough.
 
-Runnable pipelines:
+Reproducible market-data benchmark:
+
 ```bash
-uv run python demo/basic_pipeline.py
-uv run python demo/parquet_pipeline.py
-uv run python demo/reduction_pipeline.py
-uv run python demo/generate_market_data.py
-uv run python demo/market_data_demo.py smoke
+uv run python demo/benchmarks/generate_market_data.py smoke
+uv run python demo/benchmarks/market_data.py smoke --repetitions 1
 ```
 
 ---

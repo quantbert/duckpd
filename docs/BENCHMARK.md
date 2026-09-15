@@ -178,17 +178,17 @@ Run the following commands from the repository root.
 
 ### 1. Generate the Synthetic Datasets
 
-Generate the calibrated OHLC datasets using the generator utility in `demo/`:
+Generate the calibrated OHLC datasets using the benchmark generator:
 
 ```bash
 # Generate smoke (~5 MB) and 100 MB datasets
-uv run python demo/generate_market_data.py smoke 100mb
+uv run python demo/benchmarks/generate_market_data.py smoke 100mb
 
 # Generate 1 GB and 5 GB datasets
-uv run python demo/generate_market_data.py 1gb 5gb
+uv run python demo/benchmarks/generate_market_data.py 1gb 5gb
 ```
 
-Generated files are saved in `demo/data/`:
+Generated files are saved in `demo/benchmarks/data/`:
 - `market-data-smoke.parquet` (~5 MB, 323k rows)
 - `market-data-100mb.parquet` (~100 MB, 6.47M rows)
 - `market-data-1gb.parquet` (~1 GB, 64.7M rows)
@@ -196,16 +196,16 @@ Generated files are saved in `demo/data/`:
 
 ### 2. Run the Benchmark
 
-Execute `demo/market_data_demo.py` for individual presets or all datasets:
+Execute `demo/benchmarks/market_data.py` for individual presets or all datasets:
 
 ```bash
 # Run benchmark on a specific preset
-uv run python demo/market_data_demo.py 100mb
-uv run python demo/market_data_demo.py 1gb
-uv run python demo/market_data_demo.py 5gb
+uv run python demo/benchmarks/market_data.py 100mb
+uv run python demo/benchmarks/market_data.py 1gb
+uv run python demo/benchmarks/market_data.py 5gb
 
 # Run benchmark across all available datasets
-uv run python demo/market_data_demo.py all
+uv run python demo/benchmarks/market_data.py all
 ```
 
 The default is three repetitions per engine. Every repetition runs in a fresh
@@ -215,16 +215,16 @@ subprocess, engine order alternates, and any semantic mismatch fails the run.
 
 ```bash
 # Filter on a different ticker (e.g. AAPL, MSFT, TSLA, JPM)
-uv run python demo/market_data_demo.py 1gb --ticker AAPL
+uv run python demo/benchmarks/market_data.py 1gb --ticker AAPL
 
 # Specify custom worker thread count for DuckPD
-uv run python demo/market_data_demo.py 1gb --threads 8
+uv run python demo/benchmarks/market_data.py 1gb --threads 8
 
 # Increase repetitions for a more stable local comparison
-uv run python demo/market_data_demo.py 1gb --repetitions 7
+uv run python demo/benchmarks/market_data.py 1gb --repetitions 7
 
 # Skip pandas run (e.g. if memory is constrained on large files)
-uv run python demo/market_data_demo.py 5gb --skip-pandas
+uv run python demo/benchmarks/market_data.py 5gb --skip-pandas
 ```
 
 DuckPD's thread count is controlled by `--threads`; pandas/PyArrow uses its
@@ -243,7 +243,7 @@ target deployment hardware before drawing operational conclusions.
 import duckpd as pd
 
 with pd.connect(threads=4) as session:
-    df = session.read_parquet("demo/data/market-data-1gb.parquet")
+    df = session.read_parquet("demo/benchmarks/data/market-data-1gb.parquet")
     result = (
         df[df["ticker"] == "NVDA"]
         .assign(
@@ -267,7 +267,7 @@ with pd.connect(threads=4) as session:
 ```python
 import pandas as pd
 
-df = pd.read_parquet("demo/data/market-data-1gb.parquet")
+df = pd.read_parquet("demo/benchmarks/data/market-data-1gb.parquet")
 filtered = df[df["ticker"] == "NVDA"].copy()
 filtered["bar_return"] = (filtered["close"] - filtered["open"]) / filtered["open"]
 filtered["bar_range"] = filtered["high"] - filtered["low"]

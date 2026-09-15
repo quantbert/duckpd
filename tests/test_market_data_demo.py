@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import duckpd
-from demo.generate_market_data import (
+from demo.benchmarks.generate_market_data import (
     estimate_row_count,
     human_size,
     market_query,

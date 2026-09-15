@@ -10,9 +10,9 @@ time-series model. Native and application-owned learned paths use the same windo
 representation, metadata, and retrieval contracts described here.
 
 The native rolling-window walkthrough is
-[`DuckPD_Time_Series_Embeddings.ipynb`](../../demo/DuckPD_Time_Series_Embeddings.ipynb);
+[`time_series_embeddings.ipynb`](../../demo/notebooks/time_series_embeddings.ipynb);
 the dedicated event workflow is
-[`DuckPD_Event_Windows_and_Exact_Fusion.ipynb`](../../demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb).
+[`event_windows_exact_fusion.ipynb`](../../demo/notebooks/event_windows_exact_fusion.ipynb).
 The lower-level architecture and proposed extensions are documented in the
 [time-series embedding design](../design/time-series-embeddings.md).
 
@@ -498,7 +498,6 @@ repeat their representation:
 ```json
 {
   "catalog_version": 1,
-  "series_embedding_models": {},
   "series_representations": {
     "return-shape-8": {
       "version": 1,
@@ -549,7 +548,7 @@ matches = features[features["pattern"].notna()].vector.search_series(
 ```
 
 `FeatureStore.series_representation(name)` and
-`FeatureStore.series_embedding_model(name)` are metadata-only lookups.
+`FeatureStore.embedding_model(name)` are metadata-only lookups.
 Constructing the store, selecting features, calling `search_series()`, and
 explaining the plan do not prepare a learned encoder or run inference. Executing
 a learned search requires the exact provider to have been explicitly registered
@@ -627,10 +626,11 @@ The following behavior is implemented now:
   event-identity, availability, duplicate, and missing-slot contracts.
 - Native and learned `DataFrame.embed_series()` with `none`, `center`, or
   population `zscore` outer normalization and optional final unit normalization.
-- `SeriesRepresentationSpec`, ordered learned channel roles, representation
-  fingerprints, `SeriesEmbeddingProvider`, and `EmbeddedSeriesQuery`.
-- Explicit session-owned learned-model registration and preparation with full
-  artifact, adapter, input, pooling, runtime, and execution-provider attestation.
+- `SeriesRepresentationSpec`, `SeriesEmbeddingInputSpec`, ordered learned
+  channel roles, representation fingerprints, `SeriesEmbeddingProvider`, and
+  `EmbeddedSeriesQuery`.
+- The same session-owned model registration, preparation, and inspection
+  lifecycle for text and learned-series providers.
 - Bounded complete-row Arrow inference with internal validity masks, null-row
   scatter-back, strict provider output validation, and serialized calls for
   providers declaring `thread_safe=False`.
@@ -641,8 +641,9 @@ The following behavior is implemented now:
 - Exact cosine, L2, and negative-inner-product retrieval.
 - Representation metadata preservation for supported projections, joins,
   local Parquet sidecars, and session-owned tables.
-- Strict catalog-version-1 series registries, typed feature/reference-table
-  columns, alias and alignment propagation, and inferred native series search.
+- Strict catalog-version-1 shared model and series-representation registries,
+  typed feature/reference-table columns, alias and alignment propagation, and
+  inferred native series search.
 - Exact text-first, reaction-first, and full eligible-set late fusion through
   ordinary filters, typed distances, joins, and deterministic `nsmallest()`.
 
@@ -653,29 +654,30 @@ The following behavior is not implemented:
 - Automatic or general approximate series search.
 - A joint multimodal model or shared text-to-series representation space.
 
-
-`series_embedding_model()` creates a side-effect-free learned-model
-specification. Planning and catalog lookup never import a runtime, prepare a
-model, download an artifact, or run inference.
+`embedding_model()` creates the side-effect-free model specification for both
+text and learned-series encoders. A typed `SeriesEmbeddingInputSpec` records the
+ordered-window contract. Planning and catalog lookup never import a runtime,
+prepare a model, download an artifact, or run inference.
 
 ## Learned encoders
 
 Learned encoders are an optional extension, not a replacement for native
-representations. The public custom-provider workflow is:
+representations. They use the same model and session lifecycle as text:
 
 ```python
-encoder = pd.series_embedding_model(
+encoder = pd.embedding_model(
     "research/return-window-encoder",
     revision="immutable-checkpoint-revision",
-    artifact_sha256="<canonical-artifact-manifest-sha256>",
     backend="custom",
     dimension=128,
-    input_length=60,
-    input_channels=("simple_return",),
-    input_roles=("target",),
-    input_normalization="checkpoint-defined-v1",
+    normalize=True,
     pooling="mean-valid-v1",
-    adapter_revision="return-encoder-adapter-v1",
+    input=pd.series_embedding_input(
+        length=60,
+        channels=("simple_return",),
+        roles=("target",),
+        normalization="checkpoint-defined-v1",
+    ),
 )
 
 representation = pd.series_representation(
@@ -690,8 +692,8 @@ representation = pd.series_representation(
 )
 
 # Registration has no preparation or inference side effect.
-session.register_series_embedding_provider(encoder, provider)
-prepared = session.prepare_series_embedding_model(encoder)
+session.register_embedding_provider(encoder, provider)
+prepared = session.prepare_embedding_model(encoder)
 learned = windows.embed_series(
     columns={"simple_return": "return_window"},
     into="return_embedding",
@@ -701,21 +703,21 @@ learned = windows.embed_series(
 ```
 
 A learned encoder is only one component of the representation space. Input
-features, sampling, outer normalization, internal model normalization, channel
-order, context length, masks, pooling, output normalization, checkpoint, and
-adapter behavior all affect compatibility and must participate in identity.
+features, sampling, outer normalization, provider normalization, channel order,
+context length, masks, pooling, output normalization, checkpoint, and provider
+behavior all affect compatibility and participate in model or representation
+identity.
 
 The provider exposes `specification`, `thread_safe`, `prepare()`, and
-`embed_windows(batch)`. `prepare()` returns immutable
-`PreparedSeriesModelInfo`: the resolved revision, artifact digest, adapter and
-backend revisions, input length/channels/roles, internal normalization, pooling,
-dimension, cache path, execution providers, and runtime versions must all match
-the declaration before the session promotes it. `embed_windows()` receives a
-`pyarrow.RecordBatch` whose fields follow `input_channels` order and have type
-`FixedSizeList<float32, input_length>`. Field metadata records each role.
-DuckPD's validity mask removes outer-null and zero-scale rows before the call;
-the provider therefore receives complete non-null rows only. Variable-length
-padding masks are not part of this first contract.
+`embed_windows(batch)`. It participates in the shared `EmbeddingProvider`
+preparation contract: `prepare()` returns `PreparedModelInfo` with the model
+fingerprint, backend, optional verified artifact digest and cache path, and
+execution providers. `embed_windows()` receives a `pyarrow.RecordBatch` whose
+fields follow the typed input contract's channel order and have type
+`FixedSizeList<float32, length>`. Field metadata records each role. DuckPD's
+validity mask removes outer-null and zero-scale rows before the call; the
+provider therefore receives complete non-null rows only. Variable-length
+padding masks are not part of this contract.
 
 ### Targets, variates, and covariates
 
@@ -730,12 +732,11 @@ not need:
 - **Static covariates** describe the entity rather than varying by timestamp.
 
 For native DuckPD representations, all numeric channels are simply ordered
-inputs to one deterministic vector. Learned specifications pair every
-`input_channels` entry with an `input_roles` entry: `target`,
-`past_covariate`, or `known_future_covariate`. Inputs are numeric float32 fixed
-windows. Static and categorical channels, future-horizon values, and
-variable-length masks require a later versioned contract rather than an
-implicit adapter convention.
+inputs to one deterministic vector. Learned input specifications pair every
+`channels` entry with a `roles` entry: `target`, `past_covariate`, or
+`known_future_covariate`. Inputs are numeric float32 fixed windows. Static and
+categorical channels, future-horizon values, and variable-length masks require
+a later versioned contract rather than an implicit provider convention.
 
 This distinction also prevents leakage. A historical window representation may
 only consume values that were available at its endpoint. A known-future
@@ -870,6 +871,5 @@ reference rather than a production commitment.
 - [Event-window implementation roadmap](../roadmap.md#phase-17--priority-2-event-windows-and-exact-event-similarity)
 - [Vector search and text embeddings](vector-search-and-embeddings.md)
 - [API compatibility and semantic guide](../COMPATIBILITY.md#11-native-time-series-representations)
-- [Event-window and exact-fusion notebook](../../demo/DuckPD_Event_Windows_and_Exact_Fusion.ipynb)
-- [Time-series notebook](../../demo/DuckPD_Time_Series_Embeddings.ipynb)
-- [Scripted time-series example](../../demo/time_series_embeddings.py)
+- [Event-window and exact-fusion notebook](../../demo/notebooks/event_windows_exact_fusion.ipynb)
+- [Time-series notebook](../../demo/notebooks/time_series_embeddings.ipynb)

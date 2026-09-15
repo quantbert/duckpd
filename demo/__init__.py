@@ -1,1 +1,1 @@
-"""Runnable DuckPD demonstrations."""
+"""Supporting modules for DuckPD demos and benchmarks."""

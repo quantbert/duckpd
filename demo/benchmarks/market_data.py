@@ -216,8 +216,8 @@ def parse_args(args: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("demo/data"),
-        help="Directory containing the market data files (default: demo/data)",
+        default=Path("demo/benchmarks/data"),
+        help="Directory containing generated market data (default: demo/benchmarks/data)",
     )
     parser.add_argument(
         "--ticker",
@@ -255,7 +255,7 @@ def main() -> None:
         if not path.exists():
             print(
                 f"\n[!] Dataset file not found: {path}\n"
-                f"    Generate: uv run python demo/generate_market_data.py {preset}"
+                f"    Generate: uv run python demo/benchmarks/generate_market_data.py {preset}"
             )
             continue
 
@@ -272,7 +272,7 @@ def main() -> None:
         print(
             "\nNo dataset files found to benchmark. "
             "Please generate data files first using:\n"
-            "  uv run python demo/generate_market_data.py smoke 100mb 1gb\n"
+            "  uv run python demo/benchmarks/generate_market_data.py smoke 100mb 1gb\n"
         )
 
 

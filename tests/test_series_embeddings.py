@@ -42,19 +42,20 @@ def _native_representation(
     )
 
 
-def _learned_model() -> duckpd.SeriesEmbeddingModelSpec:
-    return duckpd.series_embedding_model(
+def _learned_model() -> duckpd.EmbeddingModelSpec:
+    return duckpd.embedding_model(
         "research/return-encoder",
         revision="immutable-revision-v1",
-        artifact_sha256="a" * 64,
         backend="custom",
         dimension=3,
-        input_length=2,
-        input_channels=("simple_return",),
-        input_roles=("target",),
-        input_normalization="none",
+        normalize=False,
         pooling="mean-valid-v1",
-        adapter_revision="adapter-v1",
+        input=duckpd.series_embedding_input(
+            length=2,
+            channels=("simple_return",),
+            roles=("target",),
+            normalization="none",
+        ),
     )
 
 
@@ -66,18 +67,19 @@ def _learned_representation(
     unit_norm: bool = False,
     zero_scale: ZeroScalePolicy = "error",
 ) -> duckpd.SeriesRepresentationSpec:
-    model = duckpd.series_embedding_model(
+    model = duckpd.embedding_model(
         "research/return-encoder",
         revision="immutable-revision-v1",
-        artifact_sha256="a" * 64,
         backend="custom",
         dimension=3,
-        input_length=2,
-        input_channels=channels,
-        input_roles=roles,
-        input_normalization="provider-none-v1",
+        normalize=unit_norm,
         pooling="mean-valid-v1",
-        adapter_revision="adapter-v1",
+        input=duckpd.series_embedding_input(
+            length=2,
+            channels=channels,
+            roles=roles,
+            normalization="provider-none-v1",
+        ),
     )
     return duckpd.series_representation(
         window=2,
@@ -94,7 +96,7 @@ def _learned_representation(
 class _RecordingSeriesProvider:
     def __init__(
         self,
-        model: duckpd.SeriesEmbeddingModelSpec,
+        model: duckpd.EmbeddingModelSpec,
         *,
         thread_safe: bool = True,
         delay: float = 0.0,
@@ -114,33 +116,24 @@ class _RecordingSeriesProvider:
         self._lock = Lock()
 
     @property
-    def specification(self) -> duckpd.SeriesEmbeddingModelSpec:
+    def specification(self) -> duckpd.EmbeddingModelSpec:
         return self._model
 
     @property
     def thread_safe(self) -> bool:
         return self._thread_safe
 
-    def prepare(self) -> duckpd.PreparedSeriesModelInfo:
+    def prepare(self) -> duckpd.PreparedModelInfo:
         self.prepare_calls += 1
         values: dict[str, object] = {
             "model_fingerprint": self._model.fingerprint,
-            "resolved_revision": self._model.revision,
-            "artifact_sha256": self._model.artifact_sha256,
             "backend": self._model.backend,
-            "adapter_revision": self._model.adapter_revision,
-            "input_length": self._model.input_length,
-            "input_channels": self._model.input_channels,
-            "input_roles": self._model.input_roles,
-            "input_normalization": self._model.input_normalization,
-            "pooling": self._model.pooling,
-            "dimension": self._model.dimension,
             "cache_path": None,
+            "artifact_digest": "a" * 64,
             "execution_providers": ("CPUExecutionProvider",),
-            "runtime_versions": (("fake-series-runtime", "1.0"),),
         }
         values.update(self.prepared_override)
-        return duckpd.PreparedSeriesModelInfo(**values)  # type: ignore[arg-type]
+        return duckpd.PreparedModelInfo(**values)  # type: ignore[arg-type]
 
     def embed_windows(self, batch: pa.RecordBatch) -> pa.Array[Any]:
         with self._lock:
@@ -236,7 +229,7 @@ def test_learned_series_model_is_part_of_representation_identity() -> None:
         encoder=model,
     )
 
-    assert model == duckpd.SeriesEmbeddingModelSpec.from_dict(model.to_dict())
+    assert model == duckpd.EmbeddingModelSpec.from_dict(model.to_dict())
     assert len(model.fingerprint) == 64
     assert specification.dimension == 3
     assert specification == duckpd.SeriesRepresentationSpec.from_dict(specification.to_dict())
@@ -335,14 +328,16 @@ def test_series_representation_rejects_ambiguous_contracts(
 
 def test_series_model_rejects_mutable_or_incomplete_identity() -> None:
     model = _learned_model()
+    input_spec = model.input
+    assert isinstance(input_spec, duckpd.SeriesEmbeddingInputSpec)
     invalid = (
         lambda: replace(model, model=""),
         lambda: replace(model, revision="main"),
-        lambda: replace(model, artifact_sha256="A" * 64),
         lambda: replace(model, dimension=True),
-        lambda: replace(model, input_length=0),
-        lambda: replace(model, input_channels=("",)),
-        lambda: replace(model, input_channels=("x", "x")),
+        lambda: replace(model, backend="fastembed"),
+        lambda: replace(model, input=replace(input_spec, length=0)),
+        lambda: replace(model, input=replace(input_spec, channels=("",))),
+        lambda: replace(model, input=replace(input_spec, channels=("x", "x"))),
     )
     for factory in invalid:
         with pytest.raises((TypeError, ValueError)):
@@ -375,7 +370,7 @@ def test_serialized_series_contract_rejects_schema_drift() -> None:
     with pytest.raises(ValueError, match="native layout"):
         duckpd.SeriesRepresentationSpec.from_dict({**learned, "layout": "native"})
     with pytest.raises(ValueError, match="unknown fields"):
-        duckpd.SeriesEmbeddingModelSpec.from_dict({**_learned_model().to_dict(), "extra": 1})
+        duckpd.EmbeddingModelSpec.from_dict({**_learned_model().to_dict(), "extra": 1})
 
 
 def test_window_column_and_query_metadata_validate_boundaries() -> None:
@@ -1011,21 +1006,25 @@ def test_learned_series_model_roles_are_canonical_and_strict() -> None:
     model = representation.encoder
     assert model is not None
 
-    restored = duckpd.SeriesEmbeddingModelSpec.from_dict(json.loads(json.dumps(model.to_dict())))
+    restored = duckpd.EmbeddingModelSpec.from_dict(json.loads(json.dumps(model.to_dict())))
 
     assert restored == model
     assert restored.fingerprint == model.fingerprint
-    with pytest.raises(ValueError, match="one-for-one"):
-        replace(model, input_roles=("target",))
-    with pytest.raises(ValueError, match="input_roles"):
-        replace(model, input_roles=("target", "invalid", "known_future_covariate"))
+    input_spec = model.input
+    assert isinstance(input_spec, duckpd.SeriesEmbeddingInputSpec)
+    with pytest.raises(ValueError, match="align"):
+        replace(model, input=replace(input_spec, roles=("target",)))
+    with pytest.raises(ValueError, match="valid series roles"):
+        replace(
+            model,
+            input=replace(input_spec, roles=("target", "invalid", "known_future_covariate")),
+        )
     with pytest.raises(ValueError, match="target"):
         replace(
             model,
-            input_roles=(
-                "past_covariate",
-                "past_covariate",
-                "known_future_covariate",
+            input=replace(
+                input_spec,
+                roles=("past_covariate", "past_covariate", "known_future_covariate"),
             ),
         )
 
@@ -1039,7 +1038,7 @@ def test_learned_provider_lifecycle_is_explicit_bounded_and_masked() -> None:
     assert model is not None
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
+    session.register_embedding_provider(model, provider)
     embedded = _learned_windows(session, representation, batch_size=2)
 
     operation = json.loads(embedded.explain(mode="json"))["execution_boundaries"][
@@ -1061,11 +1060,11 @@ def test_learned_provider_lifecycle_is_explicit_bounded_and_masked() -> None:
     assert session.execution_count == executions_before_failure
     assert provider.batches == []
 
-    prepared = session.prepare_series_embedding_model(model)
+    prepared = session.prepare_embedding_model(model)
     assert prepared.model_fingerprint == model.fingerprint
-    assert prepared.resolved_revision == model.revision
-    assert prepared.runtime_versions == (("fake-series-runtime", "1.0"),)
-    assert session.prepare_series_embedding_model(model) is prepared
+    assert prepared.backend == "custom"
+    assert prepared.execution_providers == ("CPUExecutionProvider",)
+    assert session.prepare_embedding_model(model) is prepared
     assert provider.prepare_calls == 1
 
     result = embedded.collect()
@@ -1115,8 +1114,8 @@ def test_learned_series_query_matches_corpus_once_per_execution() -> None:
     assert model is not None
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
     candidates = _learned_windows(session, representation, batch_size=2)
     raw_query = {
         "target": [2.0, 3.0],
@@ -1150,15 +1149,13 @@ def test_learned_series_query_matches_corpus_once_per_execution() -> None:
     ("rows", "dimension", "nan", "null", "child_null", "wrong_type", "zero"),
 )
 def test_learned_provider_rejects_invalid_output_without_cache(output_mode: str) -> None:
-    representation = _learned_representation()
-    if output_mode == "zero":
-        representation = replace(representation, unit_norm=True)
+    representation = _learned_representation(unit_norm=output_mode == "zero")
     model = representation.encoder
     assert model is not None
     provider = _RecordingSeriesProvider(model, output_mode=output_mode)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
 
     with pytest.raises((TypeError, ValueError)):
         session.embed_series_query(
@@ -1167,36 +1164,26 @@ def test_learned_provider_rejects_invalid_output_without_cache(output_mode: str)
         )
 
     assert session._embedded_series_queries == {}
-    assert session.inspect_prepared_series_embedding_models()[0].model_fingerprint == (
-        model.fingerprint
-    )
+    assert session.inspect_prepared_embedding_models()[0].model_fingerprint == (model.fingerprint)
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid"),
-    (
-        ("model_fingerprint", "f" * 64),
-        ("resolved_revision", "different-revision"),
-        ("artifact_sha256", "b" * 64),
-        ("adapter_revision", "different-adapter"),
-        ("dimension", 4),
-        ("input_roles", ("past_covariate",)),
-    ),
-)
-def test_failed_series_preparation_is_never_promoted(field: str, invalid: object) -> None:
+def test_failed_series_preparation_is_never_promoted() -> None:
     representation = _learned_representation()
     model = representation.encoder
     assert model is not None
-    provider = _RecordingSeriesProvider(model, prepared_override={field: invalid})
+    provider = _RecordingSeriesProvider(
+        model,
+        prepared_override={"model_fingerprint": "f" * 64},
+    )
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
+    session.register_embedding_provider(model, provider)
 
     for _ in range(2):
-        with pytest.raises(UnsupportedOperationError, match="attestation mismatch"):
-            session.prepare_series_embedding_model(model)
+        with pytest.raises(UnsupportedOperationError, match="mismatched fingerprint"):
+            session.prepare_embedding_model(model)
 
     assert provider.prepare_calls == 2
-    assert session.inspect_prepared_series_embedding_models() == ()
+    assert session.inspect_prepared_embedding_models() == ()
 
 
 def test_non_thread_safe_series_provider_calls_never_overlap_and_close_once() -> None:
@@ -1205,8 +1192,8 @@ def test_non_thread_safe_series_provider_calls_never_overlap_and_close_once() ->
     assert model is not None
     provider = _RecordingSeriesProvider(model, thread_safe=False, delay=0.01)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
 
     def encode(value: float) -> duckpd.EmbeddedSeriesQuery:
         return session.embed_series_query(
@@ -1233,8 +1220,8 @@ def test_learned_series_profile_reports_lifecycle_and_arrow_resources() -> None:
     assert model is not None
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
 
     profile = _learned_windows(session, representation, batch_size=2).profile()
     metrics = profile.embedding_metrics
@@ -1258,8 +1245,8 @@ def test_learned_zero_scale_and_null_masks_skip_provider_calls() -> None:
     assert model is not None
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
     source = session.from_pandas(
         pd.DataFrame({"row": range(4), "value": [3.0] * 4}),
         order_by="row",
@@ -1286,8 +1273,8 @@ def test_failed_learned_sink_leaves_no_output_or_query_cache(tmp_path: Path) -> 
     assert model is not None
     provider = _RecordingSeriesProvider(model, output_mode="nan")
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
     source = session.from_pandas(
         pd.DataFrame({"row": range(3), "value": [1.0, 2.0, 3.0]}),
         order_by="row",
@@ -1307,36 +1294,6 @@ def test_failed_learned_sink_leaves_no_output_or_query_cache(tmp_path: Path) -> 
     assert session._embedded_series_queries == {}
 
 
-def test_prepared_series_model_info_rejects_incomplete_runtime_contracts() -> None:
-    model = _learned_model()
-    info = _RecordingSeriesProvider(model).prepare()
-    invalid_changes: tuple[dict[str, object], ...] = (
-        {"model_fingerprint": ""},
-        {"resolved_revision": ""},
-        {"artifact_sha256": "invalid"},
-        {"backend": ""},
-        {"adapter_revision": ""},
-        {"input_length": 0},
-        {"input_channels": ("",)},
-        {"input_roles": ()},
-        {"input_roles": ("invalid",)},
-        {"input_normalization": ""},
-        {"pooling": ""},
-        {"dimension": 0},
-        {"cache_path": ""},
-        {"execution_providers": ()},
-        {"execution_providers": ("",)},
-        {"runtime_versions": ()},
-        {"runtime_versions": (("runtime", ""),)},
-        {"preparation_seconds": -1.0},
-        {"preparation_seconds": float("nan")},
-    )
-
-    for changes in invalid_changes:
-        with pytest.raises((TypeError, ValueError)):
-            replace(info, **changes)
-
-
 def test_series_provider_registration_and_preparation_are_strict() -> None:
     representation = _learned_representation()
     model = representation.encoder
@@ -1344,40 +1301,36 @@ def test_series_provider_registration_and_preparation_are_strict() -> None:
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
 
-    with pytest.raises(UnsupportedOperationError, match="backend='custom'"):
-        noncustom = replace(model, backend="onnx-runtime")
-        session.register_series_embedding_provider(
-            noncustom,
-            _RecordingSeriesProvider(noncustom),
-        )
+    with pytest.raises(ValueError, match="backend='custom'"):
+        replace(model, backend="fastembed")
     with pytest.raises(ValueError, match="specification"):
-        session.register_series_embedding_provider(_learned_model(), provider)
+        session.register_embedding_provider(_learned_model(), provider)
 
     invalid_thread_safety = _RecordingSeriesProvider(model)
     invalid_thread_safety._thread_safe = cast("Any", "yes")
     with pytest.raises(TypeError, match="thread_safe"):
-        session.register_series_embedding_provider(model, invalid_thread_safety)
+        session.register_embedding_provider(model, invalid_thread_safety)
 
-    session.register_series_embedding_provider(model, provider)
-    with pytest.raises(ValueError, match="different series provider"):
-        session.register_series_embedding_provider(model, _RecordingSeriesProvider(model))
+    session.register_embedding_provider(model, provider)
+    with pytest.raises(ValueError, match="different embedding provider"):
+        session.register_embedding_provider(model, _RecordingSeriesProvider(model))
 
-    with pytest.raises(UnsupportedOperationError, match="not registered"):
-        duckpd.connect().prepare_series_embedding_model(model)
+    with pytest.raises(UnsupportedOperationError, match="register_embedding_provider"):
+        duckpd.connect().prepare_embedding_model(model)
 
     class InvalidPreparationProvider(_RecordingSeriesProvider):
-        def prepare(self) -> duckpd.PreparedSeriesModelInfo:
-            return cast("duckpd.PreparedSeriesModelInfo", {})
+        def prepare(self) -> duckpd.PreparedModelInfo:
+            return cast("duckpd.PreparedModelInfo", {})
 
-    invalid_model = replace(model, artifact_sha256="c" * 64)
+    invalid_model = replace(model, revision="immutable-revision-v2")
     invalid_session = duckpd.connect()
-    invalid_session.register_series_embedding_provider(
+    invalid_session.register_embedding_provider(
         invalid_model,
         InvalidPreparationProvider(invalid_model),
     )
-    with pytest.raises(TypeError, match="PreparedSeriesModelInfo"):
-        invalid_session.prepare_series_embedding_model(invalid_model)
-    assert invalid_session.inspect_prepared_series_embedding_models() == ()
+    with pytest.raises(TypeError, match="PreparedModelInfo"):
+        invalid_session.prepare_embedding_model(invalid_model)
+    assert invalid_session.inspect_prepared_embedding_models() == ()
 
 
 def test_series_preparation_measures_local_cache_bytes(tmp_path: Path) -> None:
@@ -1393,9 +1346,9 @@ def test_series_preparation_measures_local_cache_bytes(tmp_path: Path) -> None:
         prepared_override={"cache_path": str(cache)},
     )
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
+    session.register_embedding_provider(model, provider)
 
-    session.prepare_series_embedding_model(model)
+    session.prepare_embedding_model(model)
 
     assert session._embedding_metrics["series_model_cache_bytes"] == 6
 
@@ -1406,8 +1359,8 @@ def test_learned_null_error_fails_before_provider_inference() -> None:
     assert model is not None
     provider = _RecordingSeriesProvider(model)
     session = duckpd.connect()
-    session.register_series_embedding_provider(model, provider)
-    session.prepare_series_embedding_model(model)
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
     source = session.from_pandas(
         pd.DataFrame({"row": [0, 1], "value": [1.0, 2.0]}),
         order_by="row",

@@ -7,7 +7,7 @@ import json
 import re
 import struct
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
 from math import fsum, isfinite, sqrt
@@ -16,6 +16,11 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkabl
 import pyarrow as pa
 
 from duckpd._temporal import fixed_duration_ns
+from duckpd.embeddings import (
+    EmbeddingModelSpec,
+    PreparedModelInfo,
+    SeriesEmbeddingInputSpec,
+)
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -25,7 +30,6 @@ SeriesSampling = Literal["observations", "fixed_grid"]
 SeriesNormalization = Literal["none", "center", "zscore"]
 ZeroScalePolicy = Literal["error", "null"]
 SeriesNullPolicy = Literal["propagate", "error"]
-SeriesChannelRole = Literal["target", "past_covariate", "known_future_covariate"]
 SeriesMetadataOrigin = Literal["generated", "application_asserted", "sidecar", "table", "catalog"]
 SeriesWindowOrigin = Literal["rolling", "event", "application_asserted", "catalog"]
 
@@ -86,158 +90,17 @@ def _strict_mapping(
     return data
 
 
-@dataclass(frozen=True)
-class SeriesEmbeddingModelSpec:
-    """Immutable identity and input contract for a learned series encoder."""
-
-    model: str
-    revision: str
-    artifact_sha256: str
-    backend: str
-    dimension: int
-    input_length: int
-    input_channels: tuple[str, ...]
-    input_roles: tuple[SeriesChannelRole, ...]
-    input_normalization: str
-    pooling: str
-    adapter_revision: str
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "model",
-            "revision",
-            "backend",
-            "input_normalization",
-            "pooling",
-            "adapter_revision",
-        ):
-            value = getattr(self, field_name)
-            if type(value) is not str or not value:
-                raise ValueError(f"{field_name} must be a non-empty string")
-        if self.revision.casefold() in {"main", "master", "latest", "head"}:
-            raise ValueError("revision must identify an immutable model revision")
-        if type(self.artifact_sha256) is not str or _SHA256.fullmatch(self.artifact_sha256) is None:
-            raise ValueError("artifact_sha256 must be a lowercase SHA-256 digest")
-        _positive_integer(self.dimension, field_name="dimension")
-        _positive_integer(self.input_length, field_name="input_length")
-        _names(self.input_channels, field_name="input_channels")
-        if type(self.input_roles) is not tuple or len(self.input_roles) != len(self.input_channels):
-            raise ValueError("input_roles must align one-for-one with input_channels")
-        if any(
-            role not in {"target", "past_covariate", "known_future_covariate"}
-            for role in self.input_roles
-        ):
-            raise ValueError(
-                "input_roles must contain only 'target', 'past_covariate', or "
-                "'known_future_covariate'"
-            )
-        if "target" not in self.input_roles:
-            raise ValueError("input_roles must contain at least one target channel")
-
-    @property
-    def fingerprint(self) -> str:
-        return _canonical_hash(self.to_dict())
-
-    def to_dict(self) -> dict[str, object]:
-        return cast("dict[str, object]", asdict(self))
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, object]) -> SeriesEmbeddingModelSpec:
-        fields = frozenset(cls.__dataclass_fields__)
-        data = _strict_mapping(value, fields=fields, owner="series embedding model")
-        for field_name in ("input_channels", "input_roles"):
-            raw_items = data.get(field_name)
-            if isinstance(raw_items, Sequence) and not isinstance(
-                raw_items,
-                (str, bytes),
-            ):
-                data[field_name] = tuple(cast("Sequence[object]", raw_items))
-        return cls(**data)  # type: ignore[arg-type]
-
-
-@dataclass(frozen=True)
-class PreparedSeriesModelInfo:
-    """Verified learned series model artifacts owned by one session."""
-
-    model_fingerprint: str
-    resolved_revision: str
-    artifact_sha256: str
-    backend: str
-    adapter_revision: str
-    input_length: int
-    input_channels: tuple[str, ...]
-    input_roles: tuple[SeriesChannelRole, ...]
-    input_normalization: str
-    pooling: str
-    dimension: int
-    cache_path: str | None
-    execution_providers: tuple[str, ...]
-    runtime_versions: tuple[tuple[str, str], ...]
-    preparation_seconds: float = 0.0
-
-    def __post_init__(self) -> None:
-        if type(self.model_fingerprint) is not str or not self.model_fingerprint:
-            raise ValueError("model_fingerprint must be a non-empty string")
-        if type(self.resolved_revision) is not str or not self.resolved_revision:
-            raise ValueError("resolved_revision must be a non-empty string")
-        if type(self.artifact_sha256) is not str or _SHA256.fullmatch(self.artifact_sha256) is None:
-            raise ValueError("artifact_sha256 must be a lowercase SHA-256 digest")
-        for field_name in (
-            "backend",
-            "adapter_revision",
-            "input_normalization",
-            "pooling",
-        ):
-            if type(getattr(self, field_name)) is not str or not getattr(self, field_name):
-                raise ValueError(f"{field_name} must be a non-empty string")
-        _positive_integer(self.input_length, field_name="input_length")
-        _positive_integer(self.dimension, field_name="dimension")
-        _names(self.input_channels, field_name="input_channels")
-        if (
-            type(self.input_roles) is not tuple
-            or len(self.input_roles) != len(self.input_channels)
-            or any(
-                role not in {"target", "past_covariate", "known_future_covariate"}
-                for role in self.input_roles
-            )
-        ):
-            raise ValueError("input_roles must align with channels and contain valid roles")
-        if self.cache_path is not None and (
-            type(self.cache_path) is not str or not self.cache_path
-        ):
-            raise ValueError("cache_path must be None or a non-empty string")
-        if (
-            type(self.execution_providers) is not tuple
-            or not self.execution_providers
-            or any(type(item) is not str or not item for item in self.execution_providers)
-        ):
-            raise ValueError("execution_providers must contain non-empty strings")
-        if (
-            type(self.runtime_versions) is not tuple
-            or not self.runtime_versions
-            or any(
-                type(item) is not tuple
-                or len(item) != 2
-                or any(type(value) is not str or not value for value in item)
-                for item in self.runtime_versions
-            )
-        ):
-            raise ValueError("runtime_versions must contain non-empty name/version pairs")
-        if not isfinite(self.preparation_seconds) or self.preparation_seconds < 0:
-            raise ValueError("preparation_seconds must be finite and non-negative")
-
-
 @runtime_checkable
 class SeriesEmbeddingProvider(Protocol):
-    """Prepared batch provider for one immutable learned series encoder."""
+    """Prepared batch provider for an ordered-window embedding model."""
 
     @property
-    def specification(self) -> SeriesEmbeddingModelSpec: ...
+    def specification(self) -> EmbeddingModelSpec: ...
 
     @property
     def thread_safe(self) -> bool: ...
 
-    def prepare(self) -> PreparedSeriesModelInfo: ...
+    def prepare(self) -> PreparedModelInfo: ...
 
     def embed_windows(self, batch: pa.RecordBatch) -> pa.Array[Any]: ...
 
@@ -254,7 +117,7 @@ class SeriesRepresentationSpec:
     normalization: SeriesNormalization = "none"
     unit_norm: bool = False
     zero_scale: ZeroScalePolicy = "error"
-    encoder: SeriesEmbeddingModelSpec | None = None
+    encoder: EmbeddingModelSpec | None = None
 
     def __post_init__(self) -> None:
         _positive_integer(self.window, field_name="window")
@@ -275,10 +138,14 @@ class SeriesRepresentationSpec:
         else:
             object.__setattr__(self, "step", _canonical_duration(self.step))
         if self.encoder is not None:
-            if self.encoder.input_length != self.window:
-                raise ValueError("encoder input_length must equal representation window")
-            if self.encoder.input_channels != self.channels:
-                raise ValueError("encoder input_channels must equal representation channels")
+            if not isinstance(self.encoder.input, SeriesEmbeddingInputSpec):
+                raise ValueError("encoder input must be a series embedding input contract")
+            if self.encoder.input.length != self.window:
+                raise ValueError("encoder input length must equal representation window")
+            if self.encoder.input.channels != self.channels:
+                raise ValueError("encoder input channels must equal representation channels")
+            if self.encoder.normalize != self.unit_norm:
+                raise ValueError("encoder normalize must equal representation unit_norm")
 
     @property
     def dimension(self) -> int:
@@ -342,7 +209,7 @@ class SeriesRepresentationSpec:
             if not isinstance(raw_encoder, Mapping):
                 raise TypeError("encoder must be an object or null")
             encoder_data = cast("Mapping[str, object]", raw_encoder)
-            data["encoder"] = SeriesEmbeddingModelSpec.from_dict(encoder_data)
+            data["encoder"] = EmbeddingModelSpec.from_dict(encoder_data)
             if layout is not None:
                 raise ValueError("learned series representations must not define native layout")
         elif layout != "channel-major-oldest-first-v1":
@@ -543,19 +410,20 @@ def _make_series_provider_batch(  # pyright: ignore[reportUnusedFunction]
     arrays: list[pa.Array[Any]] = []
     fields: list[Any] = []
     by_row = [dict(row) for row in rows]
+    input_spec = cast("SeriesEmbeddingInputSpec", encoder.input)
     for channel, role in zip(
-        encoder.input_channels,
-        encoder.input_roles,
+        input_spec.channels,
+        input_spec.roles,
         strict=True,
     ):
         flattened = [_finite_float32(value) for row in by_row for value in row[channel]]
         values = pa.array(flattened, type=pa.float32())
         maker = cast("Any", pa.FixedSizeListArray)
-        arrays.append(cast("pa.Array[Any]", maker.from_arrays(values, encoder.input_length)))
+        arrays.append(cast("pa.Array[Any]", maker.from_arrays(values, input_spec.length)))
         fields.append(
             pa.field(
                 channel,
-                pa.list_(pa.float32(), encoder.input_length),
+                pa.list_(pa.float32(), input_spec.length),
                 nullable=False,
                 metadata={b"duckpd.channel_role": role.encode()},
             )
@@ -574,7 +442,7 @@ def _make_series_provider_batch(  # pyright: ignore[reportUnusedFunction]
 
 def _validate_series_embedding_array(
     output: object,
-    model: SeriesEmbeddingModelSpec,
+    model: EmbeddingModelSpec,
     *,
     expected_rows: int,
 ) -> pa.Array[Any]:
@@ -657,36 +525,6 @@ def embed_native_series_query(
     return EmbeddedSeriesQuery(encoded, representation.fingerprint)
 
 
-def series_embedding_model(
-    model: str,
-    *,
-    revision: str,
-    artifact_sha256: str,
-    backend: str,
-    dimension: int,
-    input_length: int,
-    input_channels: tuple[str, ...],
-    input_roles: tuple[SeriesChannelRole, ...],
-    input_normalization: str,
-    pooling: str,
-    adapter_revision: str,
-) -> SeriesEmbeddingModelSpec:
-    """Create a side-effect-free learned series encoder specification."""
-    return SeriesEmbeddingModelSpec(
-        model=model,
-        revision=revision,
-        artifact_sha256=artifact_sha256,
-        backend=backend,
-        dimension=dimension,
-        input_length=input_length,
-        input_channels=input_channels,
-        input_roles=input_roles,
-        input_normalization=input_normalization,
-        pooling=pooling,
-        adapter_revision=adapter_revision,
-    )
-
-
 def series_representation(
     *,
     window: int,
@@ -697,7 +535,7 @@ def series_representation(
     normalization: SeriesNormalization = "none",
     unit_norm: bool = False,
     zero_scale: ZeroScalePolicy = "error",
-    encoder: SeriesEmbeddingModelSpec | None = None,
+    encoder: EmbeddingModelSpec | None = None,
 ) -> SeriesRepresentationSpec:
     """Create a canonical native or learned time-series representation contract."""
     return SeriesRepresentationSpec(

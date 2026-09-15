@@ -178,7 +178,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Arguments:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("demo/data"),
+        default=Path("demo/benchmarks/data"),
         help="Directory for generated Parquet files",
     )
     parser.add_argument(

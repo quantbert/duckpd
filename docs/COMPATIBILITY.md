@@ -102,7 +102,7 @@ These methods share standard pandas names, but deviate in execution timing, prec
 | `duckpd.from_pandas(df, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Copies a snapshot into a session, tracking hidden source row identity. |
 | `duckpd.from_arrow(table, ...)` | **`[DuckPD Extension]`** | `value`, `session`, `index`, `order_by` | `DataFrame` | Retains an Arrow snapshot with an appended hidden stable row identity column. |
 | `duckpd.concat(objs, ...)` | **`[Intentional Deviation]`** | `objs`, `axis=0\|1`, `join='outer'\|'inner'`, `ignore_index=False`, `sort=False` | Supports `axis=0` (row-wise union) and `axis=1` (column-wise concatenation). Axis 0 preserves matching categorical universes/order and timezone metadata. Axis 1 optimizes same-plan Series into a single projection and aligns multi-frame inputs via explicit index joins. Rejects duplicate column labels when `ignore_index=False`. |
-| `duckpd.series_representation(...)` / `duckpd.series_embedding_model(...)` | **`[DuckPD Extension]`** | Immutable window, channel, sampling, data-contract, normalization, ordered learned channel roles, and optional custom learned-encoder declarations | `SeriesRepresentationSpec` / `SeriesEmbeddingModelSpec` | Builds canonical representation identities. Native representations execute entirely through DuckDB. Application-owned learned encoders require explicit `SeriesEmbeddingProvider` registration and preparation; DuckPD ships no model-specific series provider or runtime. |
+| `duckpd.series_representation(...)` / `duckpd.series_embedding_input(...)` | **`[DuckPD Extension]`** | Immutable window, channel, sampling, data-contract, normalization, and ordered learned channel-role declarations | `SeriesRepresentationSpec` / `SeriesEmbeddingInputSpec` | Builds canonical representation and model-input identities. Native representations execute entirely through DuckDB. Application-owned learned encoders use the shared `EmbeddingModelSpec` and provider lifecycle. |
 | `duckpd.merge_asof(left, right, ...)` | **`[Pandas-API Subset]`** | `on` or `left_on`/`right_on`; `by` or `left_by`/`right_by`; `suffixes`; `allow_exact_matches`; `direction='backward'` | `DataFrame` | Builds a typed lazy backward ASOF left join. Both timestamp keys must have identical dtypes/timezones and both frames must be ordered ascending by their timestamp key. Null timestamp keys fail at execution. `tolerance`, `forward`, and `nearest` are rejected before execution. |
 
 ---
@@ -275,15 +275,15 @@ indexes, and `mode=\"auto\"`. DuckDB documents HNSW memory as outside
 `memory_limit`; DuckPD makes no spill, recall, or cross-version reproducibility
 guarantee for this experimental path.
 
-## 10. Native Text Embeddings
+## 10. Embedding Models and Text Inference
 
-Text embedding is DuckPD-native and optional; it is not part of the pandas or
+Embedding inference is DuckPD-native and optional; it is not part of the pandas
 Narwhals protocol. The core package does not depend on a model runtime.
 
 | Method | Classification | Parameters | Execution | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| `embedding_model()` | **`[DuckPD Native]`** | immutable revision, dimension, backend, normalization, pooling, prefixes | Planning only | Produces a stable model fingerprint without downloading metadata. |
-| `Session.prepare_embedding_model()` | **`[DuckPD Native]`** | model and optional cache directory | Eager | Explicitly prepares a verified local artifact; feature-store searches may prepare an approved catalog model automatically at execution. |
+| `embedding_model()` | **`[DuckPD Native]`** | immutable revision, dimension, backend, normalization, pooling, prefixes, optional typed series input | Planning only | Produces a stable model fingerprint without downloading metadata. The same model contract identifies text and learned-series embedding spaces. |
+| `Session.register_embedding_provider()` / `prepare_embedding_model()` / `inspect_prepared_embedding_models()` | **`[DuckPD Native]`** | model, provider, optional cache directory | Registration / eager preparation / metadata | One session-owned lifecycle serves text and series providers. Built-in text backends may prepare approved artifacts automatically; custom providers must be registered explicitly. `Session.close()` releases provider references and calls an optional provider `close()`. |
 | `Session.embed_query()` | **`[DuckPD Native]`** | text and prepared model | Eager | Returns an immutable `EmbeddedQuery` carrying its model fingerprint. |
 | `DataFrame.embed_text()` | **`[DuckPD Native]`** | text columns, output label, model, batch size, separator, null policy | Lazy | Row-preserving Arrow-batched inference with automatic materialization progress; appends non-nullable `FLOAT[n]` and supports direct Parquet/table sinks. |
 | `DataFrame.vector.search_text()` | **`[DuckPD Native]`** | text, persisted embedding column, optional compatible model, metric, `k`, tie-breaker | Lazy | Exact search; infers only verified column metadata and rejects missing or mismatched identity before execution. |
@@ -315,10 +315,9 @@ deferred.
 | `DataFrame.embed_series()` | **`[DuckPD Extension]`** | channel-to-column mapping, output label, representation, batch size, null policy | Lazy | Appends a nullable fixed-size `FLOAT[n]` vector from verified fixed-count windows sharing one order/partition contract. Native recipes lower to DuckDB expressions. Learned recipes call an explicitly prepared session provider through bounded complete-row Arrow batches, scatter nulls, apply the same outer normalization as queries, validate exact float32 output, and serialize non-thread-safe providers. |
 | `DataFrame.vector.search_series()` | **`[DuckPD Extension]`** | raw channel mapping, vector column, optional representation assertion, exact metric, `k`, distance label, tie-breaker | Lazy | Resolves verified series metadata, freezes raw query observations during planning, applies the native or learned corpus recipe during execution, and runs exact top-k retrieval. Equal-width incompatible spaces fail during planning; learned query inference requires the exact prepared provider. |
 | `Session.embed_series_query()` | **`[DuckPD Extension]`** | raw channel mapping, representation | Eager | Returns a reusable `EmbeddedSeriesQuery` after applying the same native or learned representation recipe. Learned calls require explicit provider registration and preparation; invalid, nonfinite, wrong-width, zero-scale, and mismatched provider outputs fail explicitly. |
-| `Session.register_series_embedding_provider()` / `prepare_series_embedding_model()` | **`[DuckPD Extension]`** | immutable custom model and application-owned provider | Registration / eager preparation | Registration is side-effect-free. Preparation attests the exact revision, artifact manifest, adapter/input/pooling contract, runtime versions, cache location, and execution providers before promotion. `Session.close()` releases provider references and calls an optional provider `close()`. |
-| `Session.inspect_prepared_series_embedding_models()` | **`[DuckPD Extension]`** | None | Metadata only | Returns immutable `PreparedSeriesModelInfo` records for successfully promoted providers. Failed preparation records are never exposed. |
+| Shared embedding provider lifecycle | **`[DuckPD Extension]`** | `EmbeddingModelSpec` with `SeriesEmbeddingInputSpec`, application-owned `SeriesEmbeddingProvider` | Registration / eager preparation | Uses `Session.register_embedding_provider()`, `prepare_embedding_model()`, and `inspect_prepared_embedding_models()` exactly like text models. Series providers additionally declare thread safety and accept bounded fixed-window Arrow batches. |
 | `FeatureStore.series_representation()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns the immutable resolved representation; registry aliases are expanded before fingerprinting. |
-| `FeatureStore.series_embedding_model()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns immutable learned-encoder identity without preparing, importing, downloading, or executing a model. |
+| `FeatureStore.embedding_model()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns either text or learned-series model identity without preparing, importing, downloading, or executing a model. |
 
 Mapping order is ignored; `SeriesRepresentationSpec.channels` defines vector
 layout. A null input window propagates to a null output by default, while
@@ -327,7 +326,7 @@ window metadata, and wrong array widths fail rather than changing representation
 identity. Event-window `event_id` may be composite for revisions, and source
 observations must be unique on `(by, on)` inside the bounded event intervals.
 Representation metadata survives direct Parquet and session-table persistence.
-Feature-store catalog version 1 accepts strict `series_embedding_models` and
+Feature-store catalog version 1 accepts shared `embedding_models` and
 `series_representations` registries. Timeseries features and reference-table
 columns bind them with `series_representation`. Bound columns are typed as
 `FLOAT[n]`; Parquet fixed-size-list width, float32 children, finite values, and

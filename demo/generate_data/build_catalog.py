@@ -565,7 +565,6 @@ def build_catalog(data_root: Path, store_name: str, source: str) -> dict[str, An
         "description": "Research and model-training datasets.",
         "datasets": dataset_entries,
         "features": feature_index,
-        "series_embedding_models": {},
         "series_representations": series_representations(),
     }
     if "news" in {entry["name"] for entry in dataset_entries}:

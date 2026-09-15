@@ -63,6 +63,7 @@ from duckpd.embeddings import (
     EmbeddedQuery,
     EmbeddingColumnSpec,
     EmbeddingModelSpec,
+    EmbeddingProvider,
     FastEmbedProvider,
     PreparedModelInfo,
     TextEmbeddingProvider,
@@ -77,9 +78,7 @@ from duckpd.errors import (
 )
 from duckpd.series_embeddings import (
     EmbeddedSeriesQuery,
-    PreparedSeriesModelInfo,
     SeriesColumnSpec,
-    SeriesEmbeddingModelSpec,
     SeriesEmbeddingProvider,
     SeriesQuerySnapshot,
     SeriesRepresentationSpec,
@@ -264,13 +263,10 @@ class Session:
         self._attachments: dict[str, _RemoteAttachmentState] = {}
         self._object_store_secrets: dict[str, _ObjectStoreSecretState] = {}
         self._vector_indexes: dict[str, VectorIndexInfo] = {}
-        self._embedding_providers: dict[str, TextEmbeddingProvider] = {}
+        self._embedding_providers: dict[str, EmbeddingProvider] = {}
         self._embedding_metrics: dict[str, int | float] = {}
         self._embedding_progress_callbacks: dict[str, Callable[[int], object]] = {}
         self._prepared_embedding_models: dict[str, PreparedModelInfo] = {}
-        self._series_embedding_providers: dict[str, SeriesEmbeddingProvider] = {}
-        self._prepared_series_embedding_models: dict[str, PreparedSeriesModelInfo] = {}
-        self._series_embedding_prepare_locks: dict[str, Lock] = {}
         self._series_embedding_call_locks: dict[str, Lock] = {}
         self._series_embedding_metrics_lock = Lock()
         self._catalog_embedding_policies: dict[str, _CatalogEmbeddingPolicy] = {}
@@ -312,124 +308,45 @@ class Session:
     def register_embedding_provider(
         self,
         model: EmbeddingModelSpec,
-        provider: TextEmbeddingProvider,
+        provider: EmbeddingProvider,
     ) -> None:
         """Register a session-owned provider without preparing or running it."""
         self._ensure_open()
         if provider.specification != model:
             raise ValueError("provider specification does not match the requested model")
+        if model.input is None:
+            if not isinstance(provider, TextEmbeddingProvider):
+                raise TypeError("text embedding models require a TextEmbeddingProvider")
+        else:
+            if not isinstance(provider, SeriesEmbeddingProvider):
+                raise TypeError("series embedding models require a SeriesEmbeddingProvider")
+            if type(provider.thread_safe) is not bool:
+                raise TypeError("series provider thread_safe must be a boolean")
+        existing = self._embedding_providers.get(model.fingerprint)
+        if existing is not None and existing is not provider:
+            raise ValueError("a different embedding provider is already registered for this model")
         self._embedding_providers[model.fingerprint] = provider
 
-    def register_series_embedding_provider(
-        self,
-        model: SeriesEmbeddingModelSpec,
-        provider: SeriesEmbeddingProvider,
-    ) -> None:
-        """Register one custom learned-series provider without preparing it."""
-        self._ensure_open()
-        if model.backend != "custom":
+    def _prepared_provider(self, model: EmbeddingModelSpec) -> EmbeddingProvider:
+        provider = self._embedding_providers.get(model.fingerprint)
+        if provider is None or model.fingerprint not in self._prepared_embedding_models:
             raise UnsupportedOperationError(
-                "Only backend='custom' is qualified for registered series providers"
+                "Embedding model is not prepared; call session.prepare_embedding_model(model)"
             )
-        if provider.specification != model:
-            raise ValueError("provider specification does not match the requested series model")
-        if type(provider.thread_safe) is not bool:
-            raise TypeError("series provider thread_safe must be a boolean")
-        existing = self._series_embedding_providers.get(model.fingerprint)
-        if existing is not None and existing is not provider:
-            raise ValueError("a different series provider is already registered for this model")
-        self._series_embedding_providers[model.fingerprint] = provider
-
-    def prepare_series_embedding_model(
-        self,
-        model: SeriesEmbeddingModelSpec,
-    ) -> PreparedSeriesModelInfo:
-        """Eagerly prepare and fully attest one registered series provider."""
-        self._begin_execution()
-        lock = self._series_embedding_prepare_locks.setdefault(model.fingerprint, Lock())
-        with lock:
-            prepared = self._prepared_series_embedding_models.get(model.fingerprint)
-            if prepared is not None:
-                self._embedding_metrics["series_preparation_cache_reused"] = 1
-                return prepared
-            provider = self._series_embedding_providers.get(model.fingerprint)
-            if provider is None:
-                raise UnsupportedOperationError(
-                    "Series embedding model is not registered; call "
-                    "session.register_series_embedding_provider(model, provider)"
-                )
-            started = perf_counter()
-            info = provider.prepare()
-            if type(info) is not PreparedSeriesModelInfo:
-                raise TypeError("series provider prepare() must return PreparedSeriesModelInfo")
-            elapsed = perf_counter() - started
-            info = replace(info, preparation_seconds=elapsed)
-            self._validate_prepared_series_model(model, info)
-            self._prepared_series_embedding_models[model.fingerprint] = info
-            self._embedding_metrics["series_preparation_seconds"] = elapsed
-            self._embedding_metrics["series_preparation_count"] = (
-                int(self._embedding_metrics.get("series_preparation_count", 0)) + 1
-            )
-            self._embedding_metrics["series_preparation_cache_reused"] = 0
-            self._embedding_metrics["series_model_cache_bytes"] = _path_size(info.cache_path)
-            self._embedding_metrics["series_execution_provider_count"] = len(
-                info.execution_providers
-            )
-            return info
-
-    @staticmethod
-    def _validate_prepared_series_model(
-        model: SeriesEmbeddingModelSpec,
-        info: PreparedSeriesModelInfo,
-    ) -> None:
-        expected: dict[str, object] = {
-            "model_fingerprint": model.fingerprint,
-            "resolved_revision": model.revision,
-            "artifact_sha256": model.artifact_sha256,
-            "backend": model.backend,
-            "adapter_revision": model.adapter_revision,
-            "input_length": model.input_length,
-            "input_channels": model.input_channels,
-            "input_roles": model.input_roles,
-            "input_normalization": model.input_normalization,
-            "pooling": model.pooling,
-            "dimension": model.dimension,
-        }
-        mismatches = [
-            field_name
-            for field_name, expected_value in expected.items()
-            if getattr(info, field_name) != expected_value
-        ]
-        if mismatches:
-            raise UnsupportedOperationError(
-                "Prepared series provider attestation mismatch: " + ", ".join(mismatches)
-            )
-
-    def inspect_prepared_series_embedding_models(
-        self,
-    ) -> tuple[PreparedSeriesModelInfo, ...]:
-        """Return fully attested learned series models owned by this session."""
-        self._ensure_open()
-        return tuple(
-            self._prepared_series_embedding_models[key]
-            for key in sorted(self._prepared_series_embedding_models)
-        )
+        return provider
 
     def _series_embedding_provider(
         self,
-        model: SeriesEmbeddingModelSpec,
+        model: EmbeddingModelSpec,
     ) -> SeriesEmbeddingProvider:
-        provider = self._series_embedding_providers.get(model.fingerprint)
-        if provider is None or model.fingerprint not in self._prepared_series_embedding_models:
-            raise UnsupportedOperationError(
-                "Series embedding model is not prepared; call "
-                "session.prepare_series_embedding_model(model)"
-            )
+        provider = self._prepared_provider(model)
+        if not isinstance(provider, SeriesEmbeddingProvider):
+            raise TypeError("prepared provider does not implement series embedding")
         return provider
 
     def _run_series_provider_batch(
         self,
-        model: SeriesEmbeddingModelSpec,
+        model: EmbeddingModelSpec,
         batch: pa.RecordBatch,
         *,
         kind: Literal["corpus", "query"],
@@ -486,7 +403,7 @@ class Session:
     def _validate_plan_series_models(self, plan: LogicalPlan) -> None:
         from duckpd._executor import _plan_nodes
 
-        models: dict[str, SeriesEmbeddingModelSpec] = {}
+        models: dict[str, EmbeddingModelSpec] = {}
         for node in _plan_nodes(plan):
             if isinstance(node, (SeriesRepresentationPlan, SeriesSearchPlan)):
                 model = node.representation.encoder
@@ -519,6 +436,8 @@ class Session:
             prepared = self._prepared_embedding_models.get(model.fingerprint)
             if prepared is not None:
                 self._embedding_metrics["preparation_cache_reused"] = 1
+                if model.input is not None:
+                    self._embedding_metrics["series_preparation_cache_reused"] = 1
                 return prepared
             provider = self._embedding_providers.get(model.fingerprint)
             if provider is None:
@@ -543,6 +462,8 @@ class Session:
                 self._embedding_providers[model.fingerprint] = provider
             started = perf_counter()
             info = provider.prepare()
+            if type(info) is not PreparedModelInfo:
+                raise TypeError("embedding provider prepare() must return PreparedModelInfo")
             elapsed = perf_counter() - started
             info = replace(info, preparation_seconds=elapsed)
             self._embedding_metrics["preparation_seconds"] = elapsed
@@ -550,11 +471,22 @@ class Session:
                 int(self._embedding_metrics.get("preparation_count", 0)) + 1
             )
             self._embedding_metrics["preparation_cache_reused"] = 0
+            if model.input is not None:
+                self._embedding_metrics["series_preparation_count"] = (
+                    int(self._embedding_metrics.get("series_preparation_count", 0)) + 1
+                )
+                self._embedding_metrics["series_preparation_cache_reused"] = 0
             if info.model_fingerprint != model.fingerprint:
                 raise UnsupportedOperationError(
                     "Prepared provider returned a mismatched fingerprint"
                 )
             self._prepared_embedding_models[model.fingerprint] = info
+            if model.input is not None:
+                self._embedding_metrics["series_preparation_seconds"] = elapsed
+                self._embedding_metrics["series_model_cache_bytes"] = _path_size(info.cache_path)
+                self._embedding_metrics["series_execution_provider_count"] = len(
+                    info.execution_providers
+                )
             return info
 
     def _register_catalog_embedding_model(
@@ -672,11 +604,9 @@ class Session:
         return EmbeddedSeriesQuery(values, representation.fingerprint)
 
     def _embedding_provider(self, model: EmbeddingModelSpec) -> TextEmbeddingProvider:
-        provider = self._embedding_providers.get(model.fingerprint)
-        if provider is None or model.fingerprint not in self._prepared_embedding_models:
-            raise UnsupportedOperationError(
-                "Embedding model is not prepared; call session.prepare_embedding_model(model)"
-            )
+        provider = self._prepared_provider(model)
+        if not isinstance(provider, TextEmbeddingProvider):
+            raise TypeError("prepared provider does not implement text embedding")
         return provider
 
     def _register_embedding_query(self, model: EmbeddingModelSpec, query: str) -> str:
@@ -769,7 +699,7 @@ class Session:
                     column,
                     embedding=(
                         EmbeddingColumnSpec(
-                            EmbeddingModelSpec(**text_columns[column.label]),  # type: ignore[arg-type]
+                            EmbeddingModelSpec.from_dict(text_columns[column.label]),
                             origin="sidecar",
                         )
                         if column.label in text_columns
@@ -2093,7 +2023,7 @@ class Session:
         self._attachments.clear()
         self._registered_sources.clear()
         seen_providers: set[int] = set()
-        for provider in self._series_embedding_providers.values():
+        for provider in self._embedding_providers.values():
             if id(provider) in seen_providers:
                 continue
             seen_providers.add(id(provider))
@@ -2101,9 +2031,9 @@ class Session:
             if callable(close_provider):
                 with suppress(Exception):
                     close_provider()
-        self._series_embedding_providers.clear()
-        self._prepared_series_embedding_models.clear()
-        self._series_embedding_prepare_locks.clear()
+        self._embedding_providers.clear()
+        self._prepared_embedding_models.clear()
+        self._embedding_prepare_locks.clear()
         self._series_embedding_call_locks.clear()
         self._series_queries.clear()
         self._embedded_series_queries.clear()

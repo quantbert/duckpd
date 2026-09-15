@@ -7,11 +7,15 @@ from duckpd._merging import merge_asof
 from duckpd.embeddings import (
     EmbeddedQuery,
     EmbeddingModelSpec,
+    EmbeddingProvider,
     FastEmbedProvider,
     PreparedModelInfo,
+    SeriesChannelRole,
+    SeriesEmbeddingInputSpec,
     TextEmbeddingProvider,
     TransformersEmbeddingProvider,
     embedding_model,
+    series_embedding_input,
 )
 from duckpd.errors import ConcurrentModificationError, MergeError
 from duckpd.featurestore import FeatureStore, SyncReport
@@ -21,14 +25,10 @@ from duckpd.io import concat, from_arrow, from_pandas, read_csv, read_parquet
 from duckpd.series import Series
 from duckpd.series_embeddings import (
     EmbeddedSeriesQuery,
-    PreparedSeriesModelInfo,
-    SeriesChannelRole,
     SeriesColumnSpec,
-    SeriesEmbeddingModelSpec,
     SeriesEmbeddingProvider,
     SeriesRepresentationSpec,
     SeriesWindowSpec,
-    series_embedding_model,
     series_representation,
 )
 from duckpd.session import (
@@ -52,18 +52,18 @@ __all__ = [
     "EmbeddedQuery",
     "EmbeddedSeriesQuery",
     "EmbeddingModelSpec",
+    "EmbeddingProvider",
     "FastEmbedProvider",
     "FeatureStore",
     "MaterializationReport",
     "MergeError",
     "ObjectStoreSecret",
     "PreparedModelInfo",
-    "PreparedSeriesModelInfo",
     "ProfileResult",
     "Series",
     "SeriesChannelRole",
     "SeriesColumnSpec",
-    "SeriesEmbeddingModelSpec",
+    "SeriesEmbeddingInputSpec",
     "SeriesEmbeddingProvider",
     "SeriesGroupBy",
     "SeriesRepresentationSpec",
@@ -82,6 +82,6 @@ __all__ = [
     "merge_asof",
     "read_csv",
     "read_parquet",
-    "series_embedding_model",
+    "series_embedding_input",
     "series_representation",
 ]
