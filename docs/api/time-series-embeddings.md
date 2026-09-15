@@ -883,6 +883,7 @@ reference rather than a production commitment.
 ## Further reading
 
 - [Time-series embeddings and event similarity design](../design/time-series-embeddings.md)
+- [Proposed Transformers series embedding provider](../design/transformers-series-embeddings.md)
 - [Implementation roadmap](../roadmap.md#phase-16--priority-1-native-time-series-representations)
 - [Event-window implementation roadmap](../roadmap.md#phase-17--priority-2-event-windows-and-exact-event-similarity)
 - [Vector search and text embeddings](vector-search-and-embeddings.md)

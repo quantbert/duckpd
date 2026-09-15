@@ -11,8 +11,9 @@ custom-provider, and model-qualification contracts.
 **Intended location:** `docs/design/time-series-embeddings.md`.
 
 Companion designs: [Text Embeddings and Semantic Search][design-text],
-[Vector Search][design-vector], [Feature Store Architecture][design-store], and
-[Feature Store Embedding Metadata and Automatic Model Preparation][design-catalog].
+[Vector Search][design-vector], [Feature Store Architecture][design-store],
+[Feature Store Embedding Metadata and Automatic Model Preparation][design-catalog],
+and the proposed [Transformers Series Embedding Provider](transformers-series-embeddings.md).
 The companion text catalog behavior is implemented in the same
 `catalog_version: 1` schema.
 
