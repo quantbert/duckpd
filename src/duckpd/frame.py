@@ -200,8 +200,11 @@ class DataFrame:
         representation: SeriesRepresentationSpec,
         batch_size: int = 256,
         null_policy: SeriesNullPolicy = "propagate",
+        time: str | None = None,
+        series_start: str | None = None,
+        static_columns: Mapping[str, str] | None = None,
     ) -> DataFrame:
-        """Append a deterministic native time-series representation lazily."""
+        """Append a deterministic or learned time-series representation lazily."""
         from duckpd.series_embeddings import embed_series
 
         return embed_series(
@@ -211,6 +214,9 @@ class DataFrame:
             representation=representation,
             batch_size=batch_size,
             null_policy=null_policy,
+            time=time,
+            series_start=series_start,
+            static_columns=static_columns,
         )
 
     def event_windows(

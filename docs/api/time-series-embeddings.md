@@ -4,21 +4,25 @@ DuckPD supports model-free time-series similarity by turning ordered,
 fixed-length numeric windows into typed vectors. These vectors can be searched
 with the same exact vector engine used for other numeric data.
 
-The current implementation ships deterministic native encoding, a built-in
-MOMENT backend, and an explicitly registered custom-provider boundary. The
-built-in adapter removes notebook boilerplate; it is an integration surface,
-not a recommendation that MOMENT is appropriate for every retrieval task.
-Native and learned paths use the same window, representation, metadata, storage,
-and retrieval contracts described here.
+The current implementation ships deterministic native encoding, built-in
+MOMENT and allowlisted bare-Transformers backends, and an explicitly registered
+custom-provider boundary. Built-in adapters remove notebook boilerplate; they
+are integration surfaces, not recommendations that a checkpoint is appropriate
+for a retrieval task. Native and learned paths use the same window,
+representation, metadata, storage, and retrieval contracts described here.
 
 The native rolling-window walkthrough is
 [`time_series_embeddings.ipynb`](../../demo/notebooks/time_series_embeddings.ipynb);
 the built-in MOMENT-provider walkthrough is
 [`moment_time_series_embeddings.ipynb`](../../demo/notebooks/moment_time_series_embeddings.ipynb);
+the pinned bare-Transformers walkthrough is
+[`transformers_series_embeddings.ipynb`](../../demo/notebooks/transformers_series_embeddings.ipynb);
 and the dedicated event workflow is
 [`event_windows_exact_fusion.ipynb`](../../demo/notebooks/event_windows_exact_fusion.ipynb).
-The lower-level architecture and proposed extensions are documented in the
-[time-series embedding design](../design/time-series-embeddings.md).
+The lower-level architecture and extension history are documented in the
+[time-series embedding design](../design/time-series-embeddings.md). The exact
+Transformers adapter contract is in the
+[Transformers series design](../design/transformers-series-embeddings.md).
 
 ## Current implementation at a glance
 
@@ -645,9 +649,9 @@ The following behavior is implemented now:
 - Exact cosine, L2, and negative-inner-product retrieval.
 - Representation metadata preservation for supported projections, joins,
   local Parquet sidecars, and session-owned tables.
-- Strict catalog-version-1 shared model and series-representation registries,
-  typed feature/reference-table columns, alias and alignment propagation, and
-  inferred native series search.
+- Strict catalog-version-1 and catalog-version-2 shared model and
+  series-representation registries, typed feature/reference-table columns,
+  alias and alignment propagation, and inferred native series search.
 - Exact text-first, reaction-first, and full eligible-set late fusion through
   ordinary filters, typed distances, joins, and deterministic `nsmallest()`.
 
@@ -666,8 +670,9 @@ prepare a model, download an artifact, or run inference.
 ## Learned encoders
 
 Learned encoders are an optional extension, not a replacement for native
-representations. They use the same model and session lifecycle as text. MOMENT
-is the first built-in time-series backend:
+representations. They use the same model and session lifecycle as text. DuckPD
+ships built-in providers for MOMENT and seven allowlisted bare Transformers
+architecture profiles. A MOMENT specification is:
 
 ```python
 encoder = pd.embedding_model(
@@ -708,13 +713,142 @@ learned = windows.embed_series(
 )
 ```
 
-For CPU execution, `session.prepare_embedding_model(encoder)` can create the
-built-in MOMENT provider automatically. Other model families keep the same
-`embed_series()`, persistence, and `search_series()` surface, but require either
-a qualified built-in backend adapter or an application-owned
-`SeriesEmbeddingProvider` with `backend="custom"`. A backend adapter is necessary
-because foundation-model packages do not share checkpoint loaders, tensor
-layouts, masks, pooling behavior, or output objects.
+For CPU execution, `session.prepare_embedding_model(encoder)` creates the
+matching built-in MOMENT or Transformers series provider automatically.
+Registration is required to select CUDA/ROCm explicitly or to use
+`backend="custom"`. A backend adapter is necessary because foundation-model
+packages do not share checkpoint loaders, tensor layouts, masks, pooling
+behavior, or output objects.
+ 
+### Transformers series provider
+
+`backend="transformers"` with a series input selects
+`TransformersSeriesEmbeddingProvider`, not the text Transformers provider. The
+series input must declare `provider_abi="transformers-series-v1"`. The provider
+loads only local files from an immutable Hub revision with
+`trust_remote_code=False`, requires the exact bare class, verifies loading
+information and cache manifests, and calls no forecasting or task head.
+
+Supported profiles are selected by `config.model_type`:
+
+| `model_type` | Bare class | Pooling contract |
+| --- | --- | --- |
+| `patchtst` | `PatchTSTModel` | `mean-channels-patches-v1` |
+| `patchtsmixer` | `PatchTSMixerModel` | `mean-channels-patches-v1` |
+| `timesfm` | `TimesFmModel` | `mean-valid-patches-v1` |
+| `timesfm2_5` | `TimesFm2_5Model` | `mean-valid-patches-v1` |
+| `time_series_transformer` | `TimeSeriesTransformerModel` | `mean-encoder-time-v1` |
+| `informer` | `InformerModel` | `mean-encoder-time-v1` |
+| `autoformer` | `AutoformerModel` | `mean-encoder-time-v1` |
+
+Model repository names are not allowlisted. Preparation validates the model
+type, bare class, input length, channel counts and roles, hidden dimension,
+internal normalization identifier, temporal width, static cardinalities,
+masking policy, and pooling identifier. TimesFM 2.5 additionally requires a
+Transformers release that exposes `TimesFm2_5Model` through `AutoModel`; DuckPD
+never falls back to remote code.
+
+A PatchTST-style specification needs no temporal context:
+
+```python
+encoder = pd.embedding_model(
+    "organization/pinned-patchtst",
+    revision="<immutable-commit-digest>",
+    backend="transformers",
+    dimension=128,
+    normalize=True,
+    pooling="mean-channels-patches-v1",
+    input=pd.series_embedding_input(
+        length=512,
+        channels=("target", "known_schedule"),
+        roles=("target", "known_future_covariate"),
+        normalization="patchtst-config-scaling-v1",
+        provider_abi="transformers-series-v1",
+    ),
+)
+```
+
+TimesFM 1/2 declares a categorical frequency without a timestamp column:
+
+```python
+frequency = pd.series_frequency_input(
+    cadence=pd.series_cadence("hour"),
+    timesfm_frequency="auto",
+)
+```
+
+Encoder-decoder checkpoints can instead declare generated temporal and static
+inputs:
+
+```python
+temporal = pd.series_temporal_input(
+    cadence=pd.series_cadence("month", mode="civil"),
+    timezone="UTC",
+    anchor="last",
+    recipe="gluonts-calendar-v1",
+    features=("month_of_year", "age_log10"),
+)
+model_input = pd.series_embedding_input(
+    length=61,
+    channels=("target", "promotion"),
+    roles=("target", "known_future_covariate"),
+    normalization="hf-time-series-scaler-v1",
+    provider_abi="transformers-series-v1",
+    temporal=temporal,
+    static=(
+        pd.series_static_input(
+            "series_id",
+            kind="categorical",
+            cardinality=366,
+        ),
+    ),
+)
+```
+
+Corpus context is explicitly mapped and remains outside the homogeneous channel
+window payload:
+
+```python
+embedded = windows.embed_series(
+    columns={"target": "target_window", "promotion": "promotion_window"},
+    into="embedding",
+    representation=representation,
+    time="window_anchor",
+    series_start="series_start",
+    static_columns={"series_id": "series_id"},
+)
+```
+
+`time` is required exactly when temporal input is declared. `series_start` is
+required exactly for `age_log10`. Timestamp columns must be `TIMESTAMP` or
+`TIMESTAMPTZ`; static real columns must be numeric and static categorical
+columns integral. Query encoding uses the same context through an immutable
+snapshot:
+
+```python
+query = pd.series_query(
+    {"target": target_values, "promotion": promotion_values},
+    time=window_anchor,
+    series_start=series_start,
+    static={"series_id": 42},
+)
+matches = embedded.vector.search_series(
+    query,
+    column="embedding",
+    k=10,
+)
+```
+
+Naive query timestamps are interpreted in the declared IANA timezone.
+Ambiguous/nonexistent civil times, cadence misalignment, missing context,
+nonfinite real values, and out-of-range categorical IDs fail. A plain channel
+mapping remains valid for representations without temporal or static input.
+
+The legacy four-field `SeriesEmbeddingInputSpec` serialization remains
+unchanged. Extended inputs are self-versioned with `schema_version: 2`;
+catalogs containing them require `catalog_version: 2`. Existing sidecar and
+DuckDB-table metadata envelopes preserve the complete representation without a
+format migration.
 
 A learned encoder is only one component of the representation space. Input
 features, sampling, outer normalization, provider normalization, channel order,
@@ -726,11 +860,12 @@ The provider exposes `specification`, `thread_safe`, `prepare()`, and
 `embed_windows(batch)`. It participates in the shared `EmbeddingProvider`
 preparation contract: `prepare()` returns `PreparedModelInfo` with the model
 fingerprint, backend, optional verified artifact digest and cache path, and
-execution providers. `embed_windows()` receives a `pyarrow.RecordBatch` whose
-fields follow the typed input contract's channel order and have type
-`FixedSizeList<float32, length>`. Field metadata records each role. DuckPD's
-validity mask removes outer-null and zero-scale rows before the call; the
-provider therefore receives complete non-null rows only. Variable-length
+execution providers. `embed_windows()` receives a canonical
+`pyarrow.RecordBatch`: declared channel fields first, followed when required by
+generated temporal, static-real, and static-categorical fixed-size arrays.
+Schema metadata records model and representation fingerprints, provider ABI,
+complete-row mask semantics, time-feature shape, and TimesFM frequency.
+DuckPD removes outer-null and zero-scale rows before the call. Variable-length
 padding masks are not part of this contract.
 
 ### Targets, variates, and covariates
@@ -748,9 +883,10 @@ not need:
 For native DuckPD representations, all numeric channels are simply ordered
 inputs to one deterministic vector. Learned input specifications pair every
 `channels` entry with a `roles` entry: `target`, `past_covariate`, or
-`known_future_covariate`. Inputs are numeric float32 fixed windows. Static and
-categorical channels, future-horizon values, and variable-length masks require
-a later versioned contract rather than an implicit provider convention.
+`known_future_covariate`. Version-2 Transformer inputs can additionally declare
+semantic cadence, deterministic calendar features, and ordered static real or
+categorical values. Future-horizon values and variable-length masks remain
+unsupported rather than becoming implicit provider conventions.
 
 This distinction also prevents leakage. A historical window representation may
 only consume values that were available at its endpoint. A known-future
@@ -803,10 +939,11 @@ for forecasting while producing poor retrieval neighborhoods.
 
 ### First-party provider policy
 
-DuckPD ships no learned model weights or model-runtime dependencies. It does ship
-the thin `MomentEmbeddingProvider` adapter; applications still own model
-selection and installation of PyTorch, `huggingface-hub`, and `momentfm`. The
-provider owns pinned checkpoint acquisition and tensor conversion. DuckPD's
+DuckPD ships no learned model weights or model-runtime dependencies. It ships
+thin `MomentEmbeddingProvider` and `TransformersSeriesEmbeddingProvider`
+adapters; applications still own model selection and installation of the
+corresponding PyTorch, `huggingface_hub`, MOMENT, or Transformers runtime. The
+providers own pinned checkpoint acquisition and tensor conversion. DuckPD's
 shared series layer owns immutable model and representation identity, explicit
 preparation, bounded Arrow batches, output validation, metadata propagation,
 persistence, and exact retrieval.
@@ -816,13 +953,14 @@ was restricted to one 512-point channel and excluded Python 3.14. TS2Vec require
 a DuckPD-maintained training and runtime stack. Neither demonstrated material
 held-out retrieval value over native or compact deterministic baselines. Their
 architecture and training complexity therefore did not justify a permanent
-public API. MOMENT remains an external runtime behind a small adapter.
+public API. MOMENT and bare Transformers backbones remain external
+runtimes behind small adapters.
 
-Shipping a backend adapter is not a model recommendation. Recommending MOMENT or
-another learned representation for production still requires evidence on a
-named task that it materially beats the best relevant native, PCA, or
-statistical baseline across held-out entities and chronology while meeting
-runtime, memory, portability, licensing, and determinism requirements.
+Shipping a backend adapter is not a model recommendation. Recommending any
+learned representation for production still requires evidence on a named task
+that it materially beats the best relevant native, PCA, or statistical baseline
+across held-out entities and chronology while meeting runtime, memory,
+portability, licensing, and determinism requirements.
 
 ### Qualification requirements
 

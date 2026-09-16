@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import sleep
@@ -1389,3 +1389,703 @@ def test_learned_null_error_fails_before_provider_inference() -> None:
         embedded.collect()
 
     assert provider.batches == []
+
+
+def _transformers_series_representation() -> duckpd.SeriesRepresentationSpec:
+    cadence = duckpd.series_cadence("hour")
+    temporal = duckpd.series_temporal_input(
+        cadence=cadence,
+        timezone="UTC",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=("hour_of_day", "age_log10"),
+    )
+    model = duckpd.embedding_model(
+        "research/temporal-encoder",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        backend="transformers",
+        dimension=3,
+        normalize=False,
+        pooling="mean-encoder-time-v1",
+        input=duckpd.series_embedding_input(
+            length=2,
+            channels=("target", "promotion"),
+            roles=("target", "known_future_covariate"),
+            normalization="hf-time-series-scaler-v1",
+            provider_abi="transformers-series-v1",
+            temporal=temporal,
+            static=(
+                duckpd.series_static_input(
+                    "series_id",
+                    kind="categorical",
+                    cardinality=4,
+                ),
+                duckpd.series_static_input("scale", kind="real"),
+            ),
+        ),
+    )
+    return duckpd.series_representation(
+        window=2,
+        channels=("target", "promotion"),
+        sampling="observations",
+        data_contract="retail/hourly-demand/v1",
+        encoder=model,
+    )
+
+
+def test_transformers_series_contract_serialization_is_strict_and_canonical() -> None:
+    legacy = duckpd.series_embedding_input(
+        length=2,
+        channels=("target",),
+        roles=("target",),
+        normalization="none",
+    )
+    assert legacy.to_dict() == {
+        "kind": "series",
+        "length": 2,
+        "channels": ["target"],
+        "roles": ["target"],
+        "normalization": "none",
+    }
+
+    representation = _transformers_series_representation()
+    model = representation.encoder
+    assert model is not None
+    payload = model.to_dict()
+    model_input = cast("dict[str, object]", payload["input"])
+    assert model_input["schema_version"] == 2
+    assert model_input["provider_abi"] == "transformers-series-v1"
+    assert duckpd.EmbeddingModelSpec.from_dict(payload) == model
+
+    malformed = json.loads(json.dumps(model_input))
+    malformed["temporal"]["cadence"]["multiple"] = True
+    with pytest.raises(ValueError, match="positive integer"):
+        duckpd.SeriesEmbeddingInputSpec.from_dict(malformed)
+    malformed = json.loads(json.dumps(model_input))
+    malformed["unknown"] = 1
+    with pytest.raises(ValueError, match="unknown fields"):
+        duckpd.SeriesEmbeddingInputSpec.from_dict(malformed)
+
+
+def test_temporal_generation_preserves_civil_time_and_direct_month_ends() -> None:
+    from duckpd._temporal import reconstruct_series_timestamps
+
+    civil_day = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("day", mode="civil"),
+        timezone="America/New_York",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=("hour_of_day",),
+    )
+    across_dst = reconstruct_series_timestamps(
+        civil_day,
+        datetime(2024, 3, 11, 1, 30),
+        2,
+    )
+    assert [value.hour for value in across_dst] == [1, 1]
+    assert across_dst[1].astimezone(UTC) - across_dst[0].astimezone(UTC) == timedelta(hours=23)
+    with pytest.raises(ValueError, match="nonexistent local time"):
+        reconstruct_series_timestamps(civil_day, datetime(2024, 3, 10, 2, 30), 1)
+    with pytest.raises(ValueError, match="ambiguous local time"):
+        reconstruct_series_timestamps(civil_day, datetime(2024, 11, 3, 1, 30), 1)
+
+    civil_month = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("month", mode="civil"),
+        timezone="UTC",
+        anchor="last",
+        recipe="calendar-fourier-v1",
+        features=("month_of_year",),
+    )
+    month_ends = reconstruct_series_timestamps(
+        civil_month,
+        datetime(2024, 3, 31, tzinfo=UTC),
+        3,
+    )
+    assert [(value.month, value.day) for value in month_ends] == [
+        (1, 31),
+        (2, 29),
+        (3, 31),
+    ]
+
+
+def test_transformers_temporal_static_corpus_query_and_persistence_parity(
+    tmp_path: Path,
+) -> None:
+    representation = _transformers_series_representation()
+    model = representation.encoder
+    assert model is not None
+    provider = _RecordingSeriesProvider(model)
+    session = duckpd.connect()
+    session.register_embedding_provider(model, provider)
+    session.prepare_embedding_model(model)
+    source = session.from_pandas(
+        pd.DataFrame(
+            {
+                "row": [0, 1, 2],
+                "target": [1.0, 2.0, 4.0],
+                "promotion": [0.0, 1.0, 1.0],
+                "window_end": pd.to_datetime(
+                    [
+                        "2024-01-01T00:00:00Z",
+                        "2024-01-01T01:00:00Z",
+                        "2024-01-01T02:00:00Z",
+                    ]
+                ),
+                "series_start": pd.to_datetime(["2024-01-01T00:00:00Z"] * 3),
+                "series_id": pd.Series([2, 2, 2], dtype="int64"),
+                "scale": [1.5, 1.5, 1.5],
+            }
+        ),
+        order_by="row",
+    )
+    windows = source.assign(
+        target_window=lambda frame: frame["target"].rolling(2).to_array(),
+        promotion_window=lambda frame: frame["promotion"].rolling(2).to_array(),
+    )
+    embedded = windows.embed_series(
+        columns={
+            "target": "target_window",
+            "promotion": "promotion_window",
+        },
+        into="vector",
+        representation=representation,
+        time="window_end",
+        series_start="series_start",
+        static_columns={"series_id": "series_id", "scale": "scale"},
+    )
+    operation = json.loads(embedded.explain(mode="json"))["execution_boundaries"][
+        "embedding_operations"
+    ][0]
+    assert operation["temporal_input"] is True
+    assert operation["series_start_input"] is True
+    assert operation["static_inputs"] == ["series_id", "scale"]
+
+    corpus = embedded.collect()
+    query = duckpd.series_query(
+        {
+            "target": [2.0, 4.0],
+            "promotion": [1.0, 1.0],
+        },
+        time=datetime(2024, 1, 1, 2, tzinfo=UTC),
+        series_start=datetime(2024, 1, 1, tzinfo=UTC),
+        static={"scale": 1.5, "series_id": 2},
+    )
+    query_embedding = session.embed_series_query(query, representation=representation)
+    np.testing.assert_array_equal(
+        corpus["vector"].iloc[-1],
+        np.asarray(query_embedding.values, dtype=np.float32),
+    )
+
+    provider_batch = provider.batches[0]
+    assert provider_batch.schema.names == [
+        "target",
+        "promotion",
+        "__duckpd_past_time_features",
+        "__duckpd_static_real",
+        "__duckpd_static_categorical",
+    ]
+    assert provider_batch.schema.metadata == {
+        b"duckpd.model_fingerprint": model.fingerprint.encode(),
+        b"duckpd.representation_fingerprint": representation.fingerprint.encode(),
+        b"duckpd.mask_semantics": b"complete_rows_only-v1",
+        b"duckpd.provider_abi": b"transformers-series-v1",
+        b"duckpd.time_feature_shape": b"2,2",
+    }
+
+    path = tmp_path / "transformers-series.parquet"
+    embedded.write_parquet(path)
+    restored = session.read_parquet(path)
+    assert restored._column("vector").series == SeriesColumnSpec(
+        representation,
+        origin="sidecar",
+    )
+    embedded.save_as_table("transformers_series")
+    assert session.table("transformers_series")._column("vector").series == SeriesColumnSpec(
+        representation,
+        origin="table",
+    )
+
+
+def test_temporal_feature_recipes_and_frequency_resolution_are_exact() -> None:
+    from duckpd._temporal import (
+        cadence_nanoseconds,
+        generate_series_time_features,
+        reconstruct_series_timestamps,
+        resolve_timesfm_frequency,
+        shift_series_timestamp,
+        utc_nanoseconds,
+    )
+
+    features: tuple[duckpd.SeriesTimeFeature, ...] = (
+        "second_of_minute",
+        "minute_of_hour",
+        "hour_of_day",
+        "day_of_week",
+        "day_of_month",
+        "day_of_year",
+        "week_of_year",
+        "month_of_year",
+        "age_log10",
+    )
+    instant = datetime(2024, 12, 31, 23, 59, 59, tzinfo=UTC)
+    gluonts = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("second"),
+        timezone="UTC",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=features,
+    )
+    generated = generate_series_time_features(
+        gluonts,
+        anchor=instant,
+        series_start=instant,
+        length=1,
+    )
+    expected_components = (59, 59, 23, 1, 30, 365, 0, 11)
+    expected_periods = (60, 60, 24, 7, 31, 366, 53, 12)
+    assert generated[0][:-1] == pytest.approx(
+        tuple(
+            component / (period - 1) - 0.5
+            for component, period in zip(
+                expected_components,
+                expected_periods,
+                strict=True,
+            )
+        )
+    )
+    assert generated[0][-1] == pytest.approx(np.log10(2.0))
+
+    fourier = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("hour"),
+        timezone="UTC",
+        anchor="end_exclusive",
+        recipe="calendar-fourier-v1",
+        features=("hour_of_day", "age_log10"),
+    )
+    timestamps = reconstruct_series_timestamps(
+        fourier,
+        datetime(2024, 1, 1, 2, tzinfo=UTC),
+        2,
+    )
+    assert timestamps == (
+        datetime(2024, 1, 1, 0, tzinfo=UTC),
+        datetime(2024, 1, 1, 1, tzinfo=UTC),
+    )
+    generated = generate_series_time_features(
+        fourier,
+        anchor=datetime(2024, 1, 1, 2, tzinfo=UTC),
+        series_start=datetime(2024, 1, 1, tzinfo=UTC),
+        length=2,
+    )
+    assert generated[0] == pytest.approx((0.0, 1.0, np.log10(2.0)))
+    assert generated[1] == pytest.approx(
+        (np.sin(2 * np.pi / 24), np.cos(2 * np.pi / 24), np.log10(3.0))
+    )
+    with pytest.raises(ValueError, match="not aligned"):
+        generate_series_time_features(
+            fourier,
+            anchor=datetime(2024, 1, 1, 2, tzinfo=UTC),
+            series_start=datetime(2023, 12, 31, 23, 30, tzinfo=UTC),
+            length=2,
+        )
+
+    frequency_cases: tuple[tuple[duckpd.SeriesCadenceUnit, int], ...] = (
+        ("minute", 0),
+        ("week", 1),
+        ("quarter", 2),
+    )
+    for unit, expected in frequency_cases:
+        cadence = duckpd.series_cadence(
+            unit,
+            mode="civil" if unit in {"week", "quarter"} else "elapsed",
+        )
+        assert resolve_timesfm_frequency(duckpd.series_frequency_input(cadence=cadence)) == expected
+    assert (
+        resolve_timesfm_frequency(
+            duckpd.series_frequency_input(
+                cadence=duckpd.series_cadence("year", mode="civil"),
+                timesfm_frequency=0,
+            )
+        )
+        == 0
+    )
+    assert cadence_nanoseconds(duckpd.series_cadence("hour", multiple=2)) == 7_200_000_000_000
+    resolved_epoch = reconstruct_series_timestamps(gluonts, datetime(1970, 1, 1), 1)[0]
+    assert utc_nanoseconds(resolved_epoch) == 0
+    with pytest.raises(TypeError, match="shift count"):
+        shift_series_timestamp(resolved_epoch, gluonts.cadence, 1.5)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="IANA timezone"):
+        shift_series_timestamp(datetime(2024, 1, 1, tzinfo=UTC), gluonts.cadence, 1)
+
+    generated_gap = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("day", mode="civil"),
+        timezone="America/New_York",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=("hour_of_day",),
+    )
+    with pytest.raises(ValueError, match="nonexistent local time"):
+        reconstruct_series_timestamps(
+            generated_gap,
+            datetime(2024, 3, 11, 2, 30),
+            2,
+        )
+    with pytest.raises(ValueError, match="no later"):
+        generate_series_time_features(
+            fourier,
+            anchor=datetime(2024, 1, 1, 2, tzinfo=UTC),
+            series_start=datetime(2024, 1, 1, 1, tzinfo=UTC),
+            length=2,
+        )
+    without_age = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("hour"),
+        timezone="UTC",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=("hour_of_day",),
+    )
+    with pytest.raises(ValueError, match="valid only"):
+        generate_series_time_features(
+            without_age,
+            anchor=instant,
+            series_start=instant,
+            length=1,
+        )
+
+    month_age = duckpd.series_temporal_input(
+        cadence=duckpd.series_cadence("month", mode="civil"),
+        timezone="UTC",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=("age_log10",),
+    )
+    assert generate_series_time_features(
+        month_age,
+        anchor=datetime(2024, 3, 31, tzinfo=UTC),
+        series_start=datetime(2024, 1, 31, tzinfo=UTC),
+        length=1,
+    )[0] == pytest.approx((np.log10(4.0),))
+
+
+def test_fixed_grid_representation_matches_transformers_series_cadence() -> None:
+    month_model = duckpd.embedding_model(
+        "research/monthly",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        backend="transformers",
+        dimension=4,
+        normalize=False,
+        pooling="mean-encoder-time-v1",
+        input=duckpd.series_embedding_input(
+            length=2,
+            channels=("target",),
+            roles=("target",),
+            normalization="hf-time-series-scaler-v1",
+            provider_abi="transformers-series-v1",
+            temporal=duckpd.series_temporal_input(
+                cadence=duckpd.series_cadence("month", mode="civil"),
+                timezone="UTC",
+                anchor="last",
+                recipe="gluonts-calendar-v1",
+                features=("month_of_year",),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="require an elapsed"):
+        duckpd.series_representation(
+            window=2,
+            channels=("target",),
+            sampling="fixed_grid",
+            step=timedelta(days=1),
+            data_contract="test/civil-fixed-grid/v1",
+            encoder=month_model,
+        )
+
+    hour_model = replace(
+        month_model,
+        input=duckpd.series_embedding_input(
+            length=2,
+            channels=("target",),
+            roles=("target",),
+            normalization="hf-time-series-scaler-v1",
+            provider_abi="transformers-series-v1",
+            temporal=duckpd.series_temporal_input(
+                cadence=duckpd.series_cadence("hour"),
+                timezone="UTC",
+                anchor="last",
+                recipe="gluonts-calendar-v1",
+                features=("hour_of_day",),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="step must equal"):
+        duckpd.series_representation(
+            window=2,
+            channels=("target",),
+            sampling="fixed_grid",
+            step=timedelta(hours=2),
+            data_contract="test/mismatched-fixed-grid/v1",
+            encoder=hour_model,
+        )
+    representation = duckpd.series_representation(
+        window=2,
+        channels=("target",),
+        sampling="fixed_grid",
+        step=timedelta(hours=1),
+        data_contract="test/matched-fixed-grid/v1",
+        encoder=hour_model,
+    )
+    assert representation.step == "PT1H"
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (lambda: duckpd.series_cadence("hour", mode="civil"), "requires mode"),
+        (lambda: duckpd.series_cadence("month"), "requires mode"),
+        (
+            lambda: duckpd.SeriesFrequencyInputSpec(
+                duckpd.series_cadence("hour"),
+                True,  # type: ignore[arg-type]
+            ),
+            "timesfm_frequency",
+        ),
+        (
+            lambda: duckpd.series_static_input("id", kind="real", cardinality=2),
+            "must not define cardinality",
+        ),
+        (
+            lambda: duckpd.series_static_input("id", kind="categorical"),
+            "requires a positive cardinality",
+        ),
+        (
+            lambda: duckpd.SeriesTemporalInputSpec(
+                duckpd.series_cadence("hour"),
+                "UTC",
+                "last",
+                "gluonts-calendar-v1",
+                ("hour_of_day", "hour_of_day"),
+            ),
+            "unique features",
+        ),
+    ],
+)
+def test_transformers_series_public_contracts_reject_semantic_ambiguity(
+    factory: Callable[[], object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        factory()
+
+
+def test_transformers_series_exported_dataclasses_enforce_runtime_types() -> None:
+    cadence_type = cast("Any", duckpd.SeriesCadenceSpec)
+    frequency_type = cast("Any", duckpd.SeriesFrequencyInputSpec)
+    temporal_type = cast("Any", duckpd.SeriesTemporalInputSpec)
+    static_type = cast("Any", duckpd.SeriesStaticInputSpec)
+    input_type = cast("Any", duckpd.SeriesEmbeddingInputSpec)
+    query_type = cast("Any", duckpd.SeriesQueryInput)
+    hour = duckpd.series_cadence("hour")
+    temporal = duckpd.series_temporal_input(
+        cadence=hour,
+        timezone="UTC",
+        anchor="last",
+        recipe="gluonts-calendar-v1",
+        features=("hour_of_day",),
+    )
+    frequency = duckpd.series_frequency_input(cadence=hour)
+    real = duckpd.series_static_input("scale", kind="real")
+
+    invalid_factories: tuple[Callable[[], object], ...] = (
+        lambda: cadence_type("millennium"),
+        lambda: cadence_type("hour", False),
+        lambda: cadence_type("day", 1, "clock"),
+        lambda: frequency_type("hour"),
+        lambda: temporal_type("hour", "UTC", "last", "gluonts-calendar-v1", ("hour_of_day",)),
+        lambda: temporal_type(hour, "", "last", "gluonts-calendar-v1", ("hour_of_day",)),
+        lambda: temporal_type(
+            hour, "Mars/Olympus", "last", "gluonts-calendar-v1", ("hour_of_day",)
+        ),
+        lambda: temporal_type(hour, "UTC", "middle", "gluonts-calendar-v1", ("hour_of_day",)),
+        lambda: temporal_type(hour, "UTC", "last", "implicit", ("hour_of_day",)),
+        lambda: temporal_type(hour, "UTC", "last", "gluonts-calendar-v1", ()),
+        lambda: temporal_type(hour, "UTC", "last", "gluonts-calendar-v1", ("holiday",)),
+        lambda: static_type("", "real"),
+        lambda: static_type("scale", "ordinal"),
+        lambda: static_type("scale", "real", None, "zscore"),
+        lambda: input_type(0, ("target",), ("target",), "none"),
+        lambda: input_type(2, (), (), "none"),
+        lambda: input_type(2, ("target", "target"), ("target", "target"), "none"),
+        lambda: input_type(2, ("target",), (), "none"),
+        lambda: input_type(2, ("target",), ("past_covariate",), "none"),
+        lambda: input_type(2, ("target",), ("target",), ""),
+        lambda: input_type(2, ("target",), ("target",), "none", "future-abi"),
+        lambda: input_type(2, ("target",), ("target",), "none", None, frequency),
+        lambda: input_type(
+            2,
+            ("target",),
+            ("target",),
+            "none",
+            "transformers-series-v1",
+            frequency,
+            temporal,
+        ),
+        lambda: input_type(
+            2,
+            ("target",),
+            ("target",),
+            "none",
+            "transformers-series-v1",
+            None,
+            None,
+            (real, real),
+        ),
+        lambda: query_type((), None, None, ()),
+        lambda: query_type((("", (1.0,)),), None, None, ()),
+        lambda: query_type((("target", (float("nan"),)),), None, None, ()),
+        lambda: query_type((("target", (1.0,)),), "now", None, ()),
+        lambda: query_type((("target", (1.0,)),), None, None, (("flag", True),)),
+        lambda: query_type(
+            (("target", (1.0,)), ("target", (2.0,))),
+            None,
+            None,
+            (),
+        ),
+        lambda: query_type((("target", (1.0,)),), None, "start", ()),
+        lambda: query_type((("target", (1.0,)),), None, None, []),
+        lambda: query_type(
+            (("target", (1.0,)),),
+            None,
+            None,
+            (("scale", 1.0), ("scale", 2.0)),
+        ),
+        lambda: query_type((("target", (1.0,)),), None, None, (("", 1.0),)),
+    )
+    for factory in invalid_factories:
+        with pytest.raises((TypeError, ValueError)):
+            factory()
+
+
+@pytest.mark.parametrize(
+    ("values", "static"),
+    [
+        (cast("Any", (1.0, 2.0)), None),
+        (cast("Any", {"": (1.0,)}), None),
+        (cast("Any", {"target": "12"}), None),
+        (cast("Any", {"target": 1.0}), None),
+        (cast("Any", {"target": (True,)}), None),
+        (cast("Any", {"target": (float("inf"),)}), None),
+        ({"target": (1.0,)}, cast("Any", (("scale", 1.0),))),
+        ({"target": (1.0,)}, cast("Any", {"": 1.0})),
+        ({"target": (1.0,)}, cast("Any", {"scale": True})),
+        ({"target": (1.0,)}, cast("Any", {"scale": float("nan")})),
+    ],
+)
+def test_series_query_rejects_noncanonical_values(
+    values: Mapping[str, Sequence[float]],
+    static: Mapping[str, float | int] | None,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        duckpd.series_query(values, static=static)
+
+
+def test_transformers_series_nested_parsers_reject_partial_or_coercive_input() -> None:
+    cadence = {"unit": "hour", "multiple": 1, "mode": "elapsed"}
+    valid = _transformers_series_representation().encoder
+    assert valid is not None
+    model_input = cast("dict[str, object]", valid.to_dict()["input"])
+    invalid_inputs: tuple[object, ...] = (
+        None,
+        {},
+        {**cadence, "extra": True},
+    )
+    for value in invalid_inputs:
+        with pytest.raises((TypeError, ValueError)):
+            duckpd.SeriesCadenceSpec.from_dict(value)
+
+    with pytest.raises((TypeError, ValueError)):
+        duckpd.SeriesFrequencyInputSpec.from_dict({"cadence": cadence, "timesfm_frequency": "0"})
+    temporal_payload = cast("dict[str, object]", model_input["temporal"])
+    with pytest.raises(TypeError, match="features must be an array"):
+        duckpd.SeriesTemporalInputSpec.from_dict({**temporal_payload, "features": "hour_of_day"})
+    with pytest.raises((TypeError, ValueError)):
+        duckpd.SeriesStaticInputSpec.from_dict({"name": "id"})
+
+    changes_set: tuple[dict[str, object], ...] = (
+        {"schema_version": 3},
+        {"kind": "text"},
+        {"channels": "target"},
+        {"roles": "target"},
+        {"static": {}},
+        {"frequency": None},
+    )
+    for changes in changes_set:
+        malformed: dict[str, object] = {**model_input, **changes}
+        with pytest.raises((TypeError, ValueError)):
+            duckpd.SeriesEmbeddingInputSpec.from_dict(malformed)
+
+
+def test_transformers_series_context_contract_fails_before_inference() -> None:
+    from duckpd.series_embeddings import snapshot_series_query
+
+    representation = _transformers_series_representation()
+    values = {"target": (1.0, 2.0), "promotion": (0.0, 1.0)}
+    with pytest.raises(ValueError, match="requires series_query"):
+        snapshot_series_query(values, representation)
+    with pytest.raises(ValueError, match="requires series_query"):
+        snapshot_series_query(
+            duckpd.series_query(
+                values,
+                series_start=datetime(2024, 1, 1, tzinfo=UTC),
+                static={"series_id": 1, "scale": 1.0},
+            ),
+            representation,
+        )
+    with pytest.raises(ValueError, match="requires series_start"):
+        snapshot_series_query(
+            duckpd.series_query(
+                values,
+                time=datetime(2024, 1, 1, 1, tzinfo=UTC),
+                static={"series_id": 1, "scale": 1.0},
+            ),
+            representation,
+        )
+    with pytest.raises(ValueError, match="must exactly match"):
+        snapshot_series_query(
+            duckpd.series_query(
+                values,
+                time=datetime(2024, 1, 1, 1, tzinfo=UTC),
+                series_start=datetime(2024, 1, 1, tzinfo=UTC),
+                static={"series_id": 1},
+            ),
+            representation,
+        )
+    with pytest.raises(TypeError, match="must be an integer"):
+        snapshot_series_query(
+            duckpd.series_query(
+                values,
+                time=datetime(2024, 1, 1, 1, tzinfo=UTC),
+                series_start=datetime(2024, 1, 1, tzinfo=UTC),
+                static={"series_id": 1.0, "scale": 1.0},
+            ),
+            representation,
+        )
+    with pytest.raises(ValueError, match=r"\[0, 4\)"):
+        snapshot_series_query(
+            duckpd.series_query(
+                values,
+                time=datetime(2024, 1, 1, 1, tzinfo=UTC),
+                series_start=datetime(2024, 1, 1, tzinfo=UTC),
+                static={"series_id": 4, "scale": 1.0},
+            ),
+            representation,
+        )
+
+    native = _native_representation()
+    with pytest.raises(ValueError, match="time is valid only"):
+        snapshot_series_query(
+            duckpd.series_query(
+                {"simple_return": (1.0, 2.0)},
+                time=datetime(2024, 1, 1, tzinfo=UTC),
+            ),
+            native,
+        )

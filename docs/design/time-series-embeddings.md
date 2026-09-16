@@ -1762,6 +1762,14 @@ adapter does not qualify the model's retrieval quality. Recommending a learned
 representation still requires material held-out value over the best relevant
 deterministic baseline.
 
+The later
+[Transformers series adapter design](transformers-series-embeddings.md)
+implements the versioned temporal/static input extension, seven allowlisted bare
+Transformers architecture profiles, and catalog version 2. It preserves this
+document's native representation, bounded provider, persistence, retrieval, and
+qualification requirements; it does not retroactively change this historical
+baseline or qualify a checkpoint's retrieval quality.
+
 ### Later research: aligned multimodal spaces
 
 Evaluate a finance-specific aligned encoder pair, potentially informed by TRACE,

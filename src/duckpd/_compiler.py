@@ -544,14 +544,25 @@ class DuckDBCompiler:
         compiled = self._compile(plan.input)
         if plan.representation.encoder is not None:
             udf_name = self._session._series_document_udf(plan)
-            inputs = [
+            channel_inputs = [
                 duckdb.SQLExpression(quote_identifier(compiled.bindings[column_id])).cast(
                     f"DOUBLE[{plan.representation.window}]"
                 )
                 for _, column_id in plan.channels
             ]
-            packed = duckdb.FunctionExpression("list_value", *inputs)
-            output = duckdb.FunctionExpression(udf_name, packed)
+            packed = duckdb.FunctionExpression("list_value", *channel_inputs)
+            inputs: list[duckdb.Expression] = [packed]
+            if plan.time is not None:
+                inputs.append(duckdb.SQLExpression(quote_identifier(compiled.bindings[plan.time])))
+            if plan.series_start is not None:
+                inputs.append(
+                    duckdb.SQLExpression(quote_identifier(compiled.bindings[plan.series_start]))
+                )
+            inputs.extend(
+                duckdb.SQLExpression(quote_identifier(compiled.bindings[column_id]))
+                for _, column_id in plan.static_columns
+            )
+            output = duckdb.FunctionExpression(udf_name, *inputs)
             projections = [
                 *(
                     duckdb.SQLExpression(quote_identifier(compiled.bindings[column.id])).alias(

@@ -755,6 +755,9 @@ class SeriesRepresentationPlan(LogicalPlanBase):
 
     input: LogicalPlan
     channels: tuple[tuple[str, ColumnId], ...]
+    time: ColumnId | None
+    series_start: ColumnId | None
+    static_columns: tuple[tuple[str, ColumnId], ...]
     output_column: Column
     representation: SeriesRepresentationSpec
     batch_size: int

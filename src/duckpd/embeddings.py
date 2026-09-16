@@ -28,6 +28,240 @@ EmbeddingBackend = Literal["fastembed", "transformers", "moment", "custom"]
 EmbeddingMetadataOrigin = Literal["generated", "sidecar", "table", "catalog"]
 
 SeriesChannelRole = Literal["target", "past_covariate", "known_future_covariate"]
+SeriesCadenceUnit = Literal[
+    "second",
+    "minute",
+    "hour",
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
+]
+SeriesTimeFeature = Literal[
+    "second_of_minute",
+    "minute_of_hour",
+    "hour_of_day",
+    "day_of_week",
+    "day_of_month",
+    "day_of_year",
+    "week_of_year",
+    "month_of_year",
+    "age_log10",
+]
+
+_CADENCE_UNITS = {
+    "second",
+    "minute",
+    "hour",
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
+}
+_TIME_FEATURES = {
+    "second_of_minute",
+    "minute_of_hour",
+    "hour_of_day",
+    "day_of_week",
+    "day_of_month",
+    "day_of_year",
+    "week_of_year",
+    "month_of_year",
+    "age_log10",
+}
+_TRANSFORMERS_SERIES_ABI = "transformers-series-v1"
+
+
+def _strict_object(
+    value: object,
+    *,
+    fields: set[str],
+    required: set[str],
+    owner: str,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{owner} must be an object")
+    data = dict(cast("Mapping[str, object]", value))
+    unknown = sorted(set(data) - fields)
+    missing = sorted(required - set(data))
+    if unknown:
+        raise ValueError(f"{owner} has unknown fields: {', '.join(unknown)}")
+    if missing:
+        raise ValueError(f"{owner} is missing fields: {', '.join(missing)}")
+    return data
+
+
+@dataclass(frozen=True)
+class SeriesCadenceSpec:
+    """Semantic cadence used to reconstruct time-series coordinates."""
+
+    unit: SeriesCadenceUnit
+    multiple: int = 1
+    mode: Literal["elapsed", "civil"] = "elapsed"
+
+    def __post_init__(self) -> None:
+        if self.unit not in _CADENCE_UNITS:
+            raise ValueError("cadence unit is unsupported")
+        if type(self.multiple) is not int or self.multiple <= 0:
+            raise ValueError("cadence multiple must be a positive integer")
+        if self.mode not in {"elapsed", "civil"}:
+            raise ValueError("cadence mode must be 'elapsed' or 'civil'")
+        if self.unit in {"second", "minute", "hour"} and self.mode != "elapsed":
+            raise ValueError(f"{self.unit} cadence requires mode='elapsed'")
+        if self.unit in {"week", "month", "quarter", "year"} and self.mode != "civil":
+            raise ValueError(f"{self.unit} cadence requires mode='civil'")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"unit": self.unit, "multiple": self.multiple, "mode": self.mode}
+
+    @classmethod
+    def from_dict(cls, value: object) -> SeriesCadenceSpec:
+        data = _strict_object(
+            value,
+            fields={"unit", "multiple", "mode"},
+            required={"unit", "multiple", "mode"},
+            owner="series cadence",
+        )
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class SeriesFrequencyInputSpec:
+    """Categorical TimesFM frequency contract."""
+
+    cadence: SeriesCadenceSpec
+    timesfm_frequency: Literal["auto", 0, 1, 2] = "auto"
+
+    def __post_init__(self) -> None:
+        if type(self.cadence) is not SeriesCadenceSpec:
+            raise TypeError("frequency cadence must be a SeriesCadenceSpec")
+        raw_frequency = cast("object", self.timesfm_frequency)
+        if raw_frequency not in {"auto", 0, 1, 2} or type(raw_frequency) is bool:
+            raise ValueError("timesfm_frequency must be 'auto', 0, 1, or 2")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cadence": self.cadence.to_dict(),
+            "timesfm_frequency": self.timesfm_frequency,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> SeriesFrequencyInputSpec:
+        data = _strict_object(
+            value,
+            fields={"cadence", "timesfm_frequency"},
+            required={"cadence", "timesfm_frequency"},
+            owner="series frequency input",
+        )
+        data["cadence"] = SeriesCadenceSpec.from_dict(data["cadence"])
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class SeriesTemporalInputSpec:
+    """Timestamp-derived model input contract."""
+
+    cadence: SeriesCadenceSpec
+    timezone: str
+    anchor: Literal["last", "end_exclusive"]
+    recipe: Literal["gluonts-calendar-v1", "calendar-fourier-v1"]
+    features: tuple[SeriesTimeFeature, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.cadence) is not SeriesCadenceSpec:
+            raise TypeError("temporal cadence must be a SeriesCadenceSpec")
+        if type(self.timezone) is not str or not self.timezone:
+            raise TypeError("timezone must be a non-empty IANA timezone key")
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"Unknown timezone {self.timezone!r}") from error
+        if self.anchor not in {"last", "end_exclusive"}:
+            raise ValueError("temporal anchor must be 'last' or 'end_exclusive'")
+        if self.recipe not in {"gluonts-calendar-v1", "calendar-fourier-v1"}:
+            raise ValueError("temporal recipe is unsupported")
+        if (
+            type(self.features) is not tuple
+            or not self.features
+            or any(feature not in _TIME_FEATURES for feature in self.features)
+            or len(self.features) != len(set(self.features))
+        ):
+            raise ValueError("temporal features must be a non-empty tuple of unique features")
+
+    @property
+    def width(self) -> int:
+        if self.recipe == "gluonts-calendar-v1":
+            return len(self.features)
+        return sum(1 if feature == "age_log10" else 2 for feature in self.features)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cadence": self.cadence.to_dict(),
+            "timezone": self.timezone,
+            "anchor": self.anchor,
+            "recipe": self.recipe,
+            "features": list(self.features),
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> SeriesTemporalInputSpec:
+        data = _strict_object(
+            value,
+            fields={"cadence", "timezone", "anchor", "recipe", "features"},
+            required={"cadence", "timezone", "anchor", "recipe", "features"},
+            owner="series temporal input",
+        )
+        data["cadence"] = SeriesCadenceSpec.from_dict(data["cadence"])
+        raw_features = data["features"]
+        if not isinstance(raw_features, Sequence) or isinstance(raw_features, (str, bytes)):
+            raise TypeError("temporal features must be an array")
+        data["features"] = tuple(cast("Sequence[object]", raw_features))
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class SeriesStaticInputSpec:
+    """One ordered static real or categorical model input."""
+
+    name: str
+    kind: Literal["real", "categorical"]
+    cardinality: int | None = None
+    normalization: Literal["none"] = "none"
+
+    def __post_init__(self) -> None:
+        if type(self.name) is not str or not self.name:
+            raise ValueError("static input name must be a non-empty string")
+        if self.kind not in {"real", "categorical"}:
+            raise ValueError("static input kind must be 'real' or 'categorical'")
+        if self.normalization != "none":
+            raise ValueError("static input normalization must be 'none'")
+        if self.kind == "categorical":
+            if type(self.cardinality) is not int or self.cardinality <= 0:
+                raise ValueError("categorical static input requires a positive cardinality")
+        elif self.cardinality is not None:
+            raise ValueError("real static input must not define cardinality")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "cardinality": self.cardinality,
+            "normalization": self.normalization,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> SeriesStaticInputSpec:
+        data = _strict_object(
+            value,
+            fields={"name", "kind", "cardinality", "normalization"},
+            required={"name", "kind", "cardinality", "normalization"},
+            owner="series static input",
+        )
+        return cls(**data)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -38,6 +272,10 @@ class SeriesEmbeddingInputSpec:
     channels: tuple[str, ...]
     roles: tuple[SeriesChannelRole, ...]
     normalization: str
+    provider_abi: str | None = None
+    frequency: SeriesFrequencyInputSpec | None = None
+    temporal: SeriesTemporalInputSpec | None = None
+    static: tuple[SeriesStaticInputSpec, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.length) is not int or self.length <= 0:
@@ -62,31 +300,144 @@ class SeriesEmbeddingInputSpec:
             raise ValueError("roles must contain at least one target channel")
         if type(self.normalization) is not str or not self.normalization:
             raise ValueError("normalization must be a non-empty string")
+        if self.provider_abi not in {None, _TRANSFORMERS_SERIES_ABI}:
+            raise ValueError(f"provider_abi must be {_TRANSFORMERS_SERIES_ABI!r}")
+        if self.frequency is not None and type(self.frequency) is not SeriesFrequencyInputSpec:
+            raise TypeError("frequency must be a SeriesFrequencyInputSpec or None")
+        if self.temporal is not None and type(self.temporal) is not SeriesTemporalInputSpec:
+            raise TypeError("temporal must be a SeriesTemporalInputSpec or None")
+        if type(self.static) is not tuple or any(
+            type(item) is not SeriesStaticInputSpec for item in self.static
+        ):
+            raise TypeError("static must be a tuple of SeriesStaticInputSpec values")
+        if len({item.name for item in self.static}) != len(self.static):
+            raise ValueError("static input names must be unique")
+        if self.frequency is not None and (self.temporal is not None or self.static):
+            raise ValueError("frequency is mutually exclusive with temporal and static inputs")
+        if self.provider_abi is None and (
+            self.frequency is not None or self.temporal is not None or self.static
+        ):
+            raise ValueError("extended series inputs require provider_abi='transformers-series-v1'")
+
+    @property
+    def extended(self) -> bool:
+        return self.provider_abi is not None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "kind": "series",
             "length": self.length,
             "channels": list(self.channels),
             "roles": list(self.roles),
             "normalization": self.normalization,
         }
+        if not self.extended:
+            return result
+        result["schema_version"] = 2
+        result["provider_abi"] = self.provider_abi
+        if self.frequency is not None:
+            result["frequency"] = self.frequency.to_dict()
+        if self.temporal is not None:
+            result["temporal"] = self.temporal.to_dict()
+        if self.static:
+            result["static"] = [item.to_dict() for item in self.static]
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> SeriesEmbeddingInputSpec:
-        data = dict(value)
-        fields = {"kind", "length", "channels", "roles", "normalization"}
-        unknown = sorted(set(data) - fields)
-        if unknown:
-            raise ValueError(f"series embedding input has unknown fields: {', '.join(unknown)}")
-        if data.pop("kind", None) != "series":
+        if "schema_version" not in value:
+            data = _strict_object(
+                value,
+                fields={"kind", "length", "channels", "roles", "normalization"},
+                required={"kind", "length", "channels", "roles", "normalization"},
+                owner="series embedding input",
+            )
+        else:
+            data = _strict_object(
+                value,
+                fields={
+                    "kind",
+                    "schema_version",
+                    "length",
+                    "channels",
+                    "roles",
+                    "normalization",
+                    "provider_abi",
+                    "frequency",
+                    "temporal",
+                    "static",
+                },
+                required={
+                    "kind",
+                    "schema_version",
+                    "length",
+                    "channels",
+                    "roles",
+                    "normalization",
+                    "provider_abi",
+                },
+                owner="series embedding input",
+            )
+            if data.pop("schema_version") != 2:
+                raise ValueError("series embedding input schema_version must be 2")
+        if data.pop("kind") != "series":
             raise ValueError("embedding input kind must be 'series'")
         for field_name in ("channels", "roles"):
             raw = data.get(field_name)
             if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
                 raise TypeError(f"{field_name} must be an array")
             data[field_name] = tuple(cast("Sequence[object]", raw))
+        if "frequency" in data:
+            data["frequency"] = SeriesFrequencyInputSpec.from_dict(data["frequency"])
+        if "temporal" in data:
+            data["temporal"] = SeriesTemporalInputSpec.from_dict(data["temporal"])
+        if "static" in data:
+            raw_static = data["static"]
+            if not isinstance(raw_static, Sequence) or isinstance(raw_static, (str, bytes)):
+                raise TypeError("static must be an array")
+            data["static"] = tuple(
+                SeriesStaticInputSpec.from_dict(item)
+                for item in cast("Sequence[object]", raw_static)
+            )
         return cls(**data)  # type: ignore[arg-type]
+
+
+def series_cadence(
+    unit: SeriesCadenceUnit,
+    *,
+    multiple: int = 1,
+    mode: Literal["elapsed", "civil"] = "elapsed",
+) -> SeriesCadenceSpec:
+    return SeriesCadenceSpec(unit, multiple, mode)
+
+
+def series_frequency_input(
+    *,
+    cadence: SeriesCadenceSpec,
+    timesfm_frequency: Literal["auto", 0, 1, 2] = "auto",
+) -> SeriesFrequencyInputSpec:
+    return SeriesFrequencyInputSpec(cadence, timesfm_frequency)
+
+
+def series_temporal_input(
+    *,
+    cadence: SeriesCadenceSpec,
+    timezone: str,
+    anchor: Literal["last", "end_exclusive"],
+    recipe: Literal["gluonts-calendar-v1", "calendar-fourier-v1"],
+    features: tuple[SeriesTimeFeature, ...],
+) -> SeriesTemporalInputSpec:
+    return SeriesTemporalInputSpec(cadence, timezone, anchor, recipe, features)
+
+
+def series_static_input(
+    name: str,
+    *,
+    kind: Literal["real", "categorical"],
+    cardinality: int | None = None,
+    normalization: Literal["none"] = "none",
+) -> SeriesStaticInputSpec:
+    return SeriesStaticInputSpec(name, kind, cardinality, normalization)
 
 
 def series_embedding_input(
@@ -95,9 +446,22 @@ def series_embedding_input(
     channels: tuple[str, ...],
     roles: tuple[SeriesChannelRole, ...],
     normalization: str,
+    provider_abi: str | None = None,
+    frequency: SeriesFrequencyInputSpec | None = None,
+    temporal: SeriesTemporalInputSpec | None = None,
+    static: tuple[SeriesStaticInputSpec, ...] = (),
 ) -> SeriesEmbeddingInputSpec:
     """Create a typed ordered-window input contract for an embedding model."""
-    return SeriesEmbeddingInputSpec(length, channels, roles, normalization)
+    return SeriesEmbeddingInputSpec(
+        length,
+        channels,
+        roles,
+        normalization,
+        provider_abi,
+        frequency,
+        temporal,
+        static,
+    )
 
 
 EmbeddingInputSpec = SeriesEmbeddingInputSpec | None
@@ -135,9 +499,7 @@ class EmbeddingModelSpec:
         if type(self.dimension) is not int or self.dimension <= 0:
             raise ValueError("dimension must be a positive integer")
         if self.backend not in {"fastembed", "transformers", "moment", "custom"}:
-            raise ValueError(
-                "backend must be 'fastembed', 'transformers', 'moment', or 'custom'"
-            )
+            raise ValueError("backend must be 'fastembed', 'transformers', 'moment', or 'custom'")
         if type(self.normalize) is not bool:
             raise TypeError("normalize must be a boolean")
         if type(self.pooling) is not str or not self.pooling:
@@ -147,10 +509,22 @@ class EmbeddingModelSpec:
         if self.input is not None:
             if type(self.input) is not SeriesEmbeddingInputSpec:
                 raise TypeError("input must be a SeriesEmbeddingInputSpec or None")
-            if self.backend not in {"moment", "custom"}:
-                raise ValueError("series embedding inputs require backend='moment' or 'custom'")
+            if self.backend not in {"moment", "transformers", "custom"}:
+                raise ValueError(
+                    "series embedding inputs require backend='moment' or 'custom', "
+                    "or backend='transformers'"
+                )
             if self.document_prefix or self.query_prefix:
                 raise ValueError("series embedding models must not define text prefixes")
+            if self.backend == "transformers":
+                if self.input.provider_abi != _TRANSFORMERS_SERIES_ABI:
+                    raise ValueError(
+                        "Transformers series inputs require provider_abi='transformers-series-v1'"
+                    )
+            elif self.input.extended:
+                raise ValueError(
+                    "series input extensions are valid only for backend='transformers'"
+                )
         elif self.backend == "moment":
             raise ValueError("backend='moment' requires a series embedding input")
 
@@ -429,8 +803,10 @@ class TransformersEmbeddingProvider:
         prepare_timeout_seconds: float | None = None,
         max_download_bytes: int | None = None,
     ):
-        if specification.backend != "transformers":
-            raise ValueError("TransformersEmbeddingProvider requires backend='transformers'")
+        if specification.backend != "transformers" or specification.input is not None:
+            raise ValueError(
+                "TransformersEmbeddingProvider requires a text backend='transformers' model"
+            )
         if device not in {"cpu", "cuda"}:
             raise ValueError("device must be 'cpu' or 'cuda'")
         if specification.pooling not in {"cls", "mean"}:

@@ -255,6 +255,7 @@ def series_embedding_input(
     static: tuple[SeriesStaticInputSpec, ...] = (),
 ) -> SeriesEmbeddingInputSpec: ...
 
+
 def series_cadence(
     unit: SeriesCadenceUnit,
     *,
@@ -262,11 +263,13 @@ def series_cadence(
     mode: Literal["elapsed", "civil"] = "elapsed",
 ) -> SeriesCadenceSpec: ...
 
+
 def series_frequency_input(
     *,
     cadence: SeriesCadenceSpec,
     timesfm_frequency: Literal["auto", 0, 1, 2] = "auto",
 ) -> SeriesFrequencyInputSpec: ...
+
 
 def series_temporal_input(
     *,
@@ -276,6 +279,7 @@ def series_temporal_input(
     recipe: Literal["gluonts-calendar-v1", "calendar-fourier-v1"],
     features: tuple[SeriesTimeFeature, ...],
 ) -> SeriesTemporalInputSpec: ...
+
 
 def series_static_input(
     name: str,
@@ -359,9 +363,16 @@ differences:
 
 ```python
 SeriesCadenceUnit = Literal[
-    "second", "minute", "hour", "day",
-    "week", "month", "quarter", "year",
+    "second",
+    "minute",
+    "hour",
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
 ]
+
 
 @dataclass(frozen=True)
 class SeriesCadenceSpec:
@@ -449,6 +460,7 @@ SeriesTimeFeature = Literal[
     "month_of_year",
     "age_log10",
 ]
+
 
 @dataclass(frozen=True)
 class SeriesTemporalInputSpec:
@@ -737,6 +749,7 @@ class SeriesQueryInput:
     time: datetime | None = None
     series_start: datetime | None = None
     static: tuple[tuple[str, float | int], ...] = ()
+
 
 def series_query(
     values: Mapping[str, Sequence[float]],

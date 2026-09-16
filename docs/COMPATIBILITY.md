@@ -282,8 +282,8 @@ Narwhals protocol. The core package does not depend on a model runtime.
 
 | Method | Classification | Parameters | Execution | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| `embedding_model()` | **`[DuckPD Native]`** | immutable revision, dimension, backend, normalization, pooling, prefixes, optional typed series input | Planning only | Produces a stable model fingerprint without downloading metadata. The same model contract identifies text and learned-series embedding spaces. |
-| `Session.register_embedding_provider()` / `prepare_embedding_model()` / `inspect_prepared_embedding_models()` | **`[DuckPD Native]`** | model, provider, optional cache directory | Registration / eager preparation / metadata | One session-owned lifecycle serves text and series providers. Built-in text and MOMENT backends may prepare pinned artifacts automatically; custom providers must be registered explicitly. `Session.close()` releases provider references and calls an optional provider `close()`. |
+| `embedding_model()` and series input constructors | **`[DuckPD Native]`** | immutable revision, dimension, backend, normalization, pooling, prefixes; optional cadence, frequency, temporal, static, and ordered role contracts | Planning only | Produces stable model/input fingerprints without downloading metadata. Legacy four-field series inputs retain their exact serialization. Extended Transformer inputs use nested schema version 2 and `provider_abi="transformers-series-v1"`. |
+| `Session.register_embedding_provider()` / `prepare_embedding_model()` / `inspect_prepared_embedding_models()` | **`[DuckPD Native]`** | model, provider, optional cache directory | Registration / eager preparation / metadata | One session-owned lifecycle serves text and series providers. Built-in text, MOMENT, and bare-Transformers series backends may prepare pinned artifacts automatically; custom providers must be registered explicitly. `Session.close()` releases provider references and calls an optional provider `close()`. |
 | `Session.embed_query()` | **`[DuckPD Native]`** | text and prepared model | Eager | Returns an immutable `EmbeddedQuery` carrying its model fingerprint. |
 | `DataFrame.embed_text()` | **`[DuckPD Native]`** | text columns, output label, model, batch size, separator, null policy | Lazy | Row-preserving Arrow-batched inference with automatic materialization progress; appends non-nullable `FLOAT[n]` and supports direct Parquet/table sinks. |
 | `DataFrame.vector.search_text()` | **`[DuckPD Native]`** | text, persisted embedding column, optional compatible model, metric, `k`, tie-breaker | Lazy | Exact search; infers only verified column metadata and rejects missing or mismatched identity before execution. |
@@ -302,10 +302,11 @@ and download-size limits, and occurs before remote partition transfer.
 Install the qualified local FastEmbed/ONNX CPU backend with
 `uv add "duckpd[embeddings]"`. `TransformersEmbeddingProvider` supports explicit
 PyTorch CPU, NVIDIA CUDA, and AMD ROCm execution after the application installs
-a compatible PyTorch build and `transformers`. `MomentEmbeddingProvider` uses
-the same device-selection and preparation lifecycle after the application
-installs PyTorch, `huggingface-hub`, and `momentfm`. DuckPD never replaces an
-environment-specific runtime. Hosted providers, hybrid retrieval, reranking,
+a compatible PyTorch build and `transformers`. `MomentEmbeddingProvider` and
+`TransformersSeriesEmbeddingProvider` use the same explicit device-selection,
+immutable-artifact, and preparation lifecycle after the application installs
+their optional runtimes. DuckPD never replaces an environment-specific runtime.
+Hosted providers, hybrid retrieval, reranking,
 quantized/sparse vectors, automatic refresh, and distributed inference remain
 deferred.
 
@@ -314,10 +315,10 @@ deferred.
 | Method | Classification | Parameters | Execution | Notes |
 | :--- | :--- | :--- | :--- | :--- |
 | `DataFrame.event_windows()` | **`[DuckPD Native]`** | event frame, observation/event times, entity and event keys, output mapping, integer offset interval, fixed step, floor/ceil anchor, availability columns, incomplete policy, metadata prefix | Lazy | Builds exact UTC epoch-grid arrays by entity while retaining event rows. Start-labeled complete bars are required. Missing slots yield whole-null arrays or an execution error; relevant off-grid rows, duplicates, null/nonfinite values, and impossible availability timestamps fail. Complete-window availability is the maximum event/bar availability. The binary plan is an optimizer barrier and never loops through events in Python. |
-| `DataFrame.embed_series()` | **`[DuckPD Extension]`** | channel-to-column mapping, output label, representation, batch size, null policy | Lazy | Appends a nullable fixed-size `FLOAT[n]` vector from verified fixed-count windows sharing one order/partition contract. Native recipes lower to DuckDB expressions. Learned recipes call an explicitly prepared session provider through bounded complete-row Arrow batches, scatter nulls, apply the same outer normalization as queries, validate exact float32 output, and serialize non-thread-safe providers. |
-| `DataFrame.vector.search_series()` | **`[DuckPD Extension]`** | raw channel mapping, vector column, optional representation assertion, exact metric, `k`, distance label, tie-breaker | Lazy | Resolves verified series metadata, freezes raw query observations during planning, applies the native or learned corpus recipe during execution, and runs exact top-k retrieval. Equal-width incompatible spaces fail during planning; learned query inference requires the exact prepared provider. |
-| `Session.embed_series_query()` | **`[DuckPD Extension]`** | raw channel mapping, representation | Eager | Returns a reusable `EmbeddedSeriesQuery` after applying the same native or learned representation recipe. Learned calls require provider preparation; custom backends also require registration. Invalid, nonfinite, wrong-width, zero-scale, and mismatched provider outputs fail explicitly. |
-| Shared embedding provider lifecycle | **`[DuckPD Extension]`** | `EmbeddingModelSpec` with `SeriesEmbeddingInputSpec`, built-in `MomentEmbeddingProvider`, or application-owned `SeriesEmbeddingProvider` | Registration / eager preparation | Uses `Session.register_embedding_provider()`, `prepare_embedding_model()`, and `inspect_prepared_embedding_models()` exactly like text models. Series providers additionally declare thread safety and accept bounded fixed-window Arrow batches. |
+| `DataFrame.embed_series()` | **`[DuckPD Extension]`** | channel-to-column mapping, output label, representation, batch size, null policy; optional timestamp, series-start, and static column mappings | Lazy | Appends a nullable fixed-size `FLOAT[n]` vector from verified fixed-count windows. Native recipes lower to DuckDB. Learned recipes use bounded complete-row Arrow batches. Temporal/static scalars remain typed UDF arguments and become reserved provider fields only after validation. |
+| `DataFrame.vector.search_series()` | **`[DuckPD Extension]`** | raw channel mapping or immutable `SeriesQueryInput`, vector column, optional representation assertion, exact metric, `k`, distance label, tie-breaker | Lazy | Resolves verified series metadata, freezes query channels and context during planning, applies the same native or learned corpus recipe during execution, and runs exact top-k retrieval. Equal-width incompatible spaces fail during planning. |
+| `Session.embed_series_query()` | **`[DuckPD Extension]`** | raw channel mapping or immutable `SeriesQueryInput`, representation | Eager | Returns a reusable `EmbeddedSeriesQuery` after identical corpus/query normalization, temporal generation, Arrow construction, provider execution, and finalization. Missing or invalid temporal/static context and provider output fail explicitly. |
+| Shared embedding provider lifecycle | **`[DuckPD Extension]`** | `EmbeddingModelSpec` with `SeriesEmbeddingInputSpec`; built-in MOMENT or bare-Transformers provider; application-owned provider | Registration / eager preparation | Series providers declare thread safety and accept bounded fixed-window Arrow batches. Transformers dispatch supports PatchTST, PatchTSMixer, TimesFM 1/2 and 2.5, Time Series Transformer, Informer, and Autoformer bare backbones without task-head execution or remote code. |
 | `FeatureStore.series_representation()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns the immutable resolved representation; registry aliases are expanded before fingerprinting. |
 | `FeatureStore.embedding_model()` | **`[DuckPD Native]`** | catalog registry key | Planning only | Returns either text or learned-series model identity without preparing, importing, downloading, or executing a model. |
 
@@ -328,15 +329,17 @@ window metadata, and wrong array widths fail rather than changing representation
 identity. Event-window `event_id` may be composite for revisions, and source
 observations must be unique on `(by, on)` inside the bounded event intervals.
 Representation metadata survives direct Parquet and session-table persistence.
-Feature-store catalog version 1 accepts shared `embedding_models` and
-`series_representations` registries. Timeseries features and reference-table
-columns bind them with `series_representation`. Bound columns are typed as
+Feature-store catalog versions 1 and 2 accept shared `embedding_models` and
+`series_representations` registries. Version 1 rejects nested series-input
+extensions; version 2 accepts self-versioned Transformer series inputs while
+also preserving legacy entries. Timeseries features and reference-table columns
+bind representations with `series_representation`. Bound columns are typed as
 `FLOAT[n]`; Parquet fixed-size-list width, float32 children, finite values, and
 any available DuckPD sidecar identity are checked when data is bound or read.
 Whole-vector nulls remain nullable, while null children are invalid. Aliases,
 exact alignment, and point-in-time ASOF payloads preserve the representation,
 so `search_series()` can infer it. Catalog inspection and query planning never
-generate corpus vectors or prepare learned models.
+generate corpus vectors, import model runtimes, or prepare learned models.
 
 
 

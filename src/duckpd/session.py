@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -80,15 +81,20 @@ from duckpd.series_embeddings import (
     EmbeddedSeriesQuery,
     SeriesColumnSpec,
     SeriesEmbeddingProvider,
+    SeriesQueryInput,
     SeriesQuerySnapshot,
     SeriesRepresentationSpec,
     _finalize_series_embeddings,
-    _make_series_provider_batch,
     _normalize_series_snapshot,
     embed_native_series_query,
+    make_series_provider_batch,
+    series_query,
     snapshot_series_query,
 )
-from duckpd.series_providers import MomentEmbeddingProvider
+from duckpd.series_providers import (
+    MomentEmbeddingProvider,
+    TransformersSeriesEmbeddingProvider,
+)
 
 if TYPE_CHECKING:
     from duckpd.frame import DataFrame
@@ -450,12 +456,20 @@ class Session:
                         max_download_bytes=max_download_bytes,
                     )
                 elif model.backend == "transformers":
-                    provider = TransformersEmbeddingProvider(
-                        model,
-                        cache_dir=cache_dir,
-                        prepare_timeout_seconds=timeout_seconds,
-                        max_download_bytes=max_download_bytes,
-                    )
+                    if model.input is None:
+                        provider = TransformersEmbeddingProvider(
+                            model,
+                            cache_dir=cache_dir,
+                            prepare_timeout_seconds=timeout_seconds,
+                            max_download_bytes=max_download_bytes,
+                        )
+                    else:
+                        provider = TransformersSeriesEmbeddingProvider(
+                            model,
+                            cache_dir=cache_dir,
+                            prepare_timeout_seconds=timeout_seconds,
+                            max_download_bytes=max_download_bytes,
+                        )
                 elif model.backend == "moment":
                     provider = MomentEmbeddingProvider(
                         model,
@@ -580,7 +594,7 @@ class Session:
 
     def embed_series_query(
         self,
-        query: Mapping[str, Sequence[float]],
+        query: Mapping[str, Sequence[float]] | SeriesQueryInput,
         *,
         representation: SeriesRepresentationSpec,
     ) -> EmbeddedSeriesQuery:
@@ -598,7 +612,7 @@ class Session:
             zero_scale_as_null=False,
         )
         assert normalized is not None
-        batch = _make_series_provider_batch((normalized,), representation)
+        batch = make_series_provider_batch((normalized,), representation)
         self._begin_execution()
         output = self._run_series_provider_batch(model, batch, kind="query")
         rows = _finalize_series_embeddings(
@@ -627,10 +641,25 @@ class Session:
     def _register_series_query(
         self,
         representation: SeriesRepresentationSpec,
-        query: Mapping[str, Sequence[float]],
+        query: Mapping[str, Sequence[float]] | SeriesQueryInput,
     ) -> str:
+        from duckpd._temporal import utc_nanoseconds
+
         snapshot = snapshot_series_query(query, representation)
-        key = uuid4().hex
+        payload = {
+            "representation": representation.fingerprint,
+            "channels": snapshot.channels,
+            "time_ns": utc_nanoseconds(snapshot.time) if snapshot.time is not None else None,
+            "series_start_ns": (
+                utc_nanoseconds(snapshot.series_start)
+                if snapshot.series_start is not None
+                else None
+            ),
+            "static": snapshot.static,
+        }
+        key = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         self._series_queries[key] = (representation.fingerprint, snapshot)
         return key
 
@@ -1128,11 +1157,17 @@ class Session:
             return existing
         name = f"__duckpd_embed_series_{key}"
 
-        def run(raw_batch: object) -> ArrowUDFResult:
+        def run(raw_batch: object, *context_batches: object) -> ArrowUDFResult:
             boundary_started = perf_counter()
             provider_seconds = 0.0
             packed = cast("list[Any]", cast("pa.ChunkedArray[Any]", raw_batch).to_pylist())
+            context = [
+                cast("list[Any]", cast("pa.ChunkedArray[Any]", batch).to_pylist())
+                for batch in context_batches
+            ]
             row_count = len(packed)
+            if any(len(values) != row_count for values in context):
+                raise ValueError("Series embedding context batch has invalid row count")
             scattered: list[list[float] | None] = [None] * row_count
             valid_rows: list[SeriesQuerySnapshot] = []
             valid_positions: list[int] = []
@@ -1151,7 +1186,32 @@ class Session:
                         raise ValueError("Series embedding encountered a null input window")
                     propagated += 1
                     continue
-                snapshot = snapshot_series_query(raw_row, plan.representation)
+                context_index = 0
+                raw_time = context[context_index][row_index] if plan.time is not None else None
+                context_index += int(plan.time is not None)
+                raw_start = (
+                    context[context_index][row_index] if plan.series_start is not None else None
+                )
+                context_index += int(plan.series_start is not None)
+                raw_static = {
+                    name: context[context_index + index][row_index]
+                    for index, (name, _) in enumerate(plan.static_columns)
+                }
+                if (
+                    (plan.time is not None and raw_time is None)
+                    or (plan.series_start is not None and raw_start is None)
+                    or any(value is None for value in raw_static.values())
+                ):
+                    raise ValueError(
+                        "Series embedding temporal and static scalar inputs must not be null"
+                    )
+                rich = series_query(
+                    raw_row,
+                    time=raw_time,
+                    series_start=raw_start,
+                    static=raw_static,
+                )
+                snapshot = snapshot_series_query(rich, plan.representation)
                 normalized = _normalize_series_snapshot(
                     snapshot,
                     plan.representation,
@@ -1165,7 +1225,7 @@ class Session:
 
             for offset in range(0, len(valid_rows), plan.batch_size):
                 rows = valid_rows[offset : offset + plan.batch_size]
-                batch = _make_series_provider_batch(rows, plan.representation)
+                batch = make_series_provider_batch(rows, plan.representation)
                 provider_started = perf_counter()
                 raw_output = self._run_series_provider_batch(model, batch, kind="corpus")
                 provider_seconds += perf_counter() - provider_started
@@ -1225,10 +1285,28 @@ class Session:
                 )
             return result
 
+        columns_by_id = {column.id: column for column in plan.input.metadata.columns}
+        input_types = [f"DOUBLE[{plan.representation.window}][]"]
+        if plan.time is not None:
+            input_types.append(columns_by_id[plan.time].duckdb_type)
+        if plan.series_start is not None:
+            input_types.append(columns_by_id[plan.series_start].duckdb_type)
+        input_types.extend(
+            columns_by_id[column_id].duckdb_type for _, column_id in plan.static_columns
+        )
+        cast("Any", run).__signature__ = inspect.Signature(
+            [
+                inspect.Parameter(
+                    f"argument_{index}",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+                for index in range(len(input_types))
+            ]
+        )
         self.register_arrow_udf(
             name,
             run,
-            [f"DOUBLE[{plan.representation.window}][]"],
+            input_types,
             f"FLOAT[{plan.representation.dimension}]",
             null_handling="special",
         )
@@ -1266,7 +1344,7 @@ class Session:
                             zero_scale_as_null=False,
                         )
                         assert normalized is not None
-                        batch = _make_series_provider_batch((normalized,), representation)
+                        batch = make_series_provider_batch((normalized,), representation)
                         raw_output = self._run_series_provider_batch(
                             model,
                             batch,

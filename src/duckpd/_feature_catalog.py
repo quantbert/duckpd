@@ -79,7 +79,11 @@ _SERIES_REPRESENTATION_FIELDS = frozenset(
 )
 
 
-def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
+def _validate_embedding_models(
+    value: Any,
+    *,
+    catalog_version: int,
+) -> dict[str, EmbeddingModelSpec]:
     if value is None:
         return {}
     if not isinstance(value, Mapping):
@@ -96,6 +100,21 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
         if unknown:
             raise ValueError(
                 f"Embedding model {raw_name!r} has unknown fields: {', '.join(unknown)}"
+            )
+        raw_input = specification_data.get("input")
+        if (
+            catalog_version == 1
+            and isinstance(raw_input, Mapping)
+            and (
+                "schema_version" in raw_input
+                or any(
+                    field in raw_input
+                    for field in ("provider_abi", "frequency", "temporal", "static")
+                )
+            )
+        ):
+            raise ValueError(
+                f"Embedding model {raw_name!r} uses series input fields requiring catalog_version 2"
             )
         backend = specification_data.get("backend", "fastembed")
         if backend not in {"fastembed", "transformers", "moment", "custom"}:
@@ -115,10 +134,21 @@ def _validate_embedding_models(value: Any) -> dict[str, EmbeddingModelSpec]:
             raise ValueError(
                 f"Embedding model {raw_name!r} uses FastEmbed fields the backend cannot honor"
             )
-        if backend == "transformers" and specification.pooling not in {"cls", "mean"}:
-            raise ValueError(
-                f"Embedding model {raw_name!r} Transformers pooling must be 'cls' or 'mean'"
+        if backend == "transformers":
+            allowed_pooling = (
+                {"cls", "mean"}
+                if specification.input is None
+                else {
+                    "mean-channels-patches-v1",
+                    "mean-valid-patches-v1",
+                    "mean-encoder-time-v1",
+                }
             )
+            if specification.pooling not in allowed_pooling:
+                raise ValueError(
+                    f"Embedding model {raw_name!r} Transformers pooling is incompatible "
+                    "with its input kind"
+                )
         if backend == "moment" and specification.pooling != "mean":
             raise ValueError(f"Embedding model {raw_name!r} MOMENT pooling must be 'mean'")
         models[raw_name] = specification
@@ -266,15 +296,18 @@ def validate_catalog(
     dict[str, EmbeddingModelSpec],
     dict[str, SeriesRepresentationSpec],
 ]:
-    """Validate the complete catalog version 1 schema."""
+    """Validate the complete catalog version 1 or 2 schema."""
     catalog_version = catalog.get("catalog_version")
-    if catalog_version != 1:
+    if type(catalog_version) is not int or catalog_version not in {1, 2}:
         raise ValueError(f"Unsupported catalog version: {catalog_version!r}")
     unknown_catalog_fields = sorted(set(catalog) - _CATALOG_FIELDS)
     if unknown_catalog_fields:
         raise ValueError(f"Catalog has unknown fields: {', '.join(unknown_catalog_fields)}")
 
-    embedding_models = _validate_embedding_models(catalog.get("embedding_models"))
+    embedding_models = _validate_embedding_models(
+        catalog.get("embedding_models"),
+        catalog_version=catalog_version,
+    )
     series_representations = _validate_series_representations(
         catalog.get("series_representations"),
         embedding_models,

@@ -528,7 +528,7 @@ def test_catalog_validation_and_errors() -> None:
 
     # Bad catalog version
     with pytest.raises(ValueError, match="Unsupported catalog version"):
-        validate_catalog({"catalog_version": 2})
+        validate_catalog({"catalog_version": 3})
 
     # No datasets
     with pytest.raises(ValueError, match="Catalog must define at least one dataset"):
@@ -2518,3 +2518,37 @@ def test_catalog_series_rejects_invalid_child_values_at_execution(
     )
     with pytest.raises(MaterializationError):
         frame.collect()
+
+
+def test_catalog_version_two_preserves_transformers_series_input(
+    feature_store_fixture: Path,
+) -> None:
+    model = duckpd.embedding_model(
+        "research/catalog-transformers-series",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        backend="transformers",
+        dimension=4,
+        normalize=False,
+        pooling="mean-channels-patches-v1",
+        input=duckpd.series_embedding_input(
+            length=2,
+            channels=("target",),
+            roles=("target",),
+            normalization="patchtst-config-scaling-v1",
+            provider_abi="transformers-series-v1",
+        ),
+    )
+    catalog_path = feature_store_fixture / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["catalog_version"] = 2
+    catalog["embedding_models"] = {"transformers-series": model.to_dict()}
+    catalog_path.write_text(json.dumps(catalog))
+
+    stored = FeatureStore(feature_store_fixture).catalog()
+    assert stored["catalog_version"] == 2
+    assert stored["embedding_models"]["transformers-series"] == model.to_dict()
+
+    catalog["catalog_version"] = 1
+    catalog_path.write_text(json.dumps(catalog))
+    with pytest.raises(ValueError, match="catalog_version 2"):
+        FeatureStore(feature_store_fixture)

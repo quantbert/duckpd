@@ -8,14 +8,20 @@ import re
 import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from math import fsum, isfinite, sqrt
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 import pyarrow as pa
 
-from duckpd._temporal import fixed_duration_ns
+from duckpd._temporal import (
+    cadence_nanoseconds,
+    fixed_duration_ns,
+    generate_series_time_features,
+    resolve_series_timestamp,
+    resolve_timesfm_frequency,
+)
 from duckpd.embeddings import (
     EmbeddingModelSpec,
     PreparedModelInfo,
@@ -146,6 +152,26 @@ class SeriesRepresentationSpec:
                 raise ValueError("encoder input channels must equal representation channels")
             if self.encoder.normalize != self.unit_norm:
                 raise ValueError("encoder normalize must equal representation unit_norm")
+            cadence = (
+                self.encoder.input.frequency.cadence
+                if self.encoder.input.frequency is not None
+                else self.encoder.input.temporal.cadence
+                if self.encoder.input.temporal is not None
+                else None
+            )
+            if cadence is not None and self.sampling == "fixed_grid":
+                if cadence.mode != "elapsed":
+                    raise ValueError(
+                        "fixed_grid representations require an elapsed series input cadence"
+                    )
+                assert self.step is not None
+                if cadence_nanoseconds(cadence) != fixed_duration_ns(
+                    self.step,
+                    parameter="step",
+                ):
+                    raise ValueError(
+                        "fixed_grid representation step must equal the series input cadence"
+                    )
 
     @property
     def dimension(self) -> int:
@@ -311,7 +337,136 @@ class EmbeddedSeriesQuery:
             raise ValueError("representation_fingerprint must be a lowercase SHA-256 digest")
 
 
-SeriesQuerySnapshot = tuple[tuple[str, tuple[float, ...]], ...]
+def _query_values_snapshot(
+    values: object,
+    *,
+    owner: str,
+) -> tuple[tuple[str, tuple[float, ...]], ...]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{owner} must be a mapping of channel names to numeric sequences")
+    raw = dict(cast("Mapping[object, object]", values))
+    if any(type(channel) is not str or not channel for channel in raw):
+        raise TypeError(f"{owner} keys must be non-empty channel names")
+    snapshot: list[tuple[str, tuple[float, ...]]] = []
+    for raw_channel, raw_values in raw.items():
+        channel = cast("str", raw_channel)
+        if isinstance(raw_values, (str, bytes, bytearray)):
+            raise TypeError(f"{owner} channel {channel!r} must be a numeric sequence")
+        try:
+            items = tuple(cast("Sequence[object]", raw_values))
+        except TypeError:
+            raise TypeError(f"{owner} channel {channel!r} must be a numeric sequence") from None
+        converted: list[float] = []
+        for value in items:
+            if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+                raise TypeError(f"{owner} channel {channel!r} must contain only numeric scalars")
+            number = float(value)
+            if not isfinite(number):
+                raise ValueError(f"{owner} channel {channel!r} must contain only finite values")
+            converted.append(number)
+        snapshot.append((channel, tuple(converted)))
+    return tuple(snapshot)
+
+
+def _static_values_snapshot(
+    values: object,
+) -> tuple[tuple[str, float | int], ...]:
+    if values is None:
+        return ()
+    if not isinstance(values, Mapping):
+        raise TypeError("static must be a mapping of names to numeric scalars")
+    result: list[tuple[str, float | int]] = []
+    for raw_name, raw_value in cast("Mapping[object, object]", values).items():
+        if type(raw_name) is not str or not raw_name:
+            raise TypeError("static keys must be non-empty names")
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float, Decimal)):
+            raise TypeError(f"static value {raw_name!r} must be a numeric scalar")
+        number = float(raw_value)
+        if not isfinite(number):
+            raise ValueError(f"static value {raw_name!r} must be finite")
+        result.append((raw_name, raw_value if type(raw_value) is int else number))
+    return tuple(result)
+
+
+@dataclass(frozen=True)
+class SeriesQueryInput:
+    """Immutable rich raw query including temporal and static coordinates."""
+
+    values: tuple[tuple[str, tuple[float, ...]], ...]
+    time: datetime | None = None
+    series_start: datetime | None = None
+    static: tuple[tuple[str, float | int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.values) is not tuple or not self.values:
+            raise ValueError("values must be a non-empty ordered tuple")
+        if any(type(name) is not str or not name for name, _ in self.values):
+            raise TypeError("values keys must be non-empty channel names")
+        if len({name for name, _ in self.values}) != len(self.values):
+            raise ValueError("values channel names must be unique")
+        for name, values in self.values:
+            raw_values = cast("tuple[object, ...]", values)
+            if type(values) is not tuple or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                for value in raw_values
+            ):
+                raise ValueError(f"values channel {name!r} must contain finite floats")
+        raw_time = cast("object", self.time)
+        raw_start = cast("object", self.series_start)
+        if raw_time is not None and not isinstance(raw_time, datetime):
+            raise TypeError("time must be a datetime or None")
+        if raw_start is not None and not isinstance(raw_start, datetime):
+            raise TypeError("series_start must be a datetime or None")
+        if type(self.static) is not tuple:
+            raise TypeError("static must be an ordered tuple")
+        if len({name for name, _ in self.static}) != len(self.static):
+            raise ValueError("static names must be unique")
+        for name, value in cast("tuple[tuple[object, object], ...]", self.static):
+            if (
+                type(name) is not str
+                or not name
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+            ):
+                raise ValueError("static must contain unique names and finite numeric values")
+
+
+def series_query(
+    values: Mapping[str, Sequence[float]],
+    *,
+    time: datetime | None = None,
+    series_start: datetime | None = None,
+    static: Mapping[str, float | int] | None = None,
+) -> SeriesQueryInput:
+    """Validate and snapshot a rich raw series query."""
+    channel_values = _query_values_snapshot(values, owner="values")
+    if not channel_values:
+        raise ValueError("values must contain at least one channel")
+    raw_time = cast("object", time)
+    raw_start = cast("object", series_start)
+    if raw_time is not None and not isinstance(raw_time, datetime):
+        raise TypeError("time must be a datetime or None")
+    if raw_start is not None and not isinstance(raw_start, datetime):
+        raise TypeError("series_start must be a datetime or None")
+    return SeriesQueryInput(
+        channel_values,
+        time,
+        series_start,
+        _static_values_snapshot(static),
+    )
+
+
+@dataclass(frozen=True)
+class SeriesQuerySnapshot:
+    """Internal representation-ordered query coordinates."""
+
+    channels: tuple[tuple[str, tuple[float, ...]], ...]
+    time: datetime | None = None
+    series_start: datetime | None = None
+    static: tuple[tuple[str, float | int], ...] = ()
 
 
 def snapshot_series_query(
@@ -319,13 +474,20 @@ def snapshot_series_query(
     representation: SeriesRepresentationSpec,
 ) -> SeriesQuerySnapshot:
     """Validate and freeze raw channel observations without representing them."""
-    if not isinstance(query, Mapping):
-        raise TypeError("query must be a mapping of channel names to numeric sequences")
-    raw_query = dict(cast("Mapping[object, object]", query))
-    if any(type(channel) is not str or not channel for channel in raw_query):
-        raise TypeError("query keys must be non-empty channel names")
+    if isinstance(query, SeriesQueryInput):
+        query_values = query.values
+        raw_time = query.time
+        raw_series_start = query.series_start
+        raw_static = query.static
+    else:
+        query_values = _query_values_snapshot(query, owner="query")
+        raw_time = None
+        raw_series_start = None
+        raw_static = ()
+
+    raw_query = dict(query_values)
     expected = set(representation.channels)
-    actual = set(cast("dict[str, object]", raw_query))
+    actual = set(raw_query)
     if actual != expected:
         missing = sorted(expected - actual)
         unexpected = sorted(actual - expected)
@@ -333,31 +495,86 @@ def snapshot_series_query(
             "query must exactly match representation.channels; "
             f"missing={missing}, unexpected={unexpected}"
         )
-
-    snapshot: list[tuple[str, tuple[float, ...]]] = []
+    channels: list[tuple[str, tuple[float, ...]]] = []
     for channel in representation.channels:
-        raw_values = raw_query[channel]
-        if isinstance(raw_values, (str, bytes, bytearray)):
-            raise TypeError(f"query channel {channel!r} must be a numeric sequence")
-        try:
-            values = tuple(cast("Sequence[object]", raw_values))
-        except TypeError:
-            raise TypeError(f"query channel {channel!r} must be a numeric sequence") from None
+        values = raw_query[channel]
         if len(values) != representation.window:
             raise ValueError(
                 f"query channel {channel!r} length {len(values)} does not match "
                 f"representation window {representation.window}"
             )
-        converted: list[float] = []
-        for value in values:
-            if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-                raise TypeError(f"query channel {channel!r} must contain only numeric scalars")
+        channels.append((channel, values))
+
+    input_spec = (
+        cast("SeriesEmbeddingInputSpec", representation.encoder.input)
+        if representation.encoder is not None
+        else None
+    )
+    temporal = input_spec.temporal if input_spec is not None else None
+    static_specs = input_spec.static if input_spec is not None else ()
+    if temporal is None:
+        if raw_time is not None:
+            raise ValueError("time is valid only for a representation with temporal input")
+        if raw_series_start is not None:
+            raise ValueError("series_start is valid only when age_log10 is declared")
+        resolved_time = None
+        resolved_start = None
+    else:
+        if raw_time is None:
+            raise ValueError("this representation requires series_query(..., time=<datetime>)")
+        resolved_time = resolve_series_timestamp(raw_time, temporal.timezone, field="time")
+        requires_start = "age_log10" in temporal.features
+        if requires_start and raw_series_start is None:
+            raise ValueError("this representation requires series_start for age_log10")
+        if not requires_start and raw_series_start is not None:
+            raise ValueError("series_start is valid only when age_log10 is declared")
+        resolved_start = (
+            resolve_series_timestamp(
+                raw_series_start,
+                temporal.timezone,
+                field="series_start",
+            )
+            if raw_series_start is not None
+            else None
+        )
+
+    static_values = dict(raw_static)
+    expected_static = {item.name for item in static_specs}
+    actual_static = set(static_values)
+    if actual_static != expected_static:
+        if not expected_static and actual_static:
+            raise ValueError("static values are valid only when declared by the representation")
+        raise ValueError(
+            "query static values must exactly match the representation; "
+            f"missing={sorted(expected_static - actual_static)}, "
+            f"unexpected={sorted(actual_static - expected_static)}"
+        )
+    ordered_static: list[tuple[str, float | int]] = []
+    for specification in static_specs:
+        value = static_values[specification.name]
+        if specification.kind == "categorical":
+            if type(value) is not int:
+                raise TypeError(
+                    f"static categorical value {specification.name!r} must be an integer"
+                )
+            assert specification.cardinality is not None
+            if value < 0 or value >= specification.cardinality:
+                raise ValueError(
+                    f"static categorical value {specification.name!r} must be in "
+                    f"[0, {specification.cardinality})"
+                )
+            ordered_static.append((specification.name, value))
+        else:
             number = float(value)
             if not isfinite(number):
-                raise ValueError(f"query channel {channel!r} must contain only finite values")
-            converted.append(number)
-        snapshot.append((channel, tuple(converted)))
-    return tuple(snapshot)
+                raise ValueError(f"static real value {specification.name!r} must be finite")
+            ordered_static.append((specification.name, number))
+    return SeriesQuerySnapshot(
+        tuple(channels),
+        resolved_time,
+        resolved_start,
+        tuple(ordered_static),
+    )
 
 
 def _normalize_series_snapshot(
@@ -368,7 +585,7 @@ def _normalize_series_snapshot(
 ) -> SeriesQuerySnapshot | None:
     """Apply outer channel normalization identically for corpus and query rows."""
     normalized: list[tuple[str, tuple[float, ...]]] = []
-    for channel, values in query:
+    for channel, values in query.channels:
         if representation.normalization == "none":
             output = values
         else:
@@ -386,7 +603,12 @@ def _normalize_series_snapshot(
                     )
                 output = tuple(value / scale for value in centered)
         normalized.append((channel, tuple(output)))
-    return tuple(normalized)
+    return SeriesQuerySnapshot(
+        tuple(normalized),
+        query.time,
+        query.series_start,
+        query.static,
+    )
 
 
 def _finite_float32(value: float) -> float:
@@ -399,7 +621,18 @@ def _finite_float32(value: float) -> float:
     return converted
 
 
-def _make_series_provider_batch(  # pyright: ignore[reportUnusedFunction]
+def _fixed_list_array(
+    values: Sequence[float | int],
+    *,
+    value_type: pa.DataType,
+    width: int,
+) -> pa.Array[Any]:
+    child = pa.array(values, type=value_type)
+    maker = cast("Any", pa.FixedSizeListArray)
+    return cast("pa.Array[Any]", maker.from_arrays(child, width))
+
+
+def make_series_provider_batch(
     rows: Sequence[SeriesQuerySnapshot],
     representation: SeriesRepresentationSpec,
 ) -> pa.RecordBatch:
@@ -409,17 +642,13 @@ def _make_series_provider_batch(  # pyright: ignore[reportUnusedFunction]
         raise ValueError("A learned representation requires an encoder")
     arrays: list[pa.Array[Any]] = []
     fields: list[Any] = []
-    by_row = [dict(row) for row in rows]
+    by_row = [dict(row.channels) for row in rows]
     input_spec = cast("SeriesEmbeddingInputSpec", encoder.input)
-    for channel, role in zip(
-        input_spec.channels,
-        input_spec.roles,
-        strict=True,
-    ):
+    for channel, role in zip(input_spec.channels, input_spec.roles, strict=True):
         flattened = [_finite_float32(value) for row in by_row for value in row[channel]]
-        values = pa.array(flattened, type=pa.float32())
-        maker = cast("Any", pa.FixedSizeListArray)
-        arrays.append(cast("pa.Array[Any]", maker.from_arrays(values, input_spec.length)))
+        arrays.append(
+            _fixed_list_array(flattened, value_type=pa.float32(), width=input_spec.length)
+        )
         fields.append(
             pa.field(
                 channel,
@@ -428,14 +657,84 @@ def _make_series_provider_batch(  # pyright: ignore[reportUnusedFunction]
                 metadata={b"duckpd.channel_role": role.encode()},
             )
         )
-    schema = pa.schema(
-        fields,
-        metadata={
-            b"duckpd.model_fingerprint": encoder.fingerprint.encode(),
-            b"duckpd.representation_fingerprint": representation.fingerprint.encode(),
-            b"duckpd.mask_semantics": b"complete_rows_only-v1",
-        },
-    )
+
+    metadata: dict[bytes | str, bytes | str] = {
+        b"duckpd.model_fingerprint": encoder.fingerprint.encode(),
+        b"duckpd.representation_fingerprint": representation.fingerprint.encode(),
+        b"duckpd.mask_semantics": b"complete_rows_only-v1",
+    }
+    if input_spec.provider_abi is not None:
+        metadata[b"duckpd.provider_abi"] = input_spec.provider_abi.encode()
+    if input_spec.frequency is not None:
+        metadata[b"duckpd.timesfm_frequency"] = str(
+            resolve_timesfm_frequency(input_spec.frequency)
+        ).encode()
+    if input_spec.temporal is not None:
+        feature_width = input_spec.temporal.width
+        temporal_values: list[float] = []
+        for row in rows:
+            if row.time is None:
+                raise ValueError("temporal provider rows require a time coordinate")
+            features = generate_series_time_features(
+                input_spec.temporal,
+                anchor=row.time,
+                series_start=row.series_start,
+                length=input_spec.length,
+            )
+            temporal_values.extend(
+                _finite_float32(value) for feature_row in features for value in feature_row
+            )
+        width = input_spec.length * feature_width
+        arrays.append(_fixed_list_array(temporal_values, value_type=pa.float32(), width=width))
+        fields.append(
+            pa.field(
+                "__duckpd_past_time_features",
+                pa.list_(pa.float32(), width),
+                nullable=False,
+            )
+        )
+        metadata[b"duckpd.time_feature_shape"] = f"{input_spec.length},{feature_width}".encode()
+
+    static_by_row = [dict(row.static) for row in rows]
+    real_specs = tuple(item for item in input_spec.static if item.kind == "real")
+    categorical_specs = tuple(item for item in input_spec.static if item.kind == "categorical")
+    if real_specs:
+        real_values = [
+            _finite_float32(float(row[specification.name]))
+            for row in static_by_row
+            for specification in real_specs
+        ]
+        arrays.append(
+            _fixed_list_array(real_values, value_type=pa.float32(), width=len(real_specs))
+        )
+        fields.append(
+            pa.field(
+                "__duckpd_static_real",
+                pa.list_(pa.float32(), len(real_specs)),
+                nullable=False,
+            )
+        )
+    if categorical_specs:
+        categorical_values = [
+            int(row[specification.name])
+            for row in static_by_row
+            for specification in categorical_specs
+        ]
+        arrays.append(
+            _fixed_list_array(
+                categorical_values,
+                value_type=pa.int64(),
+                width=len(categorical_specs),
+            )
+        )
+        fields.append(
+            pa.field(
+                "__duckpd_static_categorical",
+                pa.list_(pa.int64(), len(categorical_specs)),
+                nullable=False,
+            )
+        )
+    schema = pa.schema(fields, metadata=metadata)
     record_batch = cast("Any", pa.RecordBatch)
     return cast("pa.RecordBatch", record_batch.from_arrays(arrays, schema=schema))
 
@@ -515,7 +814,7 @@ def embed_native_series_query(
         zero_scale_as_null=False,
     )
     assert normalized is not None
-    flattened = [value for _, values in normalized for value in values]
+    flattened = [value for _, values in normalized.channels for value in values]
     if representation.unit_norm:
         norm = sqrt(fsum(value * value for value in flattened))
         if norm == 0.0:
@@ -559,6 +858,9 @@ def embed_series(
     representation: SeriesRepresentationSpec,
     batch_size: int = 256,
     null_policy: SeriesNullPolicy = "propagate",
+    time: str | None = None,
+    series_start: str | None = None,
+    static_columns: Mapping[str, str] | None = None,
 ) -> DataFrame:
     """Append one native or prepared learned series representation lazily."""
     from duckpd._logical import (
@@ -598,6 +900,38 @@ def embed_series(
     _positive_integer(batch_size, field_name="batch_size")
     if null_policy not in {"propagate", "error"}:
         raise ValueError("null_policy must be 'propagate' or 'error'")
+    input_spec = (
+        cast("SeriesEmbeddingInputSpec", representation.encoder.input)
+        if representation.encoder is not None
+        else None
+    )
+    temporal = input_spec.temporal if input_spec is not None else None
+    if (time is None) != (temporal is None):
+        if temporal is None:
+            raise ValueError("time is valid only when temporal input is declared")
+        raise ValueError("time is required when temporal input is declared")
+    age_required = temporal is not None and "age_log10" in temporal.features
+    if (series_start is None) != (not age_required):
+        if age_required:
+            raise ValueError("series_start is required when age_log10 is declared")
+        raise ValueError("series_start is valid only when age_log10 is declared")
+    static_specs = input_spec.static if input_spec is not None else ()
+    raw_static_columns = cast("object", static_columns)
+    if raw_static_columns is not None and not isinstance(raw_static_columns, Mapping):
+        raise TypeError("static_columns must be a mapping or None")
+    static_mapping = dict(static_columns or {})
+    if any(type(name) is not str or not name for name in static_mapping):
+        raise TypeError("static_columns keys must be non-empty names")
+    if any(type(label) is not str or not label for label in static_mapping.values()):
+        raise TypeError("static_columns values must be non-empty column labels")
+    expected_static = {item.name for item in static_specs}
+    actual_static = set(static_mapping)
+    if actual_static != expected_static:
+        raise ValueError(
+            "static_columns must exactly match the representation; "
+            f"missing={sorted(expected_static - actual_static)}, "
+            f"unexpected={sorted(actual_static - expected_static)}"
+        )
 
     resolved: list[tuple[str, Column]] = []
     window_contract: tuple[tuple[object, ...], tuple[object, ...]] | None = None
@@ -637,6 +971,56 @@ def embed_series(
                 "partition window contract"
             )
         resolved.append((channel, column))
+    resolved_time = find_column(frame._plan.metadata, time) if time is not None else None
+    if resolved_time is not None and resolved_time.duckdb_type.upper() not in {
+        "TIMESTAMP",
+        "TIMESTAMPTZ",
+        "TIMESTAMP WITH TIME ZONE",
+    }:
+        raise UnsupportedOperationError(
+            f"time column {resolved_time.label!r} must be TIMESTAMP or TIMESTAMPTZ; "
+            f"found {resolved_time.duckdb_type}"
+        )
+    resolved_start = (
+        find_column(frame._plan.metadata, series_start) if series_start is not None else None
+    )
+    if resolved_start is not None and resolved_start.duckdb_type.upper() not in {
+        "TIMESTAMP",
+        "TIMESTAMPTZ",
+        "TIMESTAMP WITH TIME ZONE",
+    }:
+        raise UnsupportedOperationError(
+            f"series_start column {resolved_start.label!r} must be TIMESTAMP or TIMESTAMPTZ; "
+            f"found {resolved_start.duckdb_type}"
+        )
+    resolved_static: list[tuple[str, Column]] = []
+    integral_types = {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+    }
+    from duckpd._reductions import is_numeric_type
+
+    for specification in static_specs:
+        column = find_column(frame._plan.metadata, static_mapping[specification.name])
+        dtype = column.duckdb_type.upper()
+        if specification.kind == "categorical" and dtype not in integral_types:
+            raise UnsupportedOperationError(
+                f"static categorical column {column.label!r} must be integral; found "
+                f"{column.duckdb_type}"
+            )
+        if specification.kind == "real" and (dtype == "BOOLEAN" or not is_numeric_type(dtype)):
+            raise UnsupportedOperationError(
+                f"static real column {column.label!r} must be numeric; found {column.duckdb_type}"
+            )
+        resolved_static.append((specification.name, column))
 
     output = Column(
         ColumnId.create(),
@@ -653,12 +1037,15 @@ def embed_series(
     return DataFrame(
         frame._session,
         SeriesRepresentationPlan(
-            frame._plan,
-            tuple((channel, column.id) for channel, column in resolved),
-            output,
-            representation,
-            batch_size,
-            null_policy,
-            metadata,
+            input=frame._plan,
+            channels=tuple((channel, column.id) for channel, column in resolved),
+            time=resolved_time.id if resolved_time is not None else None,
+            series_start=resolved_start.id if resolved_start is not None else None,
+            static_columns=tuple((name, column.id) for name, column in resolved_static),
+            output_column=output,
+            representation=representation,
+            batch_size=batch_size,
+            null_policy=null_policy,
+            metadata=metadata,
         ),
     )

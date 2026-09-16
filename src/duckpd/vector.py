@@ -26,7 +26,7 @@ from duckpd._metadata import after_vector_search, find_column
 from duckpd._reductions import expression_type
 from duckpd.embeddings import EmbeddedQuery
 from duckpd.errors import UnsupportedOperationError
-from duckpd.series_embeddings import EmbeddedSeriesQuery
+from duckpd.series_embeddings import EmbeddedSeriesQuery, SeriesQueryInput
 
 if TYPE_CHECKING:
     from duckpd.embeddings import EmbeddingModelSpec
@@ -317,7 +317,7 @@ class VectorFrameMethods:
 
     def search_series(
         self,
-        query: Mapping[str, Sequence[float]],
+        query: Mapping[str, Sequence[float]] | SeriesQueryInput,
         *,
         column: str,
         representation: SeriesRepresentationSpec | None = None,

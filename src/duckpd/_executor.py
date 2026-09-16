@@ -527,6 +527,9 @@ def _embedding_operations(
                     "batch_size": node.batch_size,
                     "null_policy": node.null_policy,
                     "channels": [channel for channel, _ in node.channels],
+                    "temporal_input": node.time is not None,
+                    "series_start_input": node.series_start is not None,
+                    "static_inputs": [name for name, _ in node.static_columns],
                     "boundary": (
                         "duckdb_native_expression"
                         if encoder is None
