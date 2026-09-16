@@ -1,17 +1,49 @@
 # Transformers Series Embedding Provider
 
-**Status: implementation-ready specification.**
+**Status: implemented provider and public contract; no checkpoint recipe is
+recommended by integration alone.**
 
-This document defines how DuckPD must add a first-party
+This document defines DuckPD's first-party
 `TransformersSeriesEmbeddingProvider` without weakening the existing lazy,
-fingerprinted, bounded-batch series representation contract. It covers the
-native Transformers time-series backbones currently relevant to DuckPD:
-PatchTST, PatchTSMixer, TimesFM 1.0/2.0, TimesFM 2.5, Time Series Transformer,
-Informer, and Autoformer.
+fingerprinted, bounded-batch series representation contract. It covers four
+allowlisted Hugging Face Transformers profiles: PatchTST, PatchTSMixer,
+TimesFM 2.5, and Time Series Transformer.
 
-The provider is an integration mechanism, not evidence that a forecasting
-checkpoint produces useful retrieval embeddings. Each checkpoint still needs
-independent task-specific qualification against deterministic baselines.
+The provider is an integration mechanism, not evidence that a checkpoint
+produces useful retrieval embeddings. Qualification applies to a complete
+representation recipe on a named task, never to an architecture name alone.
+
+## Product purpose and evidence policy
+
+DuckPD provides a dependable representation-generation, storage, and retrieval
+layer. A user selects a recipe, attaches its vectors to existing rows, persists
+the vectors with their identity and provenance, and later encodes compatible raw
+queries without re-embedding the corpus. The enriched data remains ordinary
+DuckPD data suitable for retrieval, clustering, labeling, analysis, or
+downstream model training.
+
+A recipe comprises input semantics, immutable checkpoint revision,
+preprocessing, hidden-state selection, pooling or projection, output
+normalization, and distance metric. Forecasting, reconstruction,
+classification, contrastive learning, and dedicated representation learning are
+all valid origins. The original task is neither approval nor rejection evidence.
+
+Qualification keeps two questions separate:
+
+- Does the selected distance retrieve relevant neighbors for the named task?
+- Can a separately trained downstream model extract useful information from the
+  vectors?
+
+Mechanical compatibility proves neither. Missing retrieval measurements mean
+that usefulness is unknown, not that a model is unsuitable. Recommended presets
+require task-specific evidence against the relevant native normalized-window and
+simple feature/PCA baselines.
+
+Univariate inputs are a first-class use case. Multichannel recipes must state
+whether they independently encode ordered channels, aggregate channels
+invariantly, learn joint channel interactions, or condition on declared
+covariates. Swapping values between named channels and changing a covariate with
+the target fixed are required capability checks, not retrieval-quality proof.
 
 ## Decision summary
 
@@ -21,21 +53,18 @@ independent task-specific qualification against deterministic baselines.
    `config.model_type` and never enable `trust_remote_code`.
 3. Dispatch through a private, explicit adapter allowlist. Do not infer support
    from a callable signature or the presence of `last_hidden_state`.
-4. Add versioned frequency, temporal, static-feature, and query-time semantics
-   to the immutable series input contract. Preserve existing serialized
-   specifications and fingerprints when those fields are absent.
+4. Add versioned temporal, static-feature, and query-time semantics to the
+   immutable series input contract. Preserve existing serialized specifications
+   and fingerprints when those fields are absent.
 5. Generate timestamp-derived features in DuckPD's shared series boundary, not
    independently inside each model adapter. Corpus and query encoding must call
    the same implementation.
-6. Treat TimesFM frequency and calendar time features as different concepts.
-   TimesFM 1.0/2.0 receives one categorical frequency index; encoder-decoder
-   models receive an ordered time-feature matrix.
-7. Embed only past context. Time Series Transformer, Informer, and Autoformer use
-   their encoder state; DuckPD must not execute the forecasting decoder or
-   synthesize a future horizon.
-8. Ship one exact, versioned pooling rule per model family before adding pooling
+6. Embed only past context. Time Series Transformer uses its encoder state;
+   DuckPD must not execute the forecasting decoder or synthesize a future
+   horizon.
+7. Ship one exact, versioned pooling rule per model family before adding pooling
    choices.
-9. Keep complete fixed-width windows as the first supported execution contract.
+8. Keep complete fixed-width windows as the first supported execution contract.
    No hidden resampling, imputation, truncation, or padding.
 
 ## Fresh-session implementation handoff
@@ -56,7 +85,7 @@ changes win where they preserve this contract. The existing
 document does not explicitly change.
 
 This is one end-to-end change, not permission to stop after an early phase.
-Completion requires all seven allowlisted profiles, corpus and rich-query
+Completion requires all four allowlisted profiles, corpus and rich-query
 execution, catalog version 2, persistence, exports, shipped API documentation,
 the changelog entry, and the permanent tests listed below. There are no
 placeholder adapters, deferred public APIs, compatibility aliases, or
@@ -75,19 +104,19 @@ supplies a dataset and acceptance threshold.
 - The public backend remains exactly `"transformers"`; dispatch is by input
   kind.
 - The provider ABI is exactly `"transformers-series-v1"`.
-- Frequency and timestamp-derived features are separate optional contracts.
-  TimesFM 1.0/2.0 declares `frequency`; encoder-decoder models declare
-  `temporal` exactly when configured time features are nonzero and may declare
-  `static`; patch models and TimesFM 2.5 declare neither.
+- Encoder-decoder models declare `temporal` exactly when configured time
+  features are nonzero and may declare `static`; patch models and TimesFM 2.5
+  declare neither.
 - A rich query uses the field and keyword `time`, not `end_at`, because
   `temporal.anchor` decides whether that instant is the final observation or the
   exclusive end.
 - No new required dependency or default Hub download is added. Unit tests use
   fake runtimes or tiny locally constructed models and run offline.
 - Runtime support is capability-detected, never selected by parsing a version
-  string. Transformers 4.57.6 is the reviewed floor for the six older profiles;
-  TimesFM 2.5 requires a release exposing `TimesFm2_5Model` through `AutoModel`
-  (reviewed in Transformers 5.17.0).
+  string. Transformers 4.57.6 is the reviewed floor for PatchTST,
+  PatchTSMixer, and Time Series Transformer. TimesFM 2.5 requires a release
+  exposing `TimesFm2_5Model` through `AutoModel` (reviewed in Transformers
+  5.17.0).
 - A version-1 catalog is read-only with respect to these extensions. It remains
   readable, is never rewritten implicitly, and rejects declarations containing
   version-2 nested series fields. New declarations using extensions require
@@ -110,8 +139,8 @@ The feature is complete only when all of the following are true:
 2. Every profile in [Supported model profiles](#supported-model-profiles) has an
    explicit adapter, exact prepare-time validation, tensor-shape checks, and a
    corpus/query parity test.
-3. All temporal, frequency, static, and query inputs serialize canonically,
-   survive sidecar/table/catalog round trips, and participate in cache identity.
+3. All temporal, static, and query inputs serialize canonically, survive
+   sidecar/table/catalog round trips, and participate in cache identity.
 4. Planning is model-runtime-free and network-free; preparation is explicit and
    artifact-verified; execution is bounded and deterministic.
 5. The focused verification commands and the repository-wide `make check` and
@@ -123,7 +152,7 @@ The feature is complete only when all of the following are true:
 
 ## Goals
 
-- Support the seven listed Transformers model families through one public
+- Support the four listed Transformers model families through one public
   provider and explicit private adapters.
 - Preserve side-effect-free planning and explicit eager model preparation.
 - Preserve bounded Arrow execution and fixed-size `float32` vector output.
@@ -180,11 +209,8 @@ list of repository names.
 | --- | --- | --- | --- | --- |
 | PatchTST | `patchtst` | `PatchTSTModel` | `(B, C, P, D)` | mean channels and patches |
 | PatchTSMixer | `patchtsmixer` | `PatchTSMixerModel` | `(B, C, P, D)` | mean channels and patches |
-| TimesFM 1/2 | `timesfm` | `TimesFmModel` | `(B, P, D)` | mean valid patches |
 | TimesFM 2.5 | `timesfm2_5` | `TimesFm2_5Model` | `(B, P, D)` | mean valid patches |
 | Time Series Transformer | `time_series_transformer` | `TimeSeriesTransformerModel` | `(B, context_length, D)` encoder state | mean encoder steps |
-| Informer | `informer` | `InformerModel` | `(B, context_length, D)` encoder state | mean encoder steps |
-| Autoformer | `autoformer` | `AutoformerModel` | `(B, context_length, D)` encoder state | mean encoder steps |
 
 TimesFM 2.5 is feature-gated until the installed Transformers release exposes
 `TimesFm2_5Model` and its `AutoModel` mapping. Absence is an actionable
@@ -210,7 +236,6 @@ class SeriesEmbeddingInputSpec:
     roles: tuple[SeriesChannelRole, ...]
     normalization: str
     provider_abi: str | None = None
-    frequency: SeriesFrequencyInputSpec | None = None
     temporal: SeriesTemporalInputSpec | None = None
     static: tuple[SeriesStaticInputSpec, ...] = ()
 ```
@@ -223,8 +248,8 @@ provider_abi = "transformers-series-v1"
 
 `provider_abi` prevents a future tensor-layout or adapter change from silently
 reusing an old embedding fingerprint. `to_dict()` must omit `provider_abi`,
-`frequency`, `temporal`, and `static` when they have their legacy defaults so
-existing model fingerprints do not change.
+`temporal`, and `static` when they have their legacy defaults so existing model
+fingerprints do not change.
 
 A new specification containing any extension field serializes its nested input
 with `schema_version: 2`. The parser continues to accept the existing unversioned
@@ -232,8 +257,7 @@ shape as version 1. Catalog declarations using version-2 series input fields
 require `catalog_version: 2`; catalog version 1 remains strict and unchanged.
 
 Extension fields are valid only when the containing model uses
-`backend="transformers"` and `provider_abi="transformers-series-v1"`.
-`frequency` is mutually exclusive with both `temporal` and `static`. Static
+`backend="transformers"` and `provider_abi="transformers-series-v1"`. Static
 features may be declared without temporal features for an encoder configured
 with `num_time_features == 0`. MOMENT and custom providers retain the legacy
 four-field contract; richer inputs in another provider require a future ABI.
@@ -250,7 +274,6 @@ def series_embedding_input(
     roles: tuple[SeriesChannelRole, ...],
     normalization: str,
     provider_abi: str | None = None,
-    frequency: SeriesFrequencyInputSpec | None = None,
     temporal: SeriesTemporalInputSpec | None = None,
     static: tuple[SeriesStaticInputSpec, ...] = (),
 ) -> SeriesEmbeddingInputSpec: ...
@@ -262,13 +285,6 @@ def series_cadence(
     multiple: int = 1,
     mode: Literal["elapsed", "civil"] = "elapsed",
 ) -> SeriesCadenceSpec: ...
-
-
-def series_frequency_input(
-    *,
-    cadence: SeriesCadenceSpec,
-    timesfm_frequency: Literal["auto", 0, 1, 2] = "auto",
-) -> SeriesFrequencyInputSpec: ...
 
 
 def series_temporal_input(
@@ -294,18 +310,17 @@ Every exported dataclass validates the same invariants in `__post_init__`; the
 helpers are conveniences, not validation bypasses.
 
 Define `SeriesCadenceUnit`, `SeriesTimeFeature`, `SeriesCadenceSpec`,
-`SeriesFrequencyInputSpec`, `SeriesTemporalInputSpec`,
-`SeriesStaticInputSpec`, their five helpers, and the extended
-`SeriesEmbeddingInputSpec` in `embeddings.py`. Define `SeriesQueryInput` and
-`series_query()` in `series_embeddings.py`. Define
+`SeriesTemporalInputSpec`, `SeriesStaticInputSpec`, and their public helpers in
+`embeddings.py`. Define `SeriesQueryInput` and `series_query()` in
+`series_embeddings.py`. Define
 `TransformersSeriesEmbeddingProvider` in `series_providers.py`. Re-export every
 non-private name in this paragraph from `duckpd.__init__`; adapters and temporal
 generation functions remain private.
 
 The existing four-field input serializes exactly as before, with no
 `schema_version`. A version-2 input serializes to the following canonical shape;
-optional `frequency`, `temporal`, and `static` keys are omitted when absent, but
-`provider_abi` and `schema_version` are required:
+optional `temporal` and `static` keys are omitted when absent, but `provider_abi`
+and `schema_version` are required:
 
 ```json
 {
@@ -341,11 +356,9 @@ than `2`. They never coerce strings to numbers. `EmbeddingModelSpec.to_dict()`
 embeds this object unchanged; sidecars and table metadata therefore need no
 second representation of these fields.
 
-`frequency` serializes as
-`{"cadence":{"mode":"elapsed","multiple":1,"unit":"hour"},"timesfm_frequency":"auto"}`
-under canonical key sorting. Catalog version 2 has the same top-level fields and
-the same `series_representations[].version == 1` contract as version 1; its only
-schema extension is accepting nested series input schema version 2 in
+Catalog version 2 has the same top-level fields and the same
+`series_representations[].version == 1` contract as version 1; its only schema
+extension is accepting nested series input schema version 2 in
 `embedding_models`. Version 2 also accepts legacy text and series model entries.
 Parsing preserves the declared catalog version, and no read, write, or lookup
 implicitly migrates a version-1 catalog.
@@ -420,31 +433,6 @@ Compute the nonnegative integer `i` directly for the cadence unit, then require
 `shift(series_start, i) == timestamp`; otherwise the timestamps are not aligned
 and fail.
 
-### TimesFM frequency
-
-TimesFM 1.0/2.0 frequency is categorical, not a timestamp-derived feature:
-
-```python
-@dataclass(frozen=True)
-class SeriesFrequencyInputSpec:
-    cadence: SeriesCadenceSpec
-    timesfm_frequency: Literal["auto", 0, 1, 2] = "auto"
-```
-
-When `timesfm_frequency="auto"`, resolve from semantic cadence:
-
-| Cadence unit | Index |
-| --- | ---: |
-| second, minute, hour, day | 0 |
-| week, month | 1 |
-| quarter, year | 2 |
-
-An application may explicitly select `0`, `1`, or `2`, as permitted by TimesFM.
-The explicit value or the `"auto"` rule, cadence, and representation sampling
-all participate in the model and complete representation fingerprints. Do not
-classify from observed gaps. A frequency declaration requires no timestamp
-column and emits no per-step feature matrix. Every profile other than TimesFM
-1.0/2.0 rejects `frequency`.
 
 ### Temporal preprocessing
 
@@ -569,7 +557,7 @@ Adapters interpret the existing ordered channel roles as follows:
 | Family | `target` | `past_covariate` | `known_future_covariate` |
 | --- | --- | --- | --- |
 | PatchTST/PatchTSMixer | value channel | value channel | value channel |
-| TimesFM | exactly one required | rejected | rejected |
+| TimesFM 2.5 | exactly one required | rejected | rejected |
 | Encoder-decoder families | `past_values` channel | dynamic real time-feature channel | dynamic real time-feature channel |
 
 For encoder-only embeddings, both covariate roles contribute only their values
@@ -606,32 +594,25 @@ patchtst = pd.embedding_model(
 )
 ```
 
-TimesFM 1.0/2.0 declares categorical frequency semantics:
+TimesFM 2.5 declares a strictly univariate value contract:
 
 ```python
 timesfm = pd.embedding_model(
-    "google/timesfm-2.0-500m-pytorch",
-    revision="dc2443792ce5516872b89b37cf1bc058c3bf0c10",
+    "google/timesfm-2.5-200m-transformers",
+    revision="5a9806b9b291fad9233b5249d88263f1846304d3",
     backend="transformers",
     dimension=1280,
     normalize=True,
     pooling="mean-valid-patches-v1",
     input=pd.series_embedding_input(
-        length=2048,
+        length=16384,
         channels=("target",),
         roles=("target",),
-        normalization="timesfm-masked-mean-std-v1",
+        normalization="timesfm2_5-config-normalization-v1",
         provider_abi="transformers-series-v1",
-        frequency=pd.series_frequency_input(
-            cadence=pd.series_cadence("minute", multiple=5),
-            timesfm_frequency="auto",
-        ),
     ),
 )
 ```
-
-TimesFM 2.5 uses the same univariate value contract but omits both `frequency`
-and `temporal`; its architecture no longer consumes the frequency indicator.
 
 An encoder-decoder checkpoint declares the complete lag-history window,
 calendar recipe, dynamic covariates, and static features:
@@ -721,8 +702,6 @@ embedded = windows.embed_series(
 - `series_start` is required exactly when `age_log10` is requested and rejected
   otherwise.
 - `static_columns` keys must exactly match the declared static feature names.
-- A `frequency` declaration needs no corpus column; its categorical value is
-  constant model metadata derived from the immutable specification.
 - Omitting a required mapping or supplying an undeclared mapping is an eager
   error.
 
@@ -819,7 +798,6 @@ duckpd.representation_fingerprint
 duckpd.provider_abi
 duckpd.mask_semantics = complete_rows_only-v1
 duckpd.time_feature_shape = L,F          # temporal input only
-duckpd.timesfm_frequency = 0|1|2         # TimesFM 1/2 only
 ```
 
 Reserved fields are generated by DuckPD after outer normalization and before
@@ -878,11 +856,8 @@ The allowlist is a literal mapping:
 _ADAPTERS = {
     "patchtst": _PatchBackboneAdapter(...),
     "patchtsmixer": _PatchBackboneAdapter(...),
-    "timesfm": _TimesFmAdapter(...),
     "timesfm2_5": _TimesFm25Adapter(...),
     "time_series_transformer": _EncoderDecoderAdapter(...),
-    "informer": _EncoderDecoderAdapter(...),
-    "autoformer": _AutoformerEncoderAdapter(...),
 }
 ```
 
@@ -923,7 +898,7 @@ Preparation validates model-specific dimensions before corpus execution:
 
 ```text
 Patch families:       specification.dimension == config.d_model
-TimesFM families:     specification.dimension == config.hidden_size
+TimesFM 2.5:         specification.dimension == config.hidden_size
 Encoder-decoder:      specification.dimension == config.d_model
 ```
 
@@ -942,9 +917,8 @@ own scaler; DuckPD neither duplicates nor disables it:
 | --- | --- |
 | PatchTST | `patchtst-config-scaling-v1` |
 | PatchTSMixer | `patchtsmixer-config-scaling-v1` |
-| TimesFM 1.0/2.0 | `timesfm-masked-mean-std-v1` |
 | TimesFM 2.5 | `timesfm2_5-config-normalization-v1` |
-| Time Series Transformer, Informer, Autoformer | `hf-time-series-scaler-v1` |
+| Time Series Transformer | `hf-time-series-scaler-v1` |
 
 
 ### PatchTST and PatchTSMixer
@@ -955,7 +929,6 @@ Validation:
 input.length == config.context_length
 len(input.channels) == config.num_input_channels
 input.static is empty
-input.frequency is absent
 input.temporal is absent
 pooling == "mean-channels-patches-v1"
 ```
@@ -979,53 +952,30 @@ PatchTST documentation has historically disagreed about the final hidden axis;
 runtime validation must require `D == config.d_model` rather than trusting the
 docstring label.
 
-### TimesFM 1.0/2.0
+
+### TimesFM 2.5
 
 Validation:
 
 ```text
 exactly one target channel
-no covariate or static inputs
-input.frequency is present
-input.temporal is absent
+no covariate, temporal, or static inputs
 input.length <= config.context_length
 input.length % config.patch_length == 0
 pooling == "mean-valid-patches-v1"
 ```
 
-Execution:
+The installed Transformers runtime must expose `TimesFm2_5Model` through
+`AutoModel`. Call the bare model with `(B, L)` values and an all-zero padding
+mask. Require `(B, P, D)` hidden state and apply `mean-valid-patches-v1`. Do not
+execute the forecasting head, flip-invariance forecasting path, quantile head,
+or positivity clamping.
 
-1. Materialize `(B, L)` float32 values.
-2. Create an all-zero `(B, L)` integer padding mask; zero means valid.
-3. Read the resolved frequency index from canonical batch metadata and create
-   `(B,)` integers.
-4. Call bare `TimesFmModel(past_values, past_values_padding, freq)`.
-5. Require `(B, P, D)` hidden state and mean only valid patch tokens.
-
-The first implementation does not left-pad arbitrary lengths. Requiring a patch
-multiple keeps padding semantics explicit and preserves the current complete
-window contract.
-
-### TimesFM 2.5
-
-Validation matches TimesFM 1/2 except:
-
-- both `frequency` and `temporal` must be absent;
-- no frequency metadata is accepted;
-- the installed Transformers runtime must expose `TimesFm2_5Model` through
-  `AutoModel`.
-
-Call the bare model with `(B, L)` values and an all-zero padding mask. Require
-`(B, P, D)` hidden state and apply `mean-valid-patches-v1`. Do not execute the
-forecasting head, flip-invariance forecasting path, quantile head, or positivity
-clamping.
-
-### Time Series Transformer and Informer
+### Time Series Transformer
 
 Validation:
 
 ```text
-input.frequency is absent
 input.temporal is present iff config.num_time_features > 0
 input.length == config.context_length + max(config.lags_sequence)
 target channel count == config.input_size
@@ -1060,21 +1010,6 @@ construction:
 Calling the full model and reading `last_hidden_state` is incorrect because that
 field belongs to the decoder. DuckPD explicitly pools the encoder output.
 
-### Autoformer
-
-Validation is the same as the other encoder-decoder adapters. Its
-`create_network_inputs()` returns lagged values and temporal/static features
-separately. Reproduce the model's encoder path exactly:
-
-1. Call `create_network_inputs(...)` without future inputs.
-2. Concatenate its lagged input and temporal feature outputs for the first
-   `context_length` steps.
-3. Call `model.get_encoder()` directly.
-4. Pool the encoder's `(B, context_length, D)` state with
-   `mean-encoder-time-v1`.
-
-Do not run the decomposition/decoder forecast path and do not pool Autoformer's
-trend output.
 
 ## Session dispatch
 
@@ -1159,8 +1094,8 @@ actual value without including credentials or unbounded row data.
 
 | File | Required change |
 | --- | --- |
-| `src/duckpd/embeddings.py` | Define cadence/frequency/temporal/static public contracts and helpers; add version-2 input fields; allow Transformers series inputs; preserve legacy serialization/fingerprints. |
-| `src/duckpd/_temporal.py` | Add pure timestamp reconstruction, timezone conversion, TimesFM frequency resolution, and versioned calendar feature generation. |
+| `src/duckpd/embeddings.py` | Define cadence/temporal/static public contracts and helpers; add version-2 input fields; allow Transformers series inputs; preserve legacy serialization/fingerprints. |
+| `src/duckpd/_temporal.py` | Add pure timestamp reconstruction, timezone conversion, and versioned calendar feature generation. |
 | `src/duckpd/series_embeddings.py` | Add rich query input/snapshot, shared feature generation, and extended Arrow batch construction. |
 | `src/duckpd/series_providers.py` | Add `TransformersSeriesEmbeddingProvider` and private allowlisted adapters. |
 | `src/duckpd/_logical.py` | Carry optional time, series-start, and static column IDs on `SeriesRepresentationPlan`. |
@@ -1182,10 +1117,9 @@ actual value without including credentials or unbounded row data.
 
 ### Phase 1: immutable semantics and temporal generation
 
-- Add cadence, frequency, temporal, static, and rich query dataclasses.
+- Add cadence, temporal, static, and rich query dataclasses.
 - Implement canonical serialization with legacy fingerprint preservation.
-- Add categorical frequency resolution, timestamp-anchor reconstruction, and
-  the two versioned calendar recipes.
+- Add timestamp-anchor reconstruction and the two versioned calendar recipes.
 - Extend representation validation and query snapshots.
 - Extend logical/compiler/UDF inputs for time and static values.
 
@@ -1204,26 +1138,23 @@ Exit gate: tiny local backbones prove direct-model parity, bounded batches,
 `(B,C,P,D)` validation, pooling, query/corpus equality, and no planning imports or
 network work.
 
-### Phase 3: TimesFM
+### Phase 3: TimesFM 2.5
 
-- Implement TimesFM 1/2 frequency resolution and bare-backbone adapter.
-- Implement feature-detected TimesFM 2.5 adapter.
+- Implement the feature-detected TimesFM 2.5 adapter.
 - Reject nonmultiples of patch length and all unsupported covariates.
 
-Exit gate: tiny local configurations prove categorical frequency changes the
-embedding for 1/2, 2.5 receives no frequency, masks/pooling are correct, and an
-older Transformers runtime fails before corpus execution.
+Exit gate: a tiny local configuration proves masks and pooling are correct, and
+an older Transformers runtime fails before corpus execution.
 
-### Phase 4: encoder-decoder backbones
+### Phase 4: encoder-decoder backbone
 
 - Implement role-based target/dynamic input packing.
 - Implement static real/categorical packing.
-- Implement shared Time Series Transformer/Informer encoder path.
-- Implement Autoformer's separate encoder-input concatenation.
+- Implement the Time Series Transformer encoder path.
 
-Exit gate: direct calls to tiny local models match provider results; tests prove
-that decoder state, trend output, missing lag history, wrong feature recipes, and
-static-cardinality mismatches are rejected.
+Exit gate: direct calls to a tiny local model match provider results; tests prove
+that missing lag history, wrong feature recipes, and static-cardinality
+mismatches are rejected.
 
 ### Phase 5: catalog, documentation, and qualification tooling
 
@@ -1248,7 +1179,6 @@ produces a complete machine-readable artifact/runtime record from pinned inputs.
 - Canonical timezone/cadence representations are stable.
 - Catalog version 1 rejects version-2 fields; version 2 accepts and preserves
   them.
-- Frequency is mutually exclusive with temporal and static declarations.
 - Extension fields on non-Transformers models and wrong provider ABI values fail
   during model specification construction.
 
@@ -1257,7 +1187,6 @@ produces a complete machine-readable artifact/runtime record from pinned inputs.
 - Elapsed and civil day behavior across DST boundaries.
 - `last` and `end_exclusive` anchors.
 - Monthly and quarterly boundary transitions.
-- Every TimesFM automatic category and explicit override.
 - Every scalar GluonTS-compatible feature against pinned reference vectors.
 - Fourier feature order, range, and period boundaries.
 - Age generation from series start and rejection when start is absent.
@@ -1300,14 +1229,10 @@ Synthetic data proves only adapter compatibility.
 | --- | --- | --- |
 | PatchTST | `ibm-granite/granite-timeseries-patchtst@7fe295d8bc8fbac8041b60ab351882634165517f` | `L=512`, `C=7`, `D=128`, patch `12/12` |
 | PatchTSMixer | `ibm-granite/granite-timeseries-patchtsmixer@90dc5a88d45f032b7dceefb5d814ca2af54f2ff9` | `L=512`, `C=7`, `D=48`, patch `16/16` |
-| TimesFM 1/2 | `google/timesfm-2.0-500m-pytorch@dc2443792ce5516872b89b37cf1bc058c3bf0c10` | context `2048`, patch `32`, `D=1280`, one target |
 | TimesFM 2.5 | `google/timesfm-2.5-200m-transformers@5a9806b9b291fad9233b5249d88263f1846304d3` | context `16384`, patch `32`, `D=1280`, one target |
 | Time Series Transformer | `huggingface/time-series-transformer-tourism-monthly@2a40ad41f6ffe61e7bef6099b08c6c2fce36ac35` | context `24`, max lag `37`, `L=61`, `D=26`, time `2`, dynamic `0`, static real `1`, static categorical `1` with `[366]` |
-| Informer | `huggingface/informer-tourism-monthly@da30269a25658b3626dda20a94c9bf6b765f1b13` | context `24`, max lag `37`, `L=61`, `D=32`, time `2`, dynamic `0`, static real `0`, static categorical `1` with `[366]` |
-| Autoformer | `huggingface/autoformer-tourism-monthly@3801324c8213b225c5ee93ee53f7bfd8094ae7e2` | context `24`, max lag `37`, `L=61`, `D=64`, time `2`, dynamic `0`, static real `0`, static categorical `1` with `[366]` |
 
-Run TimesFM 2.5 with Transformers 5.17.0 or later. The six older targets must
-also be covered by the 4.57.6 capability matrix. A network smoke failure does
+Run TimesFM 2.5 with Transformers 5.17.0 or later. A network smoke failure does
 not justify changing a configured count, tensor layout, or checkpoint config;
 record the exact upstream incompatibility.
 
@@ -1371,9 +1296,9 @@ make build
 
 The focused pytest commands intentionally disable the repository coverage gate;
 `make check` is the required full-suite coverage proof. The 4.57.6 run exercises
-the six older adapters and the deterministic TimesFM 2.5 unavailable error; the
-5.17.0 run exercises all seven against models built from tiny configs, saved
-locally, and reloaded through `AutoModel`. Public checkpoint qualification is
+the three compatible adapters and the deterministic TimesFM 2.5 unavailable
+error; the 5.17.0 run exercises all four against models built from tiny configs,
+saved locally, and reloaded through `AutoModel`. Public checkpoint qualification is
 opt-in and must not be smuggled into any test command.
 
 
@@ -1405,13 +1330,8 @@ condition.
 - [DuckPD time-series embedding API](../api/time-series-embeddings.md)
 - [Hugging Face PatchTST documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/patchtst)
 - [Hugging Face PatchTSMixer documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/patchtsmixer)
-- [Hugging Face TimesFM documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/timesfm)
 - [Hugging Face TimesFM 2.5 documentation](https://huggingface.co/docs/transformers/v5.17.0/en/model_doc/timesfm2_5)
 - [Hugging Face Time Series Transformer documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/time_series_transformer)
-- [Hugging Face Informer documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/informer)
-- [Hugging Face Autoformer documentation](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/autoformer)
 - [Hugging Face time-series preprocessing walkthrough](https://huggingface.co/blog/time-series-transformers)
 - [Pinned GluonTS calendar feature source](https://github.com/awslabs/gluonts/blob/889a3df86a89a365880b4bc1488bcf4c039f265e/src/gluonts/time_feature/_base.py)
 - [Pinned GluonTS age feature source](https://github.com/awslabs/gluonts/blob/889a3df86a89a365880b4bc1488bcf4c039f265e/src/gluonts/transform/feature.py)
-- [Google Research TimesFM repository](https://github.com/google-research/timesfm)
-- [Archived TimesFM 1.0/2.0 frequency contract](https://github.com/google-research/timesfm/blob/master/v1/README.md)

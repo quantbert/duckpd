@@ -669,10 +669,25 @@ prepare a model, download an artifact, or run inference.
 
 ## Learned encoders
 
-Learned encoders are an optional extension, not a replacement for native
-representations. They use the same model and session lifecycle as text. DuckPD
-ships built-in providers for MOMENT and seven allowlisted bare Transformers
-architecture profiles. A MOMENT specification is:
+Learned encoders are optional representation generators, not replacements for
+native normalized-window baselines. DuckPD evaluates a complete recipe:
+checkpoint revision, input semantics, preprocessing, hidden-state selection,
+pooling or projection, normalization, and distance metric. Forecasting,
+reconstruction, classification, contrastive, and representation-learning
+checkpoints are all eligible; their original task does not establish retrieval
+quality.
+
+The operational lifecycle is generate, attach, persist, and search. Vectors stay
+beside original keys, timestamps, fields, and provenance. A compatible raw query
+reuses the persisted recipe without re-embedding the corpus. The resulting
+dataset remains available for clustering, labeling, analysis, and separately
+evaluated downstream training.
+
+Adapter compatibility, task-specific evaluation, and recommended-preset status
+are separate. Finite vectors and stable shapes prove only compatibility. Missing
+retrieval measurements mean usefulness is unknown. DuckPD ships built-in
+providers for MOMENT and four allowlisted Hugging Face Transformers profiles. A
+MOMENT specification is:
 
 ```python
 encoder = pd.embedding_model(
@@ -735,11 +750,8 @@ Supported profiles are selected by `config.model_type`:
 | --- | --- | --- |
 | `patchtst` | `PatchTSTModel` | `mean-channels-patches-v1` |
 | `patchtsmixer` | `PatchTSMixerModel` | `mean-channels-patches-v1` |
-| `timesfm` | `TimesFmModel` | `mean-valid-patches-v1` |
 | `timesfm2_5` | `TimesFm2_5Model` | `mean-valid-patches-v1` |
 | `time_series_transformer` | `TimeSeriesTransformerModel` | `mean-encoder-time-v1` |
-| `informer` | `InformerModel` | `mean-encoder-time-v1` |
-| `autoformer` | `AutoformerModel` | `mean-encoder-time-v1` |
 
 Model repository names are not allowlisted. Preparation validates the model
 type, bare class, input length, channel counts and roles, hidden dimension,
@@ -768,14 +780,6 @@ encoder = pd.embedding_model(
 )
 ```
 
-TimesFM 1/2 declares a categorical frequency without a timestamp column:
-
-```python
-frequency = pd.series_frequency_input(
-    cadence=pd.series_cadence("hour"),
-    timesfm_frequency="auto",
-)
-```
 
 Encoder-decoder checkpoints can instead declare generated temporal and static
 inputs:
@@ -864,9 +868,33 @@ execution providers. `embed_windows()` receives a canonical
 `pyarrow.RecordBatch`: declared channel fields first, followed when required by
 generated temporal, static-real, and static-categorical fixed-size arrays.
 Schema metadata records model and representation fingerprints, provider ABI,
-complete-row mask semantics, time-feature shape, and TimesFM frequency.
-DuckPD removes outer-null and zero-scale rows before the call. Variable-length
-padding masks are not part of this contract.
+complete-row mask semantics, and time-feature shape. DuckPD removes outer-null
+and zero-scale rows before the call. Variable-length padding masks are not part
+of this contract.
+
+### Representation capabilities
+
+Univariate input is a complete supported use case; not every provider must be
+jointly multivariate. Each concrete recipe must state its actual capability:
+
+| Capability | Meaning |
+| --- | --- |
+| Univariate | Exactly one numeric channel; unsupported extra channels fail before inference. |
+| Independent ordered channels | Channels retain named positions without a claim of learned cross-channel interaction. |
+| Channel-invariant aggregation | Channel order deliberately does not affect the result; unsuitable when identity must matter. |
+| Joint multivariate | The configuration and readout use cross-channel interactions. |
+| Covariate-conditioned | Declared temporal, dynamic, or static context affects the representation through a supported path. |
+
+For identity-sensitive recipes, swap values between named channels while keeping
+the schema fixed. For covariate-conditioned recipes, change a covariate with the
+target fixed. Output sensitivity is a capability sanity check, not proof that
+neighbors are useful.
+
+Retrieval qualification must name the question—such as return-path shape,
+volatility bursts, pre-event state, or post-event reaction—and declare which
+transformations should preserve or change similarity. Compare against relevant
+native and feature/PCA baselines. Evaluate downstream predictive utility
+separately.
 
 ### Targets, variates, and covariates
 

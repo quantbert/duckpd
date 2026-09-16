@@ -287,7 +287,6 @@ def _transformers_model(
     roles: tuple[duckpd.SeriesChannelRole, ...],
     normalization: str,
     pooling: str,
-    frequency: duckpd.SeriesFrequencyInputSpec | None = None,
     temporal: duckpd.SeriesTemporalInputSpec | None = None,
     static: tuple[duckpd.SeriesStaticInputSpec, ...] = (),
 ) -> duckpd.EmbeddingModelSpec:
@@ -304,7 +303,6 @@ def _transformers_model(
             roles=roles,
             normalization=normalization,
             provider_abi="transformers-series-v1",
-            frequency=frequency,
             temporal=temporal,
             static=static,
         ),
@@ -317,11 +315,8 @@ def test_transformers_series_adapter_registry_and_static_validation() -> None:
     assert {model_type: adapter.class_name for model_type, adapter in _ADAPTERS.items()} == {
         "patchtst": "PatchTSTModel",
         "patchtsmixer": "PatchTSMixerModel",
-        "timesfm": "TimesFmModel",
         "timesfm2_5": "TimesFm2_5Model",
         "time_series_transformer": "TimeSeriesTransformerModel",
-        "informer": "InformerModel",
-        "autoformer": "AutoformerModel",
     }
 
     patch_model = _transformers_model(
@@ -342,21 +337,6 @@ def test_transformers_series_adapter_registry_and_static_validation() -> None:
     patch_config.do_mask_input = True
     with pytest.raises(ValueError, match="masked-input"):
         _ADAPTERS["patchtst"].validate(patch_config, patch_model)
-
-    timesfm_model = _transformers_model(
-        length=4,
-        channels=("target",),
-        roles=("target",),
-        normalization="timesfm-masked-mean-std-v1",
-        pooling="mean-valid-patches-v1",
-        frequency=duckpd.series_frequency_input(
-            cadence=duckpd.series_cadence("hour"),
-        ),
-    )
-    _ADAPTERS["timesfm"].validate(
-        SimpleNamespace(context_length=8, patch_length=2, hidden_size=4),
-        timesfm_model,
-    )
 
     temporal = duckpd.series_temporal_input(
         cadence=duckpd.series_cadence("hour"),
@@ -388,8 +368,7 @@ def test_transformers_series_adapter_registry_and_static_validation() -> None:
         num_static_categorical_features=1,
         cardinality=[3],
     )
-    for model_type in ("time_series_transformer", "informer", "autoformer"):
-        _ADAPTERS[model_type].validate(encoder_config, encoder_model)
+    _ADAPTERS["time_series_transformer"].validate(encoder_config, encoder_model)
 
 
 def test_transformers_series_provider_rejects_noncanonical_arrow_metadata() -> None:
@@ -656,60 +635,6 @@ def test_transformers_series_adapters_pack_and_pool_exact_tensor_layouts() -> No
         patch_model.hidden.mean(axis=(1, 2), dtype=np.float32),
     )
 
-    timesfm_spec = _transformers_model(
-        length=4,
-        channels=("target",),
-        roles=("target",),
-        normalization="timesfm-masked-mean-std-v1",
-        pooling="mean-valid-patches-v1",
-        frequency=duckpd.series_frequency_input(
-            cadence=duckpd.series_cadence("month", mode="civil"),
-        ),
-    )
-    timesfm_representation = duckpd.series_representation(
-        window=4,
-        channels=("target",),
-        sampling="observations",
-        data_contract="test/timesfm-layout/v1",
-        encoder=timesfm_spec,
-    )
-    timesfm_batch = make_series_provider_batch(
-        (SeriesQuerySnapshot((("target", (1.0, 2.0, 3.0, 4.0)),), None, None, ()),),
-        timesfm_representation,
-    )
-
-    class TimesFmModel:
-        config = SimpleNamespace(patch_length=2)
-        _duckpd_specification = timesfm_spec
-
-        def __init__(self) -> None:
-            self.arguments: dict[str, _AdapterTensor] = {}
-            self.hidden = np.arange(8, dtype=np.float32).reshape(1, 2, 4)
-
-        def __call__(self, **arguments: _AdapterTensor) -> object:
-            self.arguments = arguments
-            return SimpleNamespace(last_hidden_state=_AdapterTensor(self.hidden))
-
-    timesfm_model = TimesFmModel()
-    timesfm_output = _ADAPTERS["timesfm"].embed(
-        timesfm_model,
-        timesfm_batch,
-        _AdapterTorch,
-        "cpu",
-    )
-    np.testing.assert_array_equal(
-        timesfm_model.arguments["past_values_padding"].values,
-        np.zeros((1, 4), dtype=np.int64),
-    )
-    np.testing.assert_array_equal(
-        timesfm_model.arguments["freq"].values,
-        np.asarray([1], dtype=np.int64),
-    )
-    np.testing.assert_array_equal(
-        timesfm_output.values,
-        timesfm_model.hidden.mean(axis=1, dtype=np.float32),
-    )
-
     timesfm25_spec = _transformers_model(
         length=4,
         channels=("target",),
@@ -728,8 +653,20 @@ def test_transformers_series_adapters_pack_and_pool_exact_tensor_layouts() -> No
         (SeriesQuerySnapshot((("target", (1.0, 2.0, 3.0, 4.0)),), None, None, ()),),
         timesfm25_representation,
     )
-    timesfm25_model = TimesFmModel()
-    timesfm25_model._duckpd_specification = timesfm25_spec
+
+    class TimesFm25Model:
+        config = SimpleNamespace(patch_length=2)
+        _duckpd_specification = timesfm25_spec
+
+        def __init__(self) -> None:
+            self.arguments: dict[str, _AdapterTensor] = {}
+            self.hidden = np.arange(8, dtype=np.float32).reshape(1, 2, 4)
+
+        def __call__(self, **arguments: _AdapterTensor) -> object:
+            self.arguments = arguments
+            return SimpleNamespace(last_hidden_state=_AdapterTensor(self.hidden))
+
+    timesfm25_model = TimesFm25Model()
     timesfm25_output = _ADAPTERS["timesfm2_5"].embed(
         timesfm25_model,
         timesfm25_batch,
@@ -798,8 +735,7 @@ def test_transformers_series_adapters_pack_and_pool_exact_tensor_layouts() -> No
         config = SimpleNamespace(context_length=2)
         _duckpd_specification = encoder_spec
 
-        def __init__(self, *, autoformer: bool) -> None:
-            self.autoformer = autoformer
+        def __init__(self) -> None:
             self.arguments: dict[str, _AdapterTensor | None] = {}
             self.encoder = Encoder()
 
@@ -808,43 +744,36 @@ def test_transformers_series_adapters_pack_and_pool_exact_tensor_layouts() -> No
             **arguments: _AdapterTensor | None,
         ) -> tuple[_AdapterTensor, ...]:
             self.arguments = arguments
-            lagged = _AdapterTensor(np.ones((1, 4, 2), dtype=np.float32))
-            if self.autoformer:
-                temporal_features = _AdapterTensor(np.ones((1, 4, 3), dtype=np.float32))
-                return lagged, temporal_features
             return (_AdapterTensor(np.ones((1, 4, 4), dtype=np.float32)),)
 
         def get_encoder(self) -> Encoder:
             return self.encoder
 
-    for model_type in ("time_series_transformer", "informer", "autoformer"):
-        encoder_model = EncoderModel(autoformer=model_type == "autoformer")
-        output = _ADAPTERS[model_type].embed(
-            encoder_model,
-            encoder_batch,
-            _AdapterTorch,
-            "cpu",
-        )
-        past_values = encoder_model.arguments["past_values"]
-        past_time_features = encoder_model.arguments["past_time_features"]
-        static_real = encoder_model.arguments["static_real_features"]
-        static_categorical = encoder_model.arguments["static_categorical_features"]
-        assert isinstance(past_values, _AdapterTensor)
-        assert isinstance(past_time_features, _AdapterTensor)
-        assert isinstance(static_real, _AdapterTensor)
-        assert isinstance(static_categorical, _AdapterTensor)
-        assert past_values.shape == (1, 4)
-        assert past_time_features.shape == (1, 4, 2)
-        assert static_real.shape == (1, 1)
-        assert static_categorical.shape == (1, 1)
-        assert encoder_model.encoder.inputs is not None
-        assert encoder_model.encoder.inputs.shape == (
-            (1, 2, 5) if model_type == "autoformer" else (1, 2, 4)
-        )
-        np.testing.assert_array_equal(
-            output.values,
-            encoder_model.encoder.hidden.mean(axis=1, dtype=np.float32),
-        )
+    encoder_model = EncoderModel()
+    output = _ADAPTERS["time_series_transformer"].embed(
+        encoder_model,
+        encoder_batch,
+        _AdapterTorch,
+        "cpu",
+    )
+    past_values = encoder_model.arguments["past_values"]
+    past_time_features = encoder_model.arguments["past_time_features"]
+    static_real = encoder_model.arguments["static_real_features"]
+    static_categorical = encoder_model.arguments["static_categorical_features"]
+    assert isinstance(past_values, _AdapterTensor)
+    assert isinstance(past_time_features, _AdapterTensor)
+    assert isinstance(static_real, _AdapterTensor)
+    assert isinstance(static_categorical, _AdapterTensor)
+    assert past_values.shape == (1, 4)
+    assert past_time_features.shape == (1, 4, 2)
+    assert static_real.shape == (1, 1)
+    assert static_categorical.shape == (1, 1)
+    assert encoder_model.encoder.inputs is not None
+    assert encoder_model.encoder.inputs.shape == (1, 2, 4)
+    np.testing.assert_array_equal(
+        output.values,
+        encoder_model.encoder.hidden.mean(axis=1, dtype=np.float32),
+    )
 
 
 def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts() -> None:
@@ -883,7 +812,7 @@ def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts()
             ),
         ),
     )
-    with pytest.raises(ValueError, match="rejects frequency, temporal, and static"):
+    with pytest.raises(ValueError, match="rejects temporal and static"):
         _ADAPTERS["patchtst"].validate(patch_config, rich_patch)
     with pytest.raises(ValueError, match="must be an integer"):
         _ADAPTERS["patchtst"].validate(
@@ -896,56 +825,7 @@ def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts()
             patch,
         )
 
-    timesfm_config = SimpleNamespace(context_length=8, patch_length=2, hidden_size=4)
-    timesfm = _transformers_model(
-        length=4,
-        channels=("target",),
-        roles=("target",),
-        normalization="timesfm-masked-mean-std-v1",
-        pooling="mean-valid-patches-v1",
-        frequency=duckpd.series_frequency_input(cadence=duckpd.series_cadence("hour")),
-    )
-    timesfm_input = cast("duckpd.SeriesEmbeddingInputSpec", timesfm.input)
-    with pytest.raises(ValueError, match="requires exactly one target"):
-        _ADAPTERS["timesfm"].validate(
-            timesfm_config,
-            replace(
-                timesfm,
-                input=replace(
-                    timesfm_input,
-                    channels=("target", "covariate"),
-                    roles=("target", "past_covariate"),
-                ),
-            ),
-        )
-    with pytest.raises(ValueError, match="rejects static"):
-        _ADAPTERS["timesfm"].validate(
-            timesfm_config,
-            replace(
-                timesfm,
-                input=replace(
-                    timesfm_input,
-                    frequency=None,
-                    static=(duckpd.series_static_input("scale", kind="real"),),
-                ),
-            ),
-        )
-    with pytest.raises(ValueError, match="exceeds"):
-        _ADAPTERS["timesfm"].validate(
-            timesfm_config,
-            replace(timesfm, input=replace(timesfm_input, length=12)),
-        )
-    with pytest.raises(ValueError, match="multiple"):
-        _ADAPTERS["timesfm"].validate(
-            timesfm_config,
-            replace(timesfm, input=replace(timesfm_input, length=3)),
-        )
-    with pytest.raises(ValueError, match="requires frequency"):
-        _ADAPTERS["timesfm"].validate(
-            timesfm_config,
-            replace(timesfm, input=replace(timesfm_input, frequency=None)),
-        )
-
+    timesfm25_config = SimpleNamespace(context_length=8, patch_length=2, hidden_size=4)
     timesfm25 = _transformers_model(
         length=4,
         channels=("target",),
@@ -954,16 +834,38 @@ def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts()
         pooling="mean-valid-patches-v1",
     )
     timesfm25_input = cast("duckpd.SeriesEmbeddingInputSpec", timesfm25.input)
-    with pytest.raises(ValueError, match="rejects frequency"):
+    with pytest.raises(ValueError, match="requires exactly one target"):
         _ADAPTERS["timesfm2_5"].validate(
-            timesfm_config,
+            timesfm25_config,
             replace(
                 timesfm25,
                 input=replace(
                     timesfm25_input,
-                    frequency=duckpd.series_frequency_input(cadence=duckpd.series_cadence("hour")),
+                    channels=("target", "covariate"),
+                    roles=("target", "past_covariate"),
                 ),
             ),
+        )
+    with pytest.raises(ValueError, match="rejects temporal and static"):
+        _ADAPTERS["timesfm2_5"].validate(
+            timesfm25_config,
+            replace(
+                timesfm25,
+                input=replace(
+                    timesfm25_input,
+                    static=(duckpd.series_static_input("scale", kind="real"),),
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="exceeds"):
+        _ADAPTERS["timesfm2_5"].validate(
+            timesfm25_config,
+            replace(timesfm25, input=replace(timesfm25_input, length=12)),
+        )
+    with pytest.raises(ValueError, match="multiple"):
+        _ADAPTERS["timesfm2_5"].validate(
+            timesfm25_config,
+            replace(timesfm25, input=replace(timesfm25_input, length=3)),
         )
 
     encoder = _transformers_model(
@@ -984,19 +886,19 @@ def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts()
         num_static_categorical_features=0,
         cardinality=[],
     )
-    _ADAPTERS["informer"].validate(encoder_config, encoder)
+    _ADAPTERS["time_series_transformer"].validate(encoder_config, encoder)
     with pytest.raises(ValueError, match="non-empty integer"):
-        _ADAPTERS["informer"].validate(
+        _ADAPTERS["time_series_transformer"].validate(
             config_with(encoder_config, lags_sequence=[]),
             encoder,
         )
     with pytest.raises(ValueError, match="non-empty integer"):
-        _ADAPTERS["informer"].validate(
+        _ADAPTERS["time_series_transformer"].validate(
             config_with(encoder_config, lags_sequence=["1"]),
             encoder,
         )
     with pytest.raises(ValueError, match="temporal declaration"):
-        _ADAPTERS["informer"].validate(
+        _ADAPTERS["time_series_transformer"].validate(
             config_with(encoder_config, num_time_features=1),
             encoder,
         )
@@ -1014,7 +916,7 @@ def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts()
         ),
     )
     with pytest.raises(ValueError, match="static categorical cardinalities"):
-        _ADAPTERS["informer"].validate(
+        _ADAPTERS["time_series_transformer"].validate(
             config_with(
                 encoder_config,
                 num_static_categorical_features=1,
@@ -1024,7 +926,7 @@ def test_transformers_series_adapters_reject_incompatible_checkpoint_contracts()
         )
     for cardinality in ("3", [0]):
         with pytest.raises(ValueError, match="positive integers"):
-            _ADAPTERS["informer"].validate(
+            _ADAPTERS["time_series_transformer"].validate(
                 config_with(
                     encoder_config,
                     num_static_categorical_features=1,

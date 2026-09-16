@@ -11,10 +11,10 @@ the [release policy](RELEASES.md).
 ### Added
 
 - A `TransformersSeriesEmbeddingProvider` adds attested bare-backbone embeddings
-  for PatchTST, PatchTSMixer, TimesFM 1/2 and 2.5, Time Series Transformer,
-  Informer, and Autoformer. Versioned cadence, frequency, temporal, static, and
-  rich-query contracts preserve corpus/query parity; catalog version 2 carries
-  the extended model input while legacy series fingerprints remain unchanged.
+  for PatchTST, PatchTSMixer, TimesFM 2.5, and Time Series Transformer.
+  Versioned cadence, temporal, static, and rich-query contracts preserve
+  corpus/query parity; catalog version 2 carries the extended model input while
+  legacy series fingerprints remain unchanged.
 
 - A built-in `MomentEmbeddingProvider` and `backend="moment"` integrate pinned
   MOMENT checkpoints with the shared model preparation, bounded Arrow inference,

@@ -13,7 +13,7 @@ custom-provider, and model-qualification contracts.
 Companion designs: [Text Embeddings and Semantic Search][design-text],
 [Vector Search][design-vector], [Feature Store Architecture][design-store],
 [Feature Store Embedding Metadata and Automatic Model Preparation][design-catalog],
-and the proposed [Transformers Series Embedding Provider](transformers-series-embeddings.md).
+and the implemented [Transformers Series Embedding Provider](transformers-series-embeddings.md).
 The companion text catalog behavior is implemented in the same
 `catalog_version: 1` schema.
 
@@ -45,6 +45,18 @@ The first useful release must work without downloading any model. Ordered return
 windows, explicitly normalized when appropriate, already provide interpretable
 pattern retrieval. Learned encoders are an optional improvement to evaluate, not
 a prerequisite for the feature.
+
+The evaluation unit is the complete representation recipe: checkpoint revision,
+input semantics, preprocessing, hidden-state selection, pooling or projection,
+normalization, and distance metric on a named task. Mechanical integration means
+only that the recipe produces valid vectors. It does not establish useful
+neighbors; missing retrieval measurements mean usefulness is unknown.
+
+Retrieval geometry and downstream predictive utility are separate questions.
+Either may justify retaining a recipe, but evidence for one must not be reported
+as evidence for the other. Univariate input remains a complete supported use
+case; multichannel recipes must state whether channel identity is preserved,
+ignored, or jointly modeled.
 
 ## Goals
 
@@ -1764,9 +1776,9 @@ deterministic baseline.
 
 The later
 [Transformers series adapter design](transformers-series-embeddings.md)
-implements the versioned temporal/static input extension, seven allowlisted bare
-Transformers architecture profiles, and catalog version 2. It preserves this
-document's native representation, bounded provider, persistence, retrieval, and
+implements the versioned temporal/static input extension, four allowlisted bare
+Transformers profiles, and catalog version 2. It preserves this document's
+native representation, bounded provider, persistence, retrieval, and
 qualification requirements; it does not retroactively change this historical
 baseline or qualify a checkpoint's retrieval quality.
 

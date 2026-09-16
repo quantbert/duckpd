@@ -1606,12 +1606,11 @@ def test_transformers_temporal_static_corpus_query_and_persistence_parity(
     )
 
 
-def test_temporal_feature_recipes_and_frequency_resolution_are_exact() -> None:
+def test_temporal_feature_recipes_are_exact() -> None:
     from duckpd._temporal import (
         cadence_nanoseconds,
         generate_series_time_features,
         reconstruct_series_timestamps,
-        resolve_timesfm_frequency,
         shift_series_timestamp,
         utc_nanoseconds,
     )
@@ -1689,26 +1688,6 @@ def test_temporal_feature_recipes_and_frequency_resolution_are_exact() -> None:
             length=2,
         )
 
-    frequency_cases: tuple[tuple[duckpd.SeriesCadenceUnit, int], ...] = (
-        ("minute", 0),
-        ("week", 1),
-        ("quarter", 2),
-    )
-    for unit, expected in frequency_cases:
-        cadence = duckpd.series_cadence(
-            unit,
-            mode="civil" if unit in {"week", "quarter"} else "elapsed",
-        )
-        assert resolve_timesfm_frequency(duckpd.series_frequency_input(cadence=cadence)) == expected
-    assert (
-        resolve_timesfm_frequency(
-            duckpd.series_frequency_input(
-                cadence=duckpd.series_cadence("year", mode="civil"),
-                timesfm_frequency=0,
-            )
-        )
-        == 0
-    )
     assert cadence_nanoseconds(duckpd.series_cadence("hour", multiple=2)) == 7_200_000_000_000
     resolved_epoch = reconstruct_series_timestamps(gluonts, datetime(1970, 1, 1), 1)[0]
     assert utc_nanoseconds(resolved_epoch) == 0
@@ -1843,13 +1822,6 @@ def test_fixed_grid_representation_matches_transformers_series_cadence() -> None
         (lambda: duckpd.series_cadence("hour", mode="civil"), "requires mode"),
         (lambda: duckpd.series_cadence("month"), "requires mode"),
         (
-            lambda: duckpd.SeriesFrequencyInputSpec(
-                duckpd.series_cadence("hour"),
-                True,  # type: ignore[arg-type]
-            ),
-            "timesfm_frequency",
-        ),
-        (
             lambda: duckpd.series_static_input("id", kind="real", cardinality=2),
             "must not define cardinality",
         ),
@@ -1879,7 +1851,6 @@ def test_transformers_series_public_contracts_reject_semantic_ambiguity(
 
 def test_transformers_series_exported_dataclasses_enforce_runtime_types() -> None:
     cadence_type = cast("Any", duckpd.SeriesCadenceSpec)
-    frequency_type = cast("Any", duckpd.SeriesFrequencyInputSpec)
     temporal_type = cast("Any", duckpd.SeriesTemporalInputSpec)
     static_type = cast("Any", duckpd.SeriesStaticInputSpec)
     input_type = cast("Any", duckpd.SeriesEmbeddingInputSpec)
@@ -1892,14 +1863,12 @@ def test_transformers_series_exported_dataclasses_enforce_runtime_types() -> Non
         recipe="gluonts-calendar-v1",
         features=("hour_of_day",),
     )
-    frequency = duckpd.series_frequency_input(cadence=hour)
     real = duckpd.series_static_input("scale", kind="real")
 
     invalid_factories: tuple[Callable[[], object], ...] = (
         lambda: cadence_type("millennium"),
         lambda: cadence_type("hour", False),
         lambda: cadence_type("day", 1, "clock"),
-        lambda: frequency_type("hour"),
         lambda: temporal_type("hour", "UTC", "last", "gluonts-calendar-v1", ("hour_of_day",)),
         lambda: temporal_type(hour, "", "last", "gluonts-calendar-v1", ("hour_of_day",)),
         lambda: temporal_type(
@@ -1919,23 +1888,13 @@ def test_transformers_series_exported_dataclasses_enforce_runtime_types() -> Non
         lambda: input_type(2, ("target",), ("past_covariate",), "none"),
         lambda: input_type(2, ("target",), ("target",), ""),
         lambda: input_type(2, ("target",), ("target",), "none", "future-abi"),
-        lambda: input_type(2, ("target",), ("target",), "none", None, frequency),
+        lambda: input_type(2, ("target",), ("target",), "none", None, temporal),
         lambda: input_type(
             2,
             ("target",),
             ("target",),
             "none",
             "transformers-series-v1",
-            frequency,
-            temporal,
-        ),
-        lambda: input_type(
-            2,
-            ("target",),
-            ("target",),
-            "none",
-            "transformers-series-v1",
-            None,
             None,
             (real, real),
         ),
@@ -2002,8 +1961,6 @@ def test_transformers_series_nested_parsers_reject_partial_or_coercive_input() -
         with pytest.raises((TypeError, ValueError)):
             duckpd.SeriesCadenceSpec.from_dict(value)
 
-    with pytest.raises((TypeError, ValueError)):
-        duckpd.SeriesFrequencyInputSpec.from_dict({"cadence": cadence, "timesfm_frequency": "0"})
     temporal_payload = cast("dict[str, object]", model_input["temporal"])
     with pytest.raises(TypeError, match="features must be an array"):
         duckpd.SeriesTemporalInputSpec.from_dict({**temporal_payload, "features": "hour_of_day"})

@@ -107,10 +107,7 @@ def _validate_embedding_models(
             and isinstance(raw_input, Mapping)
             and (
                 "schema_version" in raw_input
-                or any(
-                    field in raw_input
-                    for field in ("provider_abi", "frequency", "temporal", "static")
-                )
+                or any(field in raw_input for field in ("provider_abi", "temporal", "static"))
             )
         ):
             raise ValueError(

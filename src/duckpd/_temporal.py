@@ -14,7 +14,6 @@ import pandas as pd
 if TYPE_CHECKING:
     from duckpd.embeddings import (
         SeriesCadenceSpec,
-        SeriesFrequencyInputSpec,
         SeriesTemporalInputSpec,
     )
 
@@ -66,18 +65,6 @@ def cadence_nanoseconds(cadence: SeriesCadenceSpec) -> int:
     if cadence.mode != "elapsed" or cadence.unit not in _ELAPSED_SECONDS:
         raise ValueError("fixed-grid representations require an elapsed cadence")
     return cadence.multiple * _ELAPSED_SECONDS[cadence.unit] * 1_000_000_000
-
-
-def resolve_timesfm_frequency(specification: SeriesFrequencyInputSpec) -> int:
-    """Resolve the immutable TimesFM categorical frequency index."""
-    value = specification.timesfm_frequency
-    if value != "auto":
-        return value
-    if specification.cadence.unit in {"second", "minute", "hour", "day"}:
-        return 0
-    if specification.cadence.unit in {"week", "month"}:
-        return 1
-    return 2
 
 
 def _localize_naive(value: datetime, zone: ZoneInfo, *, field: str) -> datetime:

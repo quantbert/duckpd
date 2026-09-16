@@ -128,38 +128,6 @@ class SeriesCadenceSpec:
 
 
 @dataclass(frozen=True)
-class SeriesFrequencyInputSpec:
-    """Categorical TimesFM frequency contract."""
-
-    cadence: SeriesCadenceSpec
-    timesfm_frequency: Literal["auto", 0, 1, 2] = "auto"
-
-    def __post_init__(self) -> None:
-        if type(self.cadence) is not SeriesCadenceSpec:
-            raise TypeError("frequency cadence must be a SeriesCadenceSpec")
-        raw_frequency = cast("object", self.timesfm_frequency)
-        if raw_frequency not in {"auto", 0, 1, 2} or type(raw_frequency) is bool:
-            raise ValueError("timesfm_frequency must be 'auto', 0, 1, or 2")
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "cadence": self.cadence.to_dict(),
-            "timesfm_frequency": self.timesfm_frequency,
-        }
-
-    @classmethod
-    def from_dict(cls, value: object) -> SeriesFrequencyInputSpec:
-        data = _strict_object(
-            value,
-            fields={"cadence", "timesfm_frequency"},
-            required={"cadence", "timesfm_frequency"},
-            owner="series frequency input",
-        )
-        data["cadence"] = SeriesCadenceSpec.from_dict(data["cadence"])
-        return cls(**data)  # type: ignore[arg-type]
-
-
-@dataclass(frozen=True)
 class SeriesTemporalInputSpec:
     """Timestamp-derived model input contract."""
 
@@ -273,7 +241,6 @@ class SeriesEmbeddingInputSpec:
     roles: tuple[SeriesChannelRole, ...]
     normalization: str
     provider_abi: str | None = None
-    frequency: SeriesFrequencyInputSpec | None = None
     temporal: SeriesTemporalInputSpec | None = None
     static: tuple[SeriesStaticInputSpec, ...] = ()
 
@@ -302,8 +269,6 @@ class SeriesEmbeddingInputSpec:
             raise ValueError("normalization must be a non-empty string")
         if self.provider_abi not in {None, _TRANSFORMERS_SERIES_ABI}:
             raise ValueError(f"provider_abi must be {_TRANSFORMERS_SERIES_ABI!r}")
-        if self.frequency is not None and type(self.frequency) is not SeriesFrequencyInputSpec:
-            raise TypeError("frequency must be a SeriesFrequencyInputSpec or None")
         if self.temporal is not None and type(self.temporal) is not SeriesTemporalInputSpec:
             raise TypeError("temporal must be a SeriesTemporalInputSpec or None")
         if type(self.static) is not tuple or any(
@@ -312,11 +277,7 @@ class SeriesEmbeddingInputSpec:
             raise TypeError("static must be a tuple of SeriesStaticInputSpec values")
         if len({item.name for item in self.static}) != len(self.static):
             raise ValueError("static input names must be unique")
-        if self.frequency is not None and (self.temporal is not None or self.static):
-            raise ValueError("frequency is mutually exclusive with temporal and static inputs")
-        if self.provider_abi is None and (
-            self.frequency is not None or self.temporal is not None or self.static
-        ):
+        if self.provider_abi is None and (self.temporal is not None or self.static):
             raise ValueError("extended series inputs require provider_abi='transformers-series-v1'")
 
     @property
@@ -335,8 +296,6 @@ class SeriesEmbeddingInputSpec:
             return result
         result["schema_version"] = 2
         result["provider_abi"] = self.provider_abi
-        if self.frequency is not None:
-            result["frequency"] = self.frequency.to_dict()
         if self.temporal is not None:
             result["temporal"] = self.temporal.to_dict()
         if self.static:
@@ -363,7 +322,6 @@ class SeriesEmbeddingInputSpec:
                     "roles",
                     "normalization",
                     "provider_abi",
-                    "frequency",
                     "temporal",
                     "static",
                 },
@@ -387,8 +345,6 @@ class SeriesEmbeddingInputSpec:
             if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
                 raise TypeError(f"{field_name} must be an array")
             data[field_name] = tuple(cast("Sequence[object]", raw))
-        if "frequency" in data:
-            data["frequency"] = SeriesFrequencyInputSpec.from_dict(data["frequency"])
         if "temporal" in data:
             data["temporal"] = SeriesTemporalInputSpec.from_dict(data["temporal"])
         if "static" in data:
@@ -409,14 +365,6 @@ def series_cadence(
     mode: Literal["elapsed", "civil"] = "elapsed",
 ) -> SeriesCadenceSpec:
     return SeriesCadenceSpec(unit, multiple, mode)
-
-
-def series_frequency_input(
-    *,
-    cadence: SeriesCadenceSpec,
-    timesfm_frequency: Literal["auto", 0, 1, 2] = "auto",
-) -> SeriesFrequencyInputSpec:
-    return SeriesFrequencyInputSpec(cadence, timesfm_frequency)
 
 
 def series_temporal_input(
@@ -447,7 +395,6 @@ def series_embedding_input(
     roles: tuple[SeriesChannelRole, ...],
     normalization: str,
     provider_abi: str | None = None,
-    frequency: SeriesFrequencyInputSpec | None = None,
     temporal: SeriesTemporalInputSpec | None = None,
     static: tuple[SeriesStaticInputSpec, ...] = (),
 ) -> SeriesEmbeddingInputSpec:
@@ -458,7 +405,6 @@ def series_embedding_input(
         roles,
         normalization,
         provider_abi,
-        frequency,
         temporal,
         static,
     )

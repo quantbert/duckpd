@@ -20,7 +20,6 @@ from duckpd._temporal import (
     fixed_duration_ns,
     generate_series_time_features,
     resolve_series_timestamp,
-    resolve_timesfm_frequency,
 )
 from duckpd.embeddings import (
     EmbeddingModelSpec,
@@ -153,9 +152,7 @@ class SeriesRepresentationSpec:
             if self.encoder.normalize != self.unit_norm:
                 raise ValueError("encoder normalize must equal representation unit_norm")
             cadence = (
-                self.encoder.input.frequency.cadence
-                if self.encoder.input.frequency is not None
-                else self.encoder.input.temporal.cadence
+                self.encoder.input.temporal.cadence
                 if self.encoder.input.temporal is not None
                 else None
             )
@@ -665,10 +662,6 @@ def make_series_provider_batch(
     }
     if input_spec.provider_abi is not None:
         metadata[b"duckpd.provider_abi"] = input_spec.provider_abi.encode()
-    if input_spec.frequency is not None:
-        metadata[b"duckpd.timesfm_frequency"] = str(
-            resolve_timesfm_frequency(input_spec.frequency)
-        ).encode()
     if input_spec.temporal is not None:
         feature_width = input_spec.temporal.width
         temporal_values: list[float] = []

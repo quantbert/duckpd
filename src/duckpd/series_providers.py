@@ -430,10 +430,10 @@ class _PatchBackboneAdapter:
             specification.pooling,
             "mean-channels-patches-v1",
         )
-        if input_spec.frequency is not None or input_spec.temporal is not None or input_spec.static:
+        if input_spec.temporal is not None or input_spec.static:
             raise ValueError(
-                f"{specification.model} adapter {self.model_type} rejects frequency, temporal, "
-                "and static inputs"
+                f"{specification.model} adapter {self.model_type} rejects temporal and static "
+                "inputs"
             )
         if self.model_type == "patchtst" and (
             getattr(config, "do_mask_input", False) is True
@@ -475,28 +475,21 @@ class _PatchBackboneAdapter:
         return hidden.to(dtype=torch.float32).mean(dim=(1, 2))
 
 
-class _TimesFmAdapter:
-    model_type = "timesfm"
-    class_name = "TimesFmModel"
+class _TimesFm25Adapter:
+    model_type = "timesfm2_5"
+    class_name = "TimesFm2_5Model"
 
     def validate(self, config: Any, specification: EmbeddingModelSpec) -> None:
-        self._validate_common(config, specification)
-        input_spec = cast("SeriesEmbeddingInputSpec", specification.input)
-        if input_spec.frequency is None or input_spec.temporal is not None:
-            raise ValueError(
-                f"{specification.model} adapter timesfm requires frequency and rejects temporal"
-            )
-
-    def _validate_common(self, config: Any, specification: EmbeddingModelSpec) -> None:
         input_spec = cast("SeriesEmbeddingInputSpec", specification.input)
         if input_spec.roles != ("target",) or len(input_spec.channels) != 1:
             raise ValueError(
                 f"{specification.model} adapter {self.model_type} requires exactly one target "
                 "channel and rejects covariates"
             )
-        if input_spec.static:
+        if input_spec.temporal is not None or input_spec.static:
             raise ValueError(
-                f"{specification.model} adapter {self.model_type} rejects static inputs"
+                f"{specification.model} adapter {self.model_type} rejects temporal and static "
+                "inputs"
             )
         if input_spec.length > _config_int(config, "context_length"):
             raise ValueError(
@@ -528,67 +521,8 @@ class _TimesFmAdapter:
             self.model_type,
             "input.normalization",
             input_spec.normalization,
-            (
-                "timesfm2_5-config-normalization-v1"
-                if self.model_type == "timesfm2_5"
-                else "timesfm-masked-mean-std-v1"
-            ),
+            "timesfm2_5-config-normalization-v1",
         )
-
-    def embed(self, model: Any, batch: pa.RecordBatch, torch: Any, device: str) -> Any:
-        specification = cast("EmbeddingModelSpec", model._duckpd_specification)
-        input_spec = cast("SeriesEmbeddingInputSpec", specification.input)
-        values = _channel_tensors(batch, input_spec, torch=torch, device=device)[0]
-        padding = torch.zeros(
-            (batch.num_rows, input_spec.length),
-            dtype=torch.long,
-            device=device,
-        )
-        raw_frequency = (batch.schema.metadata or {}).get(b"duckpd.timesfm_frequency")
-        if raw_frequency not in {b"0", b"1", b"2"}:
-            raise ValueError(
-                f"{specification.model} adapter timesfm requires canonical frequency metadata"
-            )
-        frequency = torch.full(
-            (batch.num_rows,),
-            int(raw_frequency),
-            dtype=torch.long,
-            device=device,
-        )
-        hidden = _hidden_state(
-            model(
-                past_values=values,
-                past_values_padding=padding,
-                freq=frequency,
-            ),
-            model=specification.model,
-            adapter=self.model_type,
-        )
-        expected = (
-            batch.num_rows,
-            input_spec.length // _config_int(model.config, "patch_length"),
-            specification.dimension,
-        )
-        _validate_hidden(
-            hidden,
-            expected=expected,
-            model=specification.model,
-            adapter=self.model_type,
-        )
-        return hidden.to(dtype=torch.float32).mean(dim=1)
-
-
-class _TimesFm25Adapter(_TimesFmAdapter):
-    model_type = "timesfm2_5"
-    class_name = "TimesFm2_5Model"
-
-    def validate(self, config: Any, specification: EmbeddingModelSpec) -> None:
-        self._validate_common(config, specification)
-        input_spec = cast("SeriesEmbeddingInputSpec", specification.input)
-        if input_spec.frequency is not None or input_spec.temporal is not None:
-            raise ValueError(
-                f"{specification.model} adapter timesfm2_5 rejects frequency and temporal inputs"
-            )
 
     def embed(self, model: Any, batch: pa.RecordBatch, torch: Any, device: str) -> Any:
         specification = cast("EmbeddingModelSpec", model._duckpd_specification)
@@ -619,17 +553,12 @@ class _TimesFm25Adapter(_TimesFmAdapter):
 
 
 class _EncoderDecoderAdapter:
-    def __init__(self, model_type: str, class_name: str, *, autoformer: bool = False) -> None:
+    def __init__(self, model_type: str, class_name: str) -> None:
         self.model_type = model_type
         self.class_name = class_name
-        self._autoformer = autoformer
 
     def validate(self, config: Any, specification: EmbeddingModelSpec) -> None:
         input_spec = cast("SeriesEmbeddingInputSpec", specification.input)
-        if input_spec.frequency is not None:
-            raise ValueError(
-                f"{specification.model} adapter {self.model_type} rejects frequency input"
-            )
         _require_equal(
             specification,
             self.model_type,
@@ -823,16 +752,7 @@ class _EncoderDecoderAdapter:
             static_real_features=static_real,
         )
         context_length = _config_int(model.config, "context_length")
-        if self._autoformer:
-            encoder_input = torch.cat(
-                (
-                    network[0][:, :context_length, ...],
-                    network[1][:, :context_length, ...],
-                ),
-                dim=-1,
-            )
-        else:
-            encoder_input = network[0][:, :context_length, ...]
+        encoder_input = network[0][:, :context_length, ...]
         output = model.get_encoder()(inputs_embeds=encoder_input, return_dict=True)
         hidden = _hidden_state(
             output,
@@ -860,17 +780,10 @@ _ADAPTERS: dict[str, _TransformersSeriesAdapter] = {
         "PatchTSMixerModel",
         "patchtsmixer-config-scaling-v1",
     ),
-    "timesfm": _TimesFmAdapter(),
     "timesfm2_5": _TimesFm25Adapter(),
     "time_series_transformer": _EncoderDecoderAdapter(
         "time_series_transformer",
         "TimeSeriesTransformerModel",
-    ),
-    "informer": _EncoderDecoderAdapter("informer", "InformerModel"),
-    "autoformer": _EncoderDecoderAdapter(
-        "autoformer",
-        "AutoformerModel",
-        autoformer=True,
     ),
 }
 
@@ -1305,11 +1218,6 @@ class TransformersSeriesEmbeddingProvider:
             expected_metadata[b"duckpd.time_feature_shape"] = (
                 f"{input_spec.length},{input_spec.temporal.width}".encode()
             )
-        if input_spec.frequency is not None:
-            frequency = (batch.schema.metadata or {}).get(b"duckpd.timesfm_frequency")
-            if frequency not in {b"0", b"1", b"2"}:
-                raise ValueError(f"{self._specification.model} adapter requires frequency metadata")
-            expected_metadata[b"duckpd.timesfm_frequency"] = frequency
         metadata = batch.schema.metadata or {}
         if metadata != expected_metadata:
             raise ValueError(
